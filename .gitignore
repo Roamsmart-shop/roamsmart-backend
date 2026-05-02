@@ -1,44 +1,6 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
-
-# Database
-*.db
-*.sqlite
-*.sqlite3
-
-# Environment variables
-.env
-.env.local
-.env.production
-
-# Uploads
-uploads/
-profile_pics/
-
-# Logs
-logs/
-*.log
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# Flask
-instance/
-.webassets-cache
-
-# Railway
-.railway/.env 
-.env.local 
-.env.production 
+".env" 
+".env.local" 
+".env.production" 
+"__pycache__/" 
+"*.pyc" 
+".env.*.example" 
