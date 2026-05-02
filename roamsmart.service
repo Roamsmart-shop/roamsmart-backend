@@ -1,0 +1,25 @@
+# /etc/systemd/system/roamsmart.service
+
+[Unit]
+Description=Roamsmart Digital Service
+After=network.target postgresql.target mysql.target
+Wants=network.target
+
+[Service]
+Type=notify
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/roamsmart
+Environment="PATH=/var/www/roamsmart/venv/bin"
+Environment="FLASK_ENV=production"
+EnvironmentFile=/var/www/roamsmart/.env
+ExecStart=/var/www/roamsmart/venv/bin/gunicorn -c gunicorn_config.py wsgi:app
+ExecReload=/bin/kill -s HUP $MAINPID
+KillMode=mixed
+TimeoutStopSec=5
+PrivateTmp=true
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
