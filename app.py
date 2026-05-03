@@ -1110,7 +1110,21 @@ def init_db():
 # ========== PROFILE PICTURE UPLOAD ==========
 
 import traceback
-
+@app.route('/api/init-db', methods=['GET'])
+def init_database_endpoint():
+    """HTTP endpoint to initialize database - call this once after deployment"""
+    try:
+        from app import init_db
+        init_db()
+        return jsonify({
+            'success': True,
+            'message': 'Database initialized successfully!',
+            'admin_email': COMPANY_ADMIN_EMAIL,
+            'admin_password': 'Roamsmart123@$'
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+    
 @app.route('/api/user/avatar', methods=['POST'])
 @token_required
 def upload_avatar():
