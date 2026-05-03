@@ -102,7 +102,7 @@ db.init_app(app)
 
 # Get allowed origins from environment variable or use defaults
 def get_allowed_origins():
-    """Get allowed origins for CORS (supports Railway deployment)"""
+    """Get allowed origins for CORS (supports Railway and Vercel deployment)"""
     # Default local origins
     origins = [
         'http://localhost:3000',
@@ -115,6 +115,8 @@ def get_allowed_origins():
             'https://roamsmart.shop',
             'https://www.roamsmart.shop',
             'https://api.roamsmart.shop',
+            'https://roamsmart-frontend.vercel.app',  # Add Vercel frontend
+            'https://roamsmart-frontend-git-main-roamsmart-shops-projects.vercel.app',  # Vercel preview
         ])
     
     # Add Railway frontend URL if available
@@ -126,6 +128,9 @@ def get_allowed_origins():
     railway_backend = os.environ.get('RAILWAY_PUBLIC_DOMAIN')
     if railway_backend:
         origins.append(f'https://{railway_backend}')
+    
+    # Also allow any vercel.app subdomain
+    origins.append('https://*.vercel.app')
     
     # Remove duplicates
     return list(dict.fromkeys(origins))
