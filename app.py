@@ -142,7 +142,9 @@ ALLOWED_HEADERS = [
     'X-Requested-With',
     'X-Company',
     'X-Request-Time',
-    'X-Price-Auth'
+    'X-Price-Auth',
+    'X-App-Version'  
+
 ]
 
 # Define allowed methods
@@ -153,16 +155,14 @@ ALLOWED_ORIGINS = get_allowed_origins()
 
 print(f"[CORS] Allowed origins: {ALLOWED_ORIGINS}")
 
-# Configure CORS
 CORS(app,
      origins=ALLOWED_ORIGINS,
      supports_credentials=True,
-     allow_headers=ALLOWED_HEADERS,
+     allow_headers=['Content-Type', 'Authorization', 'X-Requested-With', 'X-Company', 'X-Request-Time', 'X-Price-Auth', 'X-App-Version'],
      methods=ALLOWED_METHODS,
      expose_headers=ALLOWED_HEADERS,
-     max_age=3600  # Cache preflight results for 1 hour
+     max_age=3600
 )
-
 # 4. Initialize Rate Limiter
 limiter = Limiter(app=app, key_func=get_remote_address, default_limits=["100 per minute"])
 
