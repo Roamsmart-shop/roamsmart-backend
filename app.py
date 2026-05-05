@@ -1858,72 +1858,6 @@ def resend_registration_code():
         'error': 'No pending registration found. Please register again.'
     }), 400
 
-
-# ========== CORRECT REGISTER ENDPOINT (Keep this one, delete the duplicate) ==========
-
-@app.route('/api/auth/register', methods=['POST'])
-@limiter.limit("5 per minute")
-def register():
-    """Register new user - Send SMS verification first, email fallback"""
-    data = request.get_json()
-    
-    username = data.get('username')
-    email = data.get('email')
-    phone = data.get('phone')
-    password = data.get('password')
-    referral_code = data.get('referral_code')
-    
-    if not all([username, email, phone, password]):
-        return jsonify({'success': False, 'error': 'All fields required'}), 400
-    
-    if User.query.filter_by(email=email).first():
-        return jsonify({'success': False, 'error': 'Email already registered'}), 400
-    
-    if User.query.filter_by(phone=phone).first():
-        return jsonify({'success': False, 'error': 'Phone already registered'}), 400
-    
-    verification_code = generate_verification_code()
-    
-    # Store in session
-    session[f'temp_user_{email}'] = {
-        'username': username,
-        'email': email,
-        'phone': phone,
-        'password': password,
-        'referral_code': referral_code,
-        'verification_code': verification_code,
-        'expires': (datetime.utcnow() + timedelta(minutes=10)).isoformat()
-    }
-    session['temp_user'] = session[f'temp_user_{email}']
-    session.permanent = True
-    
-    print(f"[REGISTER] Verification code: {verification_code}")
-    
-    # Try SMS first, then email fallback
-    sms_sent = send_verification_sms(phone, f"Your Roamsmart verification code is: {verification_code}")
-    
-    if sms_sent:
-        return jsonify({
-            'success': True,
-            'message': 'Verification code sent to your phone via SMS',
-            'method': 'sms',
-            'data': {'phone': phone, 'expires_in': 10}
-        })
-    else:
-        # SMS failed - send email
-        email_sent = send_verification_email(email, username, verification_code)
-        if email_sent:
-            return jsonify({
-                'success': True,
-                'message': 'SMS delivery failed. Verification code sent to your email.',
-                'method': 'email',
-                'data': {'email': email, 'expires_in': 10}
-            })
-        else:
-            return jsonify({
-                'success': False, 
-                'error': 'Failed to send verification. Please try again.'
-            }), 500
 # Add these imports at the top
 import secrets
 from datetime import datetime, timedelta
@@ -2113,276 +2047,345 @@ def verify_reset_token():
         print(f"[PASSWORD] Verify token error: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
+# ========== TEMPORARY STORAGE (Replace with Redis in production) ==========
+temp_storage = {}
+
+
 @app.route('/api/auth/verify-code', methods=['POST'])
 @limiter.limit("10 per minute")
 def verify_registration_code():
-    """Verify registration code and complete registration"""
-    data = request.get_json()
-    user_code = data.get('code')
-    email = data.get('email')
-    
-    print(f"[VERIFY] Received code: {user_code}")
-    print(f"[VERIFY] Email from request: {email}")
-    print(f"[VERIFY] Session ID: {request.cookies.get('session')}")
-    
-    temp_user = None
-    
-    if email:
-        temp_user = session.get(f'temp_user_{email}')
-    
-    if not temp_user:
-        temp_user = session.get('temp_user')
-    
-    if not temp_user:
-        print(f"[VERIFY] No temp_user found in session")
-        print(f"[VERIFY] Available session keys: {list(session.keys())}")
+    """Verify registration code and complete registration (NO SESSIONS)"""
+    try:
+        data = request.get_json()
+        user_code = data.get('code')
+        email = data.get('email')
+        
+        print(f"[VERIFY] Received code: {user_code}")
+        print(f"[VERIFY] Email: {email}")
+        
+        # Get temp data from memory storage (not session)
+        temp_user = temp_storage.get(email)
+        
+        if not temp_user:
+            print(f"[VERIFY] No pending registration found for {email}")
+            return jsonify({
+                'success': False, 
+                'error': 'No pending registration found. Please register again.'
+            }), 400
+        
+        # Check expiration
+        expires_at = datetime.fromisoformat(temp_user['expires'])
+        if datetime.utcnow() > expires_at:
+            # Clean up expired entry
+            temp_storage.pop(email, None)
+            return jsonify({
+                'success': False, 
+                'error': 'Verification code expired. Please register again.'
+            }), 400
+        
+        # Verify code
+        if user_code != temp_user.get('verification_code'):
+            return jsonify({'success': False, 'error': 'Invalid verification code'}), 400
+        
+        # Check if user already exists
+        existing_user = User.query.filter_by(email=temp_user['email']).first()
+        
+        if existing_user:
+            if not existing_user.email_verified:
+                existing_user.email_verified = True
+                existing_user.email_verified_at = datetime.utcnow()
+                db.session.commit()
+                
+                # Clean up temp storage
+                temp_storage.pop(email, None)
+                
+                send_welcome_email(existing_user.email, existing_user.username, 'user')
+                token = existing_user.generate_token()
+                
+                return jsonify({
+                    'success': True,
+                    'message': 'Email verified successfully!',
+                    'token': token,
+                    'user': existing_user.to_dict()
+                })
+            else:
+                return jsonify({
+                    'success': False,
+                    'error': 'Email already verified. Please login.'
+                }), 400
+        
+        # Create new user
+        user_ref_code = f"REF{uuid.uuid4().hex[:8].upper()}"
+        
+        new_user = User(
+            username=temp_user['username'],
+            email=temp_user['email'],
+            phone=temp_user['phone'],
+            role='user',
+            wallet_balance=0.0,
+            referral_code=user_ref_code,
+            email_verified=True,
+            email_verified_at=datetime.utcnow()
+        )
+        new_user.set_password(temp_user['password'])
+        
+        if temp_user.get('referral_code'):
+            referrer = User.query.filter_by(referral_code=temp_user['referral_code']).first()
+            if referrer:
+                new_user.referred_by = referrer.id
+                
+                referral = Referral(
+                    referrer_id=referrer.id,
+                    referred_id=new_user.id,
+                    status='pending',
+                    reward_amount=5.00
+                )
+                db.session.add(referral)
+        
+        db.session.add(new_user)
+        db.session.commit()
+        
+        # Clean up temp storage
+        temp_storage.pop(email, None)
+        
+        send_welcome_email(new_user.email, new_user.username, 'user')
+        
+        token = new_user.generate_token()
+        
         return jsonify({
-            'success': False, 
-            'error': 'Session expired. Please restart registration'
-        }), 400
-    
-    if datetime.fromisoformat(temp_user['expires']) < datetime.utcnow():
-        session.pop('temp_user', None)
-        if email:
-            session.pop(f'temp_user_{email}', None)
-        return jsonify({
-            'success': False, 
-            'error': 'Verification code expired. Please register again.'
-        }), 400
-    
-    if user_code != temp_user.get('verification_code'):
-        return jsonify({'success': False, 'error': 'Invalid verification code'}), 400
-    
-    existing_user = User.query.filter_by(email=temp_user['email']).first()
-    
-    if existing_user:
-        if not existing_user.email_verified:
-            existing_user.email_verified = True
-            existing_user.email_verified_at = datetime.utcnow()
-            db.session.commit()
-            
-            session.pop('temp_user', None)
-            if email:
-                session.pop(f'temp_user_{email}', None)
-            
-            send_welcome_email(existing_user.email, existing_user.username, 'user')
-            token = existing_user.generate_token()
-            
+            'success': True,
+            'message': f'Registration successful on {COMPANY_NAME}!',
+            'token': token,
+            'user': new_user.to_dict()
+        })
+        
+    except Exception as e:
+        print(f"Verify code error: {e}")
+        import traceback
+        traceback.print_exc()
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/auth/register', methods=['POST'])
+@limiter.limit("5 per minute")
+def register():
+    """Register new user - Send SMS verification first, email fallback (NO SESSIONS)"""
+    try:
+        data = request.get_json()
+        
+        username = data.get('username')
+        email = data.get('email')
+        phone = data.get('phone')
+        password = data.get('password')
+        referral_code = data.get('referral_code')
+        
+        if not all([username, email, phone, password]):
+            return jsonify({'success': False, 'error': 'All fields required'}), 400
+        
+        # Check if user exists
+        if User.query.filter_by(email=email).first():
+            return jsonify({'success': False, 'error': 'Email already registered'}), 400
+        
+        if User.query.filter_by(phone=phone).first():
+            return jsonify({'success': False, 'error': 'Phone already registered'}), 400
+        
+        verification_code = verification_service.generate_verification_code()
+        
+        # Store in memory storage (not session)
+        temp_storage[email] = {
+            'username': username,
+            'email': email,
+            'phone': phone,
+            'password': password,
+            'referral_code': referral_code,
+            'verification_code': verification_code,
+            'expires': (datetime.utcnow() + timedelta(minutes=10)).isoformat()
+        }
+        
+        print(f"[REGISTER] Stored verification for email: {email}")
+        print(f"[REGISTER] Verification code: {verification_code}")
+        
+        # Try SMS first, then email fallback
+        sms_sent = verification_service.send_sms(phone, verification_code)
+        
+        if sms_sent.get('success'):
             return jsonify({
                 'success': True,
-                'message': 'Email verified successfully!',
-                'token': token,
-                'user': existing_user.to_dict()
+                'message': 'Verification code sent to your phone via SMS',
+                'method': 'sms',
+                'data': {'phone': phone, 'email': email, 'expires_in': 10}
             })
         else:
-            return jsonify({
-                'success': False,
-                'error': 'Email already verified. Please login.'
-            }), 400
-    
-    user_ref_code = f"REF{uuid.uuid4().hex[:8].upper()}"
-    
-    new_user = User(
-        username=temp_user['username'],
-        email=temp_user['email'],
-        phone=temp_user['phone'],
-        role='user',
-        wallet_balance=0.0,
-        referral_code=user_ref_code,
-        email_verified=True,
-        email_verified_at=datetime.utcnow()
-    )
-    new_user.set_password(temp_user['password'])
-    
-    if temp_user.get('referral_code'):
-        referrer = User.query.filter_by(referral_code=temp_user['referral_code']).first()
-        if referrer:
-            new_user.referred_by = referrer.id
-            
-            referral = Referral(
-                referrer_id=referrer.id,
-                referred_id=new_user.id,
-                status='pending',
-                reward_amount=5.00
-            )
-            db.session.add(referral)
-    
-    db.session.add(new_user)
-    db.session.commit()
-    
-    session.pop('temp_user', None)
-    if email:
-        session.pop(f'temp_user_{email}', None)
-    
-    send_welcome_email(new_user.email, new_user.username, 'user')
-    
-    token = new_user.generate_token()
-    
-    return jsonify({
-        'success': True,
-        'message': f'Registration successful on {COMPANY_NAME}!',
-        'token': token,
-        'user': new_user.to_dict()
-    })
+            # SMS failed - send email
+            email_sent = send_verification_email(email, username, verification_code)
+            if email_sent:
+                return jsonify({
+                    'success': True,
+                    'message': 'SMS delivery failed. Verification code sent to your email.',
+                    'method': 'email',
+                    'data': {'email': email, 'expires_in': 10}
+                })
+            else:
+                return jsonify({
+                    'success': False, 
+                    'error': 'Failed to send verification. Please try again.'
+                }), 500
+        
+    except Exception as e:
+        print(f"Register error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 @app.route('/api/auth/login', methods=['POST'])
 @limiter.limit("10 per minute")
 def login():
-    """Login user - Support phone verification as alternative"""
-    data = request.get_json()
-    email = data.get('email')
-    password = data.get('password')
-    remember_me = data.get('remember_me', False)
-    
-    if not email or not password:
-        return jsonify({'success': False, 'error': 'Email and password required'}), 400
-    
-    user = User.query.filter_by(email=email).first()
-    
-    if not user or not user.check_password(password):
-        return jsonify({'success': False, 'error': 'Invalid credentials'}), 401
-    
-    # Email verification check
-    if not user.email_verified:
-        verification_code = generate_verification_code()
+    """Login user - Support phone verification as alternative (NO SESSIONS)"""
+    try:
+        data = request.get_json()
+        email = data.get('email')
+        password = data.get('password')
+        remember_me = data.get('remember_me', False)
         
-        session['verify_user'] = {
-            'user_id': user.id,
-            'code': verification_code,
-            'expires': (datetime.utcnow() + timedelta(minutes=10)).isoformat()
-        }
+        if not email or not password:
+            return jsonify({'success': False, 'error': 'Email and password required'}), 400
         
-        # Try SMS first, then email
-        sms_sent = send_verification_sms(user.phone, f"Your Roamsmart verification code is: {verification_code}")
+        user = User.query.filter_by(email=email).first()
         
-        if sms_sent:
-            return jsonify({
-                'success': False,
-                'requires_verification': True,
-                'method': 'sms',
-                'message': 'Please verify your account. A verification code has been sent to your phone.',
-                'data': {'phone': user.phone}
-            }), 403
-        else:
-            send_verification_email(user.email, user.username, verification_code)
-            return jsonify({
-                'success': False,
-                'requires_verification': True,
-                'method': 'email',
-                'message': 'Please verify your email address. A verification code has been sent to your email.',
-                'data': {'email': user.email}
-            }), 403
-    
-    # 2FA with phone verification
-    if user.two_factor_enabled:
-        verification_code = generate_verification_code()
+        if not user or not user.check_password(password):
+            return jsonify({'success': False, 'error': 'Invalid credentials'}), 401
         
-        # Store 2FA code
-        session['2fa_user'] = {
-            'user_id': user.id,
-            'code': verification_code,
-            'expires': (datetime.utcnow() + timedelta(minutes=5)).isoformat()
-        }
-        
-        # Send SMS for 2FA
-        sms_sent = send_verification_sms(user.phone, f"Your {COMPANY_SHORT} 2FA code is: {verification_code}")
-        
-        if sms_sent:
-            return jsonify({
-                'success': False,
-                'requires_2fa': True,
-                'method': 'sms',
+        # Email verification check
+        if not user.email_verified:
+            verification_code = verification_service.generate_verification_code()
+            
+            # Store verification in memory (not session)
+            temp_storage[f"verify_{user.id}"] = {
                 'user_id': user.id,
-                'message': '2FA verification required. Code sent to your phone.'
-            }), 200
+                'code': verification_code,
+                'expires': (datetime.utcnow() + timedelta(minutes=10)).isoformat()
+            }
+            
+            # Try SMS first, then email
+            sms_sent = verification_service.send_sms(user.phone, verification_code)
+            
+            if sms_sent.get('success'):
+                return jsonify({
+                    'success': False,
+                    'requires_verification': True,
+                    'method': 'sms',
+                    'message': 'Please verify your account. A verification code has been sent to your phone.',
+                    'data': {'phone': user.phone, 'user_id': user.id}
+                }), 403
+            else:
+                send_verification_email(user.email, user.username, verification_code)
+                return jsonify({
+                    'success': False,
+                    'requires_verification': True,
+                    'method': 'email',
+                    'message': 'Please verify your email address. A verification code has been sent to your email.',
+                    'data': {'email': user.email, 'user_id': user.id}
+                }), 403
+        
+        user.last_login = datetime.utcnow()
+        db.session.commit()
+        
+        token = user.generate_token()
+        
+        if user.role == 'super_admin':
+            redirect_url = '/admin'
+        elif user.role == 'admin':
+            redirect_url = '/admin'
+        elif user.is_agent and user.agent_approved:
+            redirect_url = '/agent'
         else:
-            return jsonify({
-                'success': False,
-                'requires_2fa': True,
-                'method': 'email',
-                'user_id': user.id,
-                'message': '2FA verification required. Check your email for code.'
-            }), 200
-    
-    user.last_login = datetime.utcnow()
-    db.session.commit()
-    
-    token = user.generate_token()
-    
-    if user.role == 'super_admin':
-        redirect_url = '/admin'
-    elif user.role == 'admin':
-        redirect_url = '/admin'
-    elif user.is_agent and user.agent_approved:
-        redirect_url = '/agent'
-    else:
-        redirect_url = '/dashboard'
-    
-    log_activity(user.id, 'login', f'User logged in from {request.remote_addr}')
-    
-    return jsonify({
-        'success': True,
-        'token': token,
-        'user': user.to_dict(),
-        'redirect': redirect_url
-    })
+            redirect_url = '/dashboard'
+        
+        return jsonify({
+            'success': True,
+            'token': token,
+            'user': user.to_dict(),
+            'redirect': redirect_url
+        })
+        
+    except Exception as e:
+        print(f"Login error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 
 @app.route('/api/auth/verify-login-code', methods=['POST'])
 @limiter.limit("10 per minute")
 def verify_login_code():
-    """Verify code for unverified email login"""
-    data = request.get_json()
-    user_code = data.get('code')
-    
-    verify_data = session.get('verify_user')
-    
-    if not verify_data:
+    """Verify code for unverified email login (NO SESSIONS)"""
+    try:
+        data = request.get_json()
+        user_code = data.get('code')
+        user_id = data.get('user_id')
+        
+        if not user_id:
+            return jsonify({'success': False, 'error': 'User ID required'}), 400
+        
+        # Get verification data from memory storage
+        verify_data = temp_storage.get(f"verify_{user_id}")
+        
+        if not verify_data:
+            return jsonify({
+                'success': False,
+                'error': 'No verification found. Please login again.'
+            }), 400
+        
+        expires_at = datetime.fromisoformat(verify_data['expires'])
+        if datetime.utcnow() > expires_at:
+            temp_storage.pop(f"verify_{user_id}", None)
+            return jsonify({
+                'success': False,
+                'error': 'Verification code expired. Please login again.'
+            }), 400
+        
+        if user_code != verify_data.get('code'):
+            return jsonify({'success': False, 'error': 'Invalid verification code'}), 400
+        
+        user = User.query.get(user_id)
+        
+        if not user:
+            temp_storage.pop(f"verify_{user_id}", None)
+            return jsonify({'success': False, 'error': 'User not found'}), 404
+        
+        user.email_verified = True
+        user.email_verified_at = datetime.utcnow()
+        db.session.commit()
+        
+        # Clean up temp storage
+        temp_storage.pop(f"verify_{user_id}", None)
+        
+        token = user.generate_token()
+        
+        if user.role == 'super_admin':
+            redirect_url = '/admin'
+        elif user.role == 'admin':
+            redirect_url = '/admin'
+        elif user.is_agent and user.agent_approved:
+            redirect_url = '/agent'
+        else:
+            redirect_url = '/dashboard'
+        
         return jsonify({
-            'success': False,
-            'error': 'Session expired. Please login again.'
-        }), 400
-    
-    if datetime.fromisoformat(verify_data['expires']) < datetime.utcnow():
-        session.pop('verify_user', None)
-        return jsonify({
-            'success': False,
-            'error': 'Verification code expired. Please login again.'
-        }), 400
-    
-    if user_code != verify_data.get('code'):
-        return jsonify({'success': False, 'error': 'Invalid verification code'}), 400
-    
-    user = User.query.get(verify_data['user_id'])
-    
-    if not user:
-        session.pop('verify_user', None)
-        return jsonify({'success': False, 'error': 'User not found'}), 404
-    
-    user.email_verified = True
-    user.email_verified_at = datetime.utcnow()
-    db.session.commit()
-    
-    session.pop('verify_user', None)
-    
-    token = user.generate_token()
-    
-    if user.role == 'super_admin':
-        redirect_url = '/admin'
-    elif user.role == 'admin':
-        redirect_url = '/admin'
-    elif user.is_agent and user.agent_approved:
-        redirect_url = '/agent'
-    else:
-        redirect_url = '/dashboard'
-    
-    return jsonify({
-        'success': True,
-        'message': 'Email verified successfully!',
-        'token': token,
-        'user': user.to_dict(),
-        'redirect': redirect_url
-    })
+            'success': True,
+            'message': 'Email verified successfully!',
+            'token': token,
+            'user': user.to_dict(),
+            'redirect': redirect_url
+        })
+        
+    except Exception as e:
+        print(f"Verify login code error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 @app.route('/api/auth/check-verification', methods=['GET'])
