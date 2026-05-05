@@ -1,7 +1,4 @@
-"""
-Roamsmart Digital Service - Complete Backend API v2.0
-Features: SMS, Email, 2FA, KYC, Webhooks, Referrals, Store Management, Analytics
-"""
+
 import os
 import uuid
 import re
@@ -11,24 +8,26 @@ import hashlib
 import json
 import smtplib
 from io import BytesIO
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from functools import wraps
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+
 import bcrypt
 import pyotp
 import qrcode
 import requests
 import sendgrid
 from sendgrid.helpers.mail import Mail, Email, To, Content
-from flask import Flask, jsonify, request, send_from_directory, g, session
+
+from flask import Flask, jsonify, request, send_from_directory, g
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from flask_socketio import SocketIO, emit
-from flask_session import Session
 from sqlalchemy import func, and_, or_
 from werkzeug.utils import secure_filename
+
 from config import config
 from models import *
 
@@ -41,27 +40,21 @@ COMPANY_PHONE = "0557388622"
 COMPANY_WEBSITE = "https://roamsmart.shop"
 COMPANY_DOMAIN = "roamsmart.shop"
 
-# ========== INITIALIZE FLASK APP FIRST ==========
+# ========== TEMPORARY STORAGE FOR VERIFICATION (NO SESSIONS) ==========
+# Use a simple dict for storing verification codes
+# In production, replace with Redis
+temp_storage = {}
+
+# ========== INITIALIZE FLASK APP ==========
 app = Flask(__name__)
 
 # ========== LOAD CONFIGURATION ==========
 env = os.environ.get('FLASK_ENV', 'production')
 app.config.from_object(config[env])
 
-# Session Configuration for cross-domain
+# ========== BASIC CONFIGURATION (NO SESSIONS) ==========
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your-secret-key-here')
-app.config['SESSION_TYPE'] = 'filesystem'
-app.config['SESSION_PERMANENT'] = True
-app.config['SESSION_USE_SIGNER'] = True
-app.config['SESSION_COOKIE_SECURE'] = os.environ.get('FLASK_ENV') == 'production'
-app.config['SESSION_COOKIE_HTTPONLY'] = True
-app.config['SESSION_COOKIE_SAMESITE'] = 'None'  # Change to 'None' for cross-domain
-app.config['SESSION_COOKIE_PATH'] = '/'
-app.config['SESSION_COOKIE_DOMAIN'] = None
 
-# Create session directory
-os.makedirs('/tmp/flask_session', exist_ok=True)
-os.makedirs(app.config['SESSION_FILE_DIR'], exist_ok=True)
 # ========== UPLOAD CONFIGURATION ==========
 UPLOAD_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'uploads', 'profile_pics')
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
@@ -70,16 +63,13 @@ MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
 # Ensure upload directory exists
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# Configure static folder for serving uploads
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
 
-# ========== INITIALIZE EXTENSIONS IN CORRECT ORDER ==========
-# 1. Initialize Session first
-Session(app)
-
-# 2. Initialize Database
+# ========== INITIALIZE EXTENSIONS ==========
+# 1. Initialize Database
 db.init_app(app)
+
 
 # ========== CORS CONFIGURATION (RAILWAY READY) ==========
 
