@@ -2,55 +2,35 @@
 Roamsmart Digital Service - Complete Backend API v2.0
 Features: SMS, Email, 2FA, KYC, Webhooks, Referrals, Store Management, Analytics
 """
-
-
 import os
 import uuid
-import bcrypt
-import random
-import smtplib
-import hashlib
-import pyotp
-import qrcode
 import re
-from io import BytesIO
 import base64
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+import random
+import hashlib
+import json
+import smtplib
+from io import BytesIO
 from datetime import datetime, timedelta
 from functools import wraps
-from flask import Flask, jsonify, request, send_from_directory 
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+import bcrypt
+import pyotp
+import qrcode
+import requests
+import sendgrid
+from sendgrid.helpers.mail import Mail, Email, To, Content
+from flask import Flask, jsonify, request, send_from_directory, g, session
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
-import requests
-import json
-
+from flask_socketio import SocketIO, emit
+from flask_session import Session
+from sqlalchemy import func, and_, or_
+from werkzeug.utils import secure_filename
 from config import config
 from models import *
-from flask_cors import CORS
-from flask_socketio import SocketIO, emit
-from flask_session import Session
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
-import os
-import uuid
-from datetime import datetime
-from werkzeug.utils import secure_filename
-from sqlalchemy import func, and_, or_
-from datetime import datetime, timedelta
-from flask import Flask, jsonify, request, send_from_directory, g
-from config import config
-from flask import Flask, jsonify, request, g, session
-from flask_cors import CORS
-from flask_socketio import SocketIO, emit
-from flask_session import Session
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
-import os
-import uuid
-from datetime import datetime
-from werkzeug.utils import secure_filename
 
 # ========== COMPANY CONFIGURATION ==========
 COMPANY_NAME = "Roamsmart Digital Service"
@@ -208,28 +188,58 @@ class PhoneVerificationService:
         return str(random.randint(100000, 999999))
     
     def send_sms(self, phone_number, code):
-        """Send SMS using Africa's Talking"""
-        global africas_talking_sms
-        
+        """Send SMS using Africa's Talking direct API (working method)"""
         try:
-            formatted_phone = phone_number
-            if formatted_phone.startswith('+'):
+            api_key = os.environ.get('AFRICASTALKING_API_KEY')
+            username = os.environ.get('AFRICASTALKING_USERNAME', 'Roamsmart')
+            sender_id = os.environ.get('AFRICASTALKING_SENDER_ID', 'Roamsmart')
+            
+            # Format phone number correctly
+            formatted_phone = str(phone_number).strip()
+            if formatted_phone.startswith('0'):
+                formatted_phone = '233' + formatted_phone[1:]
+            elif formatted_phone.startswith('+'):
                 formatted_phone = formatted_phone[1:]
-            if formatted_phone.startswith('233'):
-                formatted_phone = '0' + formatted_phone[3:]
             
-            message = f"Your Roamsmart verification code is: {code}. Valid for 10 minutes. DO NOT share this code."
+            # Ensure it's exactly 12 digits
+            if len(formatted_phone) != 12:
+                # Try to fix common formats
+                if len(formatted_phone) == 9:
+                    formatted_phone = '233' + formatted_phone
+                elif len(formatted_phone) == 10 and formatted_phone.startswith('0'):
+                    formatted_phone = '233' + formatted_phone[1:]
             
-            if africas_talking_sms:
-                response = africas_talking_sms.send(message, [formatted_phone])
-                print(f"[SMS] Sent verification code to {phone_number}")
-                return {'success': True, 'method': 'sms'}
-            else:
-                print(f"[SMS MOCK] Would send to {phone_number}: {message}")
-                return {'success': True, 'method': 'sms'}
+            message = f"Your Roamsmart verification code is: {code}. Valid for 10 minutes."
+            
+            url = "https://api.africastalking.com/version1/messaging"
+            
+            data = {
+                "username": username,
+                "to": formatted_phone,
+                "message": message,
+                "from": sender_id
+            }
+            
+            headers = {
+                "apiKey": api_key,
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Accept": "application/json"
+            }
+            
+            response = requests.post(url, data=data, headers=headers, timeout=30)
+            
+            if response.status_code in [200, 201]:
+                result = response.json()
+                recipients = result.get('SMSMessageData', {}).get('Recipients', [])
+                if recipients and recipients[0].get('status') == 'Success':
+                    print(f"[SMS] ✅ Sent to {phone_number}")
+                    return {'success': True, 'method': 'sms'}
+            
+            print(f"[SMS] ❌ Failed: {response.text}")
+            return {'success': False, 'error': 'SMS sending failed', 'method': 'sms'}
             
         except Exception as e:
-            print(f"[SMS] Error: {e}")
+            print(f"[SMS] ❌ Error: {e}")
             return {'success': False, 'error': str(e), 'method': 'sms'}
     
     def send_email_fallback(self, email, phone_number, code):
@@ -398,70 +408,40 @@ def generate_verification_code():
 
 
 def send_email(to, subject, body):
-    """Send email using SSL on port 465"""
-    
-    # Get from environment
-    smtp_server = os.environ.get('SMTP_SERVER', 'smtp.gmail.com')
-    smtp_port = int(os.environ.get('SMTP_PORT', 465))
-    smtp_user = os.environ.get('SMTP_USERNAME', 'roamsmart77@gmail.com')
-    smtp_pass = os.environ.get('SMTP_PASSWORD')
-    from_email = os.environ.get('FROM_EMAIL', smtp_user)
-    from_name = os.environ.get('FROM_NAME', 'Roamsmart Digital Service')
-    
-    print(f"[EMAIL] Sending to: {to}")
-    print(f"[EMAIL] Subject: {subject}")
-    
-    if not smtp_pass:
-        print(f"[EMAIL] No password - using mock mode")
-        return True
-    
+    """Send email using SendGrid (works on Railway)"""
     try:
-        # IMPORTANT: Use SSL for port 465
-        if smtp_port == 465:
-            server = smtplib.SMTP_SSL(smtp_server, smtp_port, timeout=30)
-        else:
-            server = smtplib.SMTP(smtp_server, smtp_port, timeout=30)
-            server.starttls()
+        sg = sendgrid.SendGridAPIClient(api_key=os.environ.get('SENDGRID_API_KEY'))
         
-        # Create message
-        msg = MIMEMultipart('alternative')
-        msg['From'] = f"{from_name} <{from_email}>"
-        msg['To'] = to
-        msg['Subject'] = subject
+        from_email = Email(os.environ.get('FROM_EMAIL', 'noreply@roamsmart.shop'), 
+                          os.environ.get('FROM_NAME', 'Roamsmart Digital Service'))
+        to_email = To(to)
         
-        # Create HTML version
-        html_content = f"""<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <title>{subject}</title>
-</head>
-<body>
-    {body}
-</body>
-</html>"""
-        
-        # Create plain text version
+        # Create plain text version (strip HTML tags)
         plain_text = re.sub(r'<[^>]+>', '', body)
         
-        part1 = MIMEText(plain_text, 'plain')
-        part2 = MIMEText(html_content, 'html')
+        message = Mail(
+            from_email=from_email,
+            to_emails=to_email,
+            subject=subject,
+            html_content=Content("text/html", body),
+            plain_text_content=Content("text/plain", plain_text)
+        )
         
-        msg.attach(part1)
-        msg.attach(part2)
+        response = sg.send(message)
         
-        # Login and send
-        server.login(smtp_user, smtp_pass)
-        server.send_message(msg)
-        server.quit()
-        
-        print(f"[EMAIL] ✅ Sent successfully to {to}")
-        return True
-        
+        if response.status_code == 202:
+            print(f"[EMAIL] ✅ Sent to {to}")
+            log_email(to, subject, 'sent')
+            return True
+        else:
+            print(f"[EMAIL] ❌ Failed: Status {response.status_code}")
+            log_email(to, subject, 'failed', str(response.status_code))
+            return False
+            
     except Exception as e:
-        print(f"[EMAIL] ❌ Failed: {e}")
-        # Still return True so registration continues
-        return True
+        print(f"[EMAIL] ❌ Error: {e}")
+        log_email(to, subject, 'error', str(e))
+        return False
     
 def send_verification_email(email, username, code):
     """Send email verification code to user with proper HTML"""
@@ -660,52 +640,52 @@ def send_notification(notification_type, recipient, subject=None, message=None, 
         return False
 
 def send_verification_sms(phone, message):
-    """
-    Send verification SMS using Africa's Talking API ONLY
-    Phone number must be in international format (e.g., 233XXXXXXXXX)
-    """
-    global africas_talking_sms
-    
-    # Check if Africa's Talking is initialized
-    if not africas_talking_sms:
-        print(f"[VERIFICATION SMS] ❌ Africa's Talking not initialized")
-        return False
-    
+    """Send verification SMS using Africa's Talking API (LIVE)"""
     try:
-        # Format phone number correctly for Africa's Talking
-        # Africa's Talking requires format: 233XXXXXXXXX (no leading zero, no +)
+        api_key = os.environ.get('AFRICASTALKING_API_KEY')
+        username = os.environ.get('AFRICASTALKING_USERNAME', 'Roamsmart')
+        sender_id = os.environ.get('AFRICASTALKING_SENDER_ID', 'Roamsmart')
+        
+        # Format phone number - remove leading zero and add 233
         formatted_phone = str(phone).strip()
-        
-        # Remove any '+' prefix
-        if formatted_phone.startswith('+'):
-            formatted_phone = formatted_phone[1:]
-        
-        # Replace '0' prefix with '233' (Ghana code)
         if formatted_phone.startswith('0'):
             formatted_phone = '233' + formatted_phone[1:]
-        
-        # If it starts with '233', keep as is
-        # If it's a different format, assume it's already correct
+        if formatted_phone.startswith('+'):
+            formatted_phone = formatted_phone[1:]
         
         print(f"[VERIFICATION SMS] Original: {phone}")
         print(f"[VERIFICATION SMS] Formatted: {formatted_phone}")
         
-        # Validate phone number (should be 12 digits: 233 + 9 digits)
-        if len(formatted_phone) != 12 or not formatted_phone.isdigit():
-            print(f"[VERIFICATION SMS] ❌ Invalid phone number format: {formatted_phone}")
-            return False
+        url = "https://api.africastalking.com/version1/messaging"
         
-        # Send SMS via Africa's Talking
-        response = africas_talking_sms.send(message, [formatted_phone])
+        data = {
+            "username": username,
+            "to": formatted_phone,
+            "message": message,
+            "from": sender_id
+        }
         
-        # Log the response
-        log_sms(phone, message[:100], 'verification', 'africastalking')
-        print(f"[VERIFICATION SMS] ✅ Sent to {phone}")
-        print(f"[VERIFICATION SMS] Response: {response}")
-        return True
+        headers = {
+            "apiKey": api_key,
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "application/json"
+        }
+        
+        response = requests.post(url, data=data, headers=headers, timeout=30)
+        
+        if response.status_code == 201 or response.status_code == 200:
+            result = response.json()
+            recipients = result.get('SMSMessageData', {}).get('Recipients', [])
+            if recipients and recipients[0].get('status') == 'Success':
+                log_sms(phone, message[:100], 'verification', 'africastalking')
+                print(f"[VERIFICATION SMS] ✅ Sent to {phone}")
+                return True
+        
+        print(f"[VERIFICATION SMS] ❌ Failed: {response.text}")
+        return False
             
     except Exception as e:
-        print(f"[VERIFICATION SMS] ❌ Error sending to {phone}: {e}")
+        print(f"[VERIFICATION SMS] ❌ Error: {e}")
         return False
 
 def send_data_delivery_to_provider(phone, message):
