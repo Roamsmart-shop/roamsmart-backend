@@ -11,7 +11,7 @@ import hashlib
 import json
 import smtplib
 from io import BytesIO
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -187,6 +187,22 @@ class PhoneVerificationService:
         """Generate 6-digit verification code"""
         return str(random.randint(100000, 999999))
     
+    def normalize_phone(self, phone):
+        """Normalize phone number to consistent format (233XXXXXXXXX)"""
+        phone = str(phone).strip()
+        # Remove any non-digit characters
+        phone = re.sub(r'\D', '', phone)
+        # If it starts with 0, change to 233 format
+        if phone.startswith('0'):
+            phone = '233' + phone[1:]
+        # If it's 9 digits, add 233 prefix
+        elif len(phone) == 9:
+            phone = '233' + phone
+        # If it starts with 233, keep as is
+        elif phone.startswith('233') and len(phone) == 12:
+            return phone
+        return phone
+    
     def send_sms(self, phone_number, code):
         """Send SMS using Africa's Talking direct API (working method)"""
         try:
@@ -194,20 +210,8 @@ class PhoneVerificationService:
             username = os.environ.get('AFRICASTALKING_USERNAME', 'Roamsmart')
             sender_id = os.environ.get('AFRICASTALKING_SENDER_ID', 'Roamsmart')
             
-            # Format phone number correctly
-            formatted_phone = str(phone_number).strip()
-            if formatted_phone.startswith('0'):
-                formatted_phone = '233' + formatted_phone[1:]
-            elif formatted_phone.startswith('+'):
-                formatted_phone = formatted_phone[1:]
-            
-            # Ensure it's exactly 12 digits
-            if len(formatted_phone) != 12:
-                # Try to fix common formats
-                if len(formatted_phone) == 9:
-                    formatted_phone = '233' + formatted_phone
-                elif len(formatted_phone) == 10 and formatted_phone.startswith('0'):
-                    formatted_phone = '233' + formatted_phone[1:]
+            # Format phone number correctly using normalize
+            formatted_phone = self.normalize_phone(phone_number)
             
             message = f"Your Roamsmart verification code is: {code}. Valid for 10 minutes."
             
@@ -268,64 +272,30 @@ class PhoneVerificationService:
         send_email(email, f"Phone Verification Code - {COMPANY_NAME}", html_content)
         return {'success': True, 'method': 'email'}
     
-    def send_verification_code(self, phone_number, email):
-        """Send verification code - ALWAYS try SMS first, then email fallback"""
-        # Check if code already exists (for resend)
-        existing = self.verification_codes.get(phone_number)
-        if existing:
-            # For resend, try SMS again first
-            code = self.generate_verification_code()
-            # Remove old entry
-            del self.verification_codes[phone_number]
-        else:
-            code = self.generate_verification_code()
-        
-        # Store code
-        self.verification_codes[phone_number] = {
-            'code': code,
-            'expires_at': datetime.utcnow() + timedelta(minutes=10),
-            'attempts': 0,
-            'verified': False,
-            'sms_sent': False,
-            'email_sent': False
-        }
-        
-        # ALWAYS try SMS first
-        sms_result = self.send_sms(phone_number, code)
-        
-        if sms_result['success']:
-            self.verification_codes[phone_number]['sms_sent'] = True
-            return {
-                'success': True,
-                'method': 'sms',
-                'message': 'Verification code sent via SMS',
-                'expires_in': 600,
-                'code': code
-            }
-        else:
-            # SMS failed - use email fallback
-            email_result = self.send_email_fallback(email, phone_number, code)
-            self.verification_codes[phone_number]['email_sent'] = True
-            return {
-                'success': True,
-                'method': 'email',
-                'message': 'SMS delivery failed. Verification code sent to your email.',
-                'expires_in': 600,
-                'code': code
-            }
     
     def resend_verification_code(self, phone_number, email):
         """Resend verification code - ALWAYS try SMS first again"""
+        # Normalize phone number
+        normalized_phone = self.normalize_phone(phone_number)
+        
         # Remove old code
-        if phone_number in self.verification_codes:
-            del self.verification_codes[phone_number]
+        if normalized_phone in self.verification_codes:
+            del self.verification_codes[normalized_phone]
         
         # Try SMS first again
         return self.send_verification_code(phone_number, email)
     
     def verify_code(self, phone_number, code):
         """Verify the code entered by user"""
-        stored = self.verification_codes.get(phone_number)
+        # Normalize phone number to match the key used when storing
+        normalized_phone = self.normalize_phone(phone_number)
+        
+        stored = self.verification_codes.get(normalized_phone)
+        
+        # Debug logging
+        print(f"[VERIFY] Original phone: {phone_number} → Normalized: {normalized_phone}")
+        print(f"[VERIFY] Input code: {code}")
+        print(f"[VERIFY] Stored data: {stored}")
         
         if not stored:
             return {'success': False, 'error': 'No verification code sent to this number'}
@@ -333,14 +303,21 @@ class PhoneVerificationService:
         if stored['verified']:
             return {'success': False, 'error': 'Code already used'}
         
-        if datetime.utcnow() > stored['expires_at']:
-            del self.verification_codes[phone_number]
+        current_time = datetime.utcnow()
+        expires_at = stored['expires_at']
+        
+        print(f"[VERIFY] Current UTC: {current_time}")
+        print(f"[VERIFY] Expires at: {expires_at}")
+        print(f"[VERIFY] Time difference: {(expires_at - current_time).total_seconds()} seconds")
+        
+        if current_time > expires_at:
+            del self.verification_codes[normalized_phone]
             return {'success': False, 'error': 'Verification code expired'}
         
         stored['attempts'] += 1
         
         if stored['attempts'] > 5:
-            del self.verification_codes[phone_number]
+            del self.verification_codes[normalized_phone]
             return {'success': False, 'error': 'Too many failed attempts'}
         
         if stored['code'] != code:
@@ -353,8 +330,22 @@ class PhoneVerificationService:
             'method': 'sms' if stored['sms_sent'] else 'email'
         }
 
-# Create singleton instance
+
 verification_service = PhoneVerificationService()
+# Create singleton instance
+def normalize_phone(self, phone):
+    """Normalize phone number to consistent format"""
+    phone = str(phone).strip()
+    # Remove any non-digit characters
+    phone = re.sub(r'\D', '', phone)
+    # If it starts with 0, change to 233 format
+    if phone.startswith('0'):
+        phone = '233' + phone[1:]
+    return phone
+
+def get_current_utc():
+    """Get current UTC time (timezone naive but in UTC)"""
+    return datetime.utcnow()
 
 # ========== STATIC FILE SERVING ROUTES ==========
 @app.route('/uploads/profile_pics/<filename>')
