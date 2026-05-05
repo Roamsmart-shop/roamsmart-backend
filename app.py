@@ -214,7 +214,7 @@ class PhoneVerificationService:
                 "username": username,
                 "to": formatted_phone,
                 "message": message,
-                "from": sender_id
+                #"from": sender_id
             }
             
             headers = {
