@@ -1,5 +1,6 @@
 # models.py
 from datetime import datetime, timedelta
+from Backend import app
 import jwt
 import bcrypt
 import uuid
@@ -83,21 +84,32 @@ class User(db.Model):
     sessions = db.relationship('UserSession', backref='user', lazy=True)
     
     def set_password(self, password):
-        salt = bcrypt.gensalt()
-        self.password_hash = bcrypt.hashpw(password.encode('utf-8'), salt).decode('utf-8')
-    
+        """Set password hash"""
+        self.password_hash = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
     def check_password(self, password):
-        return bcrypt.checkpw(password.encode('utf-8'), self.password_hash.encode('utf-8'))
+        """Check password hash"""
+        if not self.password_hash:
+            return False
+        try:
+            return bcrypt.checkpw(password.encode('utf-8'), self.password_hash.encode('utf-8'))
+        except Exception as e:
+            print(f"Password check error: {e}")
+            return False
     
     def generate_token(self):
-        payload = {
-            'user_id': self.id,
-            'email': self.email,
-            'role': self.role,
-            'exp': datetime.utcnow() + timedelta(days=7)
+        """Generate JWT token"""
+        try:
+            payload = {
+                'user_id': self.id,
+                'email': self.email,
+                'role': self.role,
+                'exp': datetime.utcnow() + timedelta(days=7)
         }
-        return jwt.encode(payload, current_app.config['SECRET_KEY'], algorithm='HS256')
-    
+            return jwt.encode(payload, app.config['SECRET_KEY'], algorithm='HS256')
+        except Exception as e:
+            print(f"Token generation error: {e}")
+            return None
     
     
     def to_dict(self):
@@ -176,7 +188,22 @@ class User(db.Model):
         except jwt.InvalidTokenError:
             return None
 
-# ========== DATA BUNDLE MODEL ==========
+
+
+class PendingTransaction(db.Model):
+    __tablename__ = 'pending_transactions'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    reference = db.Column(db.String(100), unique=True, nullable=False)
+    amount = db.Column(db.Numeric(10, 2), nullable=False)
+    payment_method = db.Column(db.String(50), default='paystack')
+    status = db.Column(db.String(50), default='pending')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    completed_at = db.Column(db.DateTime, nullable=True)
+    
+    user = db.relationship('User', backref='pending_transactions')
+
 class DataBundle(db.Model):
     __tablename__ = 'data_bundles'
     

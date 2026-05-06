@@ -325,6 +325,88 @@ class PhoneVerificationService:
 
 
 verification_service = PhoneVerificationService()
+
+# ========== PAYSTACK CONFIGURATION ==========
+PAYSTACK_SECRET_KEY = os.environ.get('PAYSTACK_SECRET_KEY')
+PAYSTACK_PUBLIC_KEY = os.environ.get('PAYSTACK_PUBLIC_KEY')
+PAYSTACK_BASE_URL = os.environ.get('PAYSTACK_BASE_URL')
+
+# ========== PAYSTACK HELPER FUNCTIONS ==========
+def initialize_paystack_transaction(email, amount, reference=None, metadata=None):
+    """Initialize a Paystack transaction"""
+    try:
+        if not reference:
+            reference = f"PAY-{uuid.uuid4().hex[:12].upper()}"
+        
+        url = f"{PAYSTACK_BASE_URL}/transaction/initialize"
+        
+        headers = {
+            "Authorization": f"Bearer {PAYSTACK_SECRET_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        data = {
+            "email": email,
+            "amount": int(amount * 100),  # Paystack uses kobo (multiply by 100)
+            "reference": reference,
+            "callback_url": f"{COMPANY_WEBSITE}/wallet"
+        }
+        
+        if metadata:
+            data["metadata"] = metadata
+        
+        response = requests.post(url, json=data, headers=headers, timeout=30)
+        
+        if response.status_code == 200:
+            result = response.json()
+            if result.get('status'):
+                return {
+                    'success': True,
+                    'authorization_url': result['data']['authorization_url'],
+                    'reference': reference,
+                    'access_code': result['data']['access_code']
+                }
+        
+        print(f"Paystack initialization error: {response.text}")
+        return {'success': False, 'error': 'Payment initialization failed'}
+        
+    except Exception as e:
+        print(f"Paystack error: {e}")
+        return {'success': False, 'error': str(e)}
+
+
+def verify_paystack_transaction(reference):
+    """Verify a Paystack transaction"""
+    try:
+        url = f"{PAYSTACK_BASE_URL}/transaction/verify/{reference}"
+        
+        headers = {
+            "Authorization": f"Bearer {PAYSTACK_SECRET_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        response = requests.get(url, headers=headers, timeout=30)
+        
+        if response.status_code == 200:
+            result = response.json()
+            if result.get('status'):
+                data = result.get('data', {})
+                if data.get('status') == 'success':
+                    return {
+                        'success': True,
+                        'amount': data.get('amount', 0) / 100,  # Convert back from kobo
+                        'reference': reference,
+                        'customer': data.get('customer', {}),
+                        'transaction_date': data.get('paid_at')
+                    }
+        
+        return {'success': False, 'error': 'Transaction verification failed'}
+        
+    except Exception as e:
+        print(f"Paystack verification error: {e}")
+        return {'success': False, 'error': str(e)}
+
+
 # Create singleton instance
 def normalize_phone(self, phone):
     """Normalize phone number to consistent format"""
@@ -1226,6 +1308,208 @@ def get_avatar(filename):
     except Exception as e:
         return jsonify({'success': False, 'error': 'File not found'}), 404
 
+# ========== PAYSTACK PAYMENT ENDPOINTS ==========
+
+@app.route('/api/paystack/initialize', methods=['POST'])
+@token_required
+def initialize_payment():
+    """Initialize Paystack payment for wallet funding"""
+    try:
+        data = request.get_json()
+        amount = data.get('amount')
+        
+        if not amount or amount < 10:
+            return jsonify({'success': False, 'error': 'Minimum amount is GHS 10'}), 400
+        
+        user = g.current_user
+        
+        # Initialize transaction
+        result = initialize_paystack_transaction(
+            email=user.email,
+            amount=amount,
+            metadata={
+                'user_id': user.id,
+                'username': user.username,
+                'type': 'wallet_funding'
+            }
+        )
+        
+        if result['success']:
+            # Store pending transaction in database
+            pending_tx = PendingTransaction(
+                user_id=user.id,
+                reference=result['reference'],
+                amount=amount,
+                payment_method='paystack',
+                status='pending',
+                created_at=datetime.utcnow()
+            )
+            db.session.add(pending_tx)
+            db.session.commit()
+            
+            return jsonify({
+                'success': True,
+                'authorization_url': result['authorization_url'],
+                'reference': result['reference'],
+                'amount': amount
+            })
+        else:
+            return jsonify({'success': False, 'error': result.get('error', 'Payment initialization failed')}), 500
+        
+    except Exception as e:
+        print(f"Initialize payment error: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/paystack/verify', methods=['POST'])
+@token_required
+def verify_payment():
+    """Verify Paystack payment after callback"""
+    try:
+        data = request.get_json()
+        reference = data.get('reference')
+        
+        if not reference:
+            return jsonify({'success': False, 'error': 'Reference required'}), 400
+        
+        # Verify with Paystack
+        result = verify_paystack_transaction(reference)
+        
+        if not result['success']:
+            return jsonify({'success': False, 'error': 'Payment verification failed'}), 400
+        
+        # Check if already processed
+        pending_tx = PendingTransaction.query.filter_by(
+            reference=reference,
+            status='pending'
+        ).first()
+        
+        if not pending_tx:
+            return jsonify({'success': False, 'error': 'Transaction not found or already processed'}), 404
+        
+        # Update user wallet
+        user = User.query.get(pending_tx.user_id)
+        if not user:
+            return jsonify({'success': False, 'error': 'User not found'}), 404
+        
+        # Add to wallet
+        balance_before = user.wallet_balance
+        user.wallet_balance += result['amount']
+        
+        # Update transaction status
+        pending_tx.status = 'completed'
+        pending_tx.completed_at = datetime.utcnow()
+        
+        # Create transaction record
+        transaction = Transaction(
+            user_id=user.id,
+            type='fund',
+            amount=result['amount'],
+            balance_before=balance_before,
+            balance_after=user.wallet_balance,
+            description=f'Wallet funding via Paystack - {reference}',
+            reference=reference,
+            status='completed'
+        )
+        db.session.add(transaction)
+        
+        db.session.commit()
+        
+        # Send email confirmation
+        send_wallet_funding_email(user.email, user.username, result['amount'], user.wallet_balance)
+        
+        return jsonify({
+            'success': True,
+            'message': f'Successfully added GHS {result["amount"]:.2f} to your wallet',
+            'new_balance': float(user.wallet_balance),
+            'amount': result['amount']
+        })
+        
+    except Exception as e:
+        print(f"Verify payment error: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/paystack/webhook', methods=['POST'])
+def paystack_webhook():
+    """Paystack webhook for automatic payment confirmation"""
+    try:
+        # Verify webhook signature
+        signature = request.headers.get('x-paystack-signature')
+        if not signature:
+            return jsonify({'success': False, 'error': 'No signature'}), 401
+        
+        # Get event data
+        event_data = request.get_json()
+        event = event_data.get('event')
+        
+        if event == 'charge.success':
+            data = event_data.get('data', {})
+            reference = data.get('reference')
+            amount = data.get('amount', 0) / 100
+            
+            # Process the payment
+            pending_tx = PendingTransaction.query.filter_by(
+                reference=reference,
+                status='pending'
+            ).first()
+            
+            if pending_tx and pending_tx.status == 'pending':
+                user = User.query.get(pending_tx.user_id)
+                if user:
+                    balance_before = user.wallet_balance
+                    user.wallet_balance += amount
+                    
+                    pending_tx.status = 'completed'
+                    pending_tx.completed_at = datetime.utcnow()
+                    
+                    transaction = Transaction(
+                        user_id=user.id,
+                        type='fund',
+                        amount=amount,
+                        balance_before=balance_before,
+                        balance_after=user.wallet_balance,
+                        description=f'Wallet funding via Paystack - {reference}',
+                        reference=reference,
+                        status='completed'
+                    )
+                    db.session.add(transaction)
+                    db.session.commit()
+                    
+                    print(f"[WEBHOOK] Processed payment {reference} for {user.email}")
+        
+        return jsonify({'success': True})
+        
+    except Exception as e:
+        print(f"Webhook error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+    
+def send_wallet_funding_email(email, username, amount, new_balance):
+    """Send wallet funding confirmation email"""
+    html_content = f"""
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+        <div style="background: #8B0000; padding: 20px; text-align: center; border-radius: 10px 10px 0 0;">
+            <h2 style="color: white;">✅ Wallet Funded Successfully!</h2>
+            <p style="color: white;">{COMPANY_NAME}</p>
+        </div>
+        <div style="background: #f5f5f5; padding: 30px; border-radius: 0 0 10px 10px;">
+            <p>Dear <strong>{username}</strong>,</p>
+            <p>Your Roamsmart wallet has been successfully funded!</p>
+            <div style="background: white; padding: 20px; text-align: center; border-radius: 10px; margin: 20px 0;">
+                <p style="font-size: 14px; margin-bottom: 10px;">Amount Added:</p>
+                <p style="font-size: 32px; font-weight: bold; color: #28a745;">GHS {amount:.2f}</p>
+                <p style="font-size: 14px; margin-top: 10px;">New Balance: <strong>GHS {new_balance:.2f}</strong></p>
+            </div>
+            <p>You can now use your wallet balance to purchase data bundles, WAEC vouchers, and more!</p>
+            <div style="text-align: center; margin: 25px 0;">
+                <a href="{COMPANY_WEBSITE}/wallet" style="background: #8B0000; color: white; padding: 12px 30px; text-decoration: none; border-radius: 30px;">View Wallet</a>
+            </div>
+        </div>
+    </div>
+    """
+    send_email(email, "Wallet Funded Successfully", html_content)
 
 @app.route('/api/auth/verify-2fa-code', methods=['POST'])
 @limiter.limit("10 per minute")
@@ -2245,30 +2529,61 @@ def login():
     """Login user - Support phone verification as alternative (NO SESSIONS)"""
     try:
         data = request.get_json()
-        email = data.get('email')
+        email = data.get('email', '').lower().strip()
         password = data.get('password')
         remember_me = data.get('remember_me', False)
+        
+        print(f"\n{'='*60}")
+        print(f"[LOGIN ATTEMPT]")
+        print(f"  Email: {email}")
+        print(f"  Password provided: {'Yes' if password else 'No'}")
+        print(f"{'='*60}")
         
         if not email or not password:
             return jsonify({'success': False, 'error': 'Email and password required'}), 400
         
+        # First, check if admin email is being used
+        if email == COMPANY_ADMIN_EMAIL:
+            print(f"[LOGIN] Admin login attempt for {email}")
+        
         user = User.query.filter_by(email=email).first()
         
-        if not user or not user.check_password(password):
+        if not user:
+            print(f"[LOGIN FAILED] User not found: {email}")
             return jsonify({'success': False, 'error': 'Invalid credentials'}), 401
         
-        # Email verification check
-        if not user.email_verified:
+        print(f"[USER FOUND] ID: {user.id}, Role: {user.role}, Email: {user.email}")
+        
+        # Check password - with debugging
+        try:
+            password_valid = user.check_password(password)
+            print(f"  Password check result: {password_valid}")
+        except Exception as e:
+            print(f"  Password check error: {e}")
+            password_valid = False
+        
+        if not password_valid:
+            print(f"[LOGIN FAILED] Invalid password for {email}")
+            # Increment failed login attempts (optional)
+            return jsonify({'success': False, 'error': 'Invalid credentials'}), 401
+        
+        # If user is admin but email_verified is False, force set to True
+        if user.role in ['admin', 'super_admin'] and not user.email_verified:
+            print(f"[LOGIN] Forcing email_verified=True for admin user")
+            user.email_verified = True
+            db.session.commit()
+        
+        # Email verification check (skip for admin)
+        if not user.email_verified and user.role not in ['admin', 'super_admin']:
+            print(f"[LOGIN] Email not verified for {email}")
             verification_code = verification_service.generate_verification_code()
             
-            # Store verification in memory (not session)
             temp_storage[f"verify_{user.id}"] = {
                 'user_id': user.id,
                 'code': verification_code,
                 'expires': (datetime.utcnow() + timedelta(minutes=10)).isoformat()
             }
             
-            # Try SMS first, then email
             sms_sent = verification_service.send_sms(user.phone, verification_code)
             
             if sms_sent.get('success'):
@@ -2289,33 +2604,139 @@ def login():
                     'data': {'email': user.email, 'user_id': user.id}
                 }), 403
         
+        # Update last login
         user.last_login = datetime.utcnow()
         db.session.commit()
         
+        # Generate token with explicit expiry
         token = user.generate_token()
         
-        if user.role == 'super_admin':
-            redirect_url = '/admin'
-        elif user.role == 'admin':
+        # Determine redirect URL based on role
+        if user.role == 'super_admin' or user.role == 'admin':
             redirect_url = '/admin'
         elif user.is_agent and user.agent_approved:
             redirect_url = '/agent'
         else:
             redirect_url = '/dashboard'
         
+        print(f"[LOGIN SUCCESS] {email} -> {redirect_url}")
+        
+        # Prepare user data for frontend
+        user_dict = user.to_dict()
+        user_dict['role'] = user.role  # Ensure role is explicitly set
+        
         return jsonify({
             'success': True,
             'token': token,
-            'user': user.to_dict(),
+            'user': user_dict,
             'redirect': redirect_url
         })
         
     except Exception as e:
-        print(f"Login error: {e}")
+        print(f"[LOGIN ERROR] {e}")
         import traceback
         traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
+    
+@app.route('/api/debug/admin', methods=['GET'])
+def debug_admin():
+    """Debug endpoint to check admin user"""
+    try:
+        admin_email = COMPANY_ADMIN_EMAIL
+        admin = User.query.filter_by(email=admin_email).first()
+        
+        if not admin:
+            return jsonify({
+                'success': False,
+                'error': f'Admin not found: {admin_email}'
+            }), 404
+        
+        # Test password
+        test_password = "Roamsmart123@$"
+        password_valid = admin.check_password(test_password)
+        
+        return jsonify({
+            'success': True,
+            'admin': {
+                'id': admin.id,
+                'email': admin.email,
+                'username': admin.username,
+                'role': admin.role,
+                'email_verified': admin.email_verified,
+                'password_valid': password_valid,
+                'password_hash_length': len(admin.password_hash) if admin.password_hash else 0
+            }
+        })
+        
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+    
+@app.route('/api/admin/fix', methods=['GET'])
+def fix_admin():
+    """Fix admin user"""
+    try:
+        admin = User.query.filter_by(email=COMPANY_ADMIN_EMAIL).first()
+        
+        if not admin:
+            # Create admin
+            admin = User(
+                username='Administrator',
+                email=COMPANY_ADMIN_EMAIL,
+                phone=COMPANY_PHONE,
+                role='super_admin',
+                email_verified=True,
+                phone_verified=True,
+                is_agent=True,
+                agent_approved=True
+            )
+            admin.set_password('Roamsmart123@$')
+            db.session.add(admin)
+            db.session.commit()
+            print("Admin created")
+        else:
+            # Fix existing admin
+            admin.role = 'super_admin'
+            admin.email_verified = True
+            admin.phone_verified = True
+            admin.set_password('Roamsmart123@$')
+            db.session.commit()
+            print("Admin fixed")
+        
+        return jsonify({
+            'success': True,
+            'message': 'Admin fixed',
+            'email': admin.email,
+            'role': admin.role,
+            'password': 'Roamsmart123@$'
+        })
+        
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
 
+# In your init_db or user creation
+def create_admin():
+    admin = User.query.filter_by(email=COMPANY_ADMIN_EMAIL).first()
+    if not admin:
+        admin = User(
+            username='Administrator',
+            email=COMPANY_ADMIN_EMAIL,
+            phone='0557388622',
+            role='super_admin',  # Important: set role correctly
+            is_agent=True,
+            agent_approved=True,
+            email_verified=True,
+            phone_verified=True
+        )
+        admin.set_password('Roamsmart123@$')
+        db.session.add(admin)
+        db.session.commit()
+        print("Admin created with role: super_admin")
+    else:
+        # Ensure role is correct
+        admin.role = 'super_admin'
+        db.session.commit()
+        print(f"Admin role set to: {admin.role}")
 
 @app.route('/api/auth/verify-login-code', methods=['POST'])
 @limiter.limit("10 per minute")
