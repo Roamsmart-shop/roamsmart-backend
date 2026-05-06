@@ -2638,38 +2638,30 @@ def login():
         traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
     
-@app.route('/api/debug/admin', methods=['GET'])
-def debug_admin():
-    """Debug endpoint to check admin user"""
+@app.route('/api/debug/fix-admin', methods=['GET'])
+def fix_admin_debug():
+    """Fix admin user - remove agent flags"""
     try:
-        admin_email = COMPANY_ADMIN_EMAIL
-        admin = User.query.filter_by(email=admin_email).first()
-        
-        if not admin:
+        admin = User.query.filter_by(email='admin@roamsmart.shop').first()
+        if admin:
+            admin.is_agent = False
+            admin.agent_approved = False
+            admin.role = 'super_admin'
+            db.session.commit()
             return jsonify({
-                'success': False,
-                'error': f'Admin not found: {admin_email}'
-            }), 404
-        
-        # Test password
-        test_password = "Roamsmart123@$"
-        password_valid = admin.check_password(test_password)
-        
-        return jsonify({
-            'success': True,
-            'admin': {
-                'id': admin.id,
-                'email': admin.email,
-                'username': admin.username,
-                'role': admin.role,
-                'email_verified': admin.email_verified,
-                'password_valid': password_valid,
-                'password_hash_length': len(admin.password_hash) if admin.password_hash else 0
-            }
-        })
-        
+                'success': True,
+                'message': 'Admin fixed',
+                'user': {
+                    'id': admin.id,
+                    'email': admin.email,
+                    'role': admin.role,
+                    'is_agent': admin.is_agent,
+                    'agent_approved': admin.agent_approved
+                }
+            })
+        return jsonify({'error': 'Admin not found'}), 404
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
+        return jsonify({'error': str(e)}), 500
     
 @app.route('/api/admin/fix', methods=['GET'])
 def fix_admin():
