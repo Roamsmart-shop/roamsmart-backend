@@ -105,35 +105,10 @@ class User(db.Model):
                 'email': self.email,
                 'role': self.role,
                 'exp': datetime.utcnow() + timedelta(days=7)
-        }
-            return jwt.encode(payload, app.config['SECRET_KEY'], algorithm='HS256')
+            }
+            return jwt.encode(payload, current_app.config['SECRET_KEY'], algorithm='HS256')
         except Exception as e:
             print(f"Token generation error: {e}")
-            return None
-    
-    
-    def to_dict(self):
-        return {
-            'id': self.id,
-            'username': self.username,
-            'email': self.email,
-            'phone': self.phone,
-            'role': self.role,
-            'avatar': self.avatar_url,
-            'avatar_url': self.avatar_url,
-            'wallet_balance': float(self.wallet_balance) if self.wallet_balance else 0,
-            'is_agent': self.is_agent,
-            'is_verified': self.is_verified,
-            'created_at': self.created_at.isoformat() if self.created_at else None
-        }
-
-
-    @staticmethod
-    def verify_token(token):
-        try:
-            payload = jwt.decode(token, current_app.config['SECRET_KEY'], algorithms=['HS256'])
-            return User.query.get(payload['user_id'])
-        except:
             return None
     
     def to_dict(self):
@@ -171,6 +146,14 @@ class User(db.Model):
         self.email_verification_sent_at = datetime.utcnow()
         db.session.commit()
         return token
+    
+    @staticmethod
+    def verify_token(token):
+        try:
+            payload = jwt.decode(token, current_app.config['SECRET_KEY'], algorithms=['HS256'])
+            return User.query.get(payload['user_id'])
+        except:
+            return None
     
     @staticmethod
     def verify_email_token(token):
