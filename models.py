@@ -1,6 +1,5 @@
 # models.py
 from datetime import datetime, timedelta
-from Backend import app
 import jwt
 import bcrypt
 import uuid
@@ -8,6 +7,7 @@ from flask_sqlalchemy import SQLAlchemy
 from flask import current_app
 
 db = SQLAlchemy()
+
 
 # ========== COMPANY CONFIGURATION ==========
 COMPANY_NAME = "Roamsmart Digital Service"
