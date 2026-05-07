@@ -71,28 +71,26 @@ app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
 db.init_app(app)
 
 
-# ========== CORS CONFIGURATION (RAILWAY READY) ==========
-
-# Get allowed origins from environment variable or use defaults
 def get_allowed_origins():
     """Get allowed origins for CORS (supports Railway and Vercel deployment)"""
     # Default local origins
     origins = [
         'http://localhost:3000',
         'http://localhost:5000',
+        'http://127.0.0.1:3000',
+        'http://127.0.0.1:5000',
     ]
     
-    # Add production domains if in production
-    if os.environ.get('FLASK_ENV') == 'production':
-        origins.extend([
-            'https://roamsmart.shop',
-            'https://www.roamsmart.shop',
-            'https://api.roamsmart.shop',
-            'https://roamsmart-frontend.vercel.app',  # Add Vercel frontend
-            'https://roamsmart-frontend-git-main-roamsmart-shops-projects.vercel.app',  # Vercel preview
-        ])
+    # ALWAYS add production domains (don't rely on FLASK_ENV)
+    origins.extend([
+        'https://roamsmart.shop',
+        'https://www.roamsmart.shop',
+        'https://api.roamsmart.shop',
+        'https://roamsmart-frontend.vercel.app',
+        'https://roamsmart-frontend-cgggs8bm4-roamsmart-shops-projects.vercel.app',
+    ])
     
-    # Add Railway frontend URL if available
+    # Add Railway frontend URL if provided
     railway_frontend = os.environ.get('RAILWAY_FRONTEND_URL')
     if railway_frontend:
         origins.append(railway_frontend)
@@ -101,9 +99,7 @@ def get_allowed_origins():
     railway_backend = os.environ.get('RAILWAY_PUBLIC_DOMAIN')
     if railway_backend:
         origins.append(f'https://{railway_backend}')
-    
-    # Also allow any vercel.app subdomain
-    origins.append('https://*.vercel.app')
+        origins.append(f'https://{railway_backend}')  # Also allow without protocol?
     
     # Remove duplicates
     return list(dict.fromkeys(origins))
@@ -139,10 +135,13 @@ CORS(app,
 # 4. Initialize Rate Limiter
 limiter = Limiter(app=app, key_func=get_remote_address, default_limits=["100 per minute"])
 
-# 5. Initialize SocketIO
 socketio = SocketIO(
     app, 
-    cors_allowed_origins="*",
+    cors_allowed_origins=[
+        'http://localhost:3000',
+        'https://roamsmart-frontend.vercel.app',
+        'https://roamsmart-frontend-cgggs8bm4-roamsmart-shops-projects.vercel.app'
+    ],
     async_mode='threading',
     ping_timeout=60,
     ping_interval=25,
