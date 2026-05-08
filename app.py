@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 from functools import wraps
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-
+from flask import Flask, request, jsonify, session
 import bcrypt
 import pyotp
 import qrcode
@@ -27,7 +27,7 @@ from flask_limiter.util import get_remote_address
 from flask_socketio import SocketIO, emit
 from sqlalchemy import func, and_, or_
 from werkzeug.utils import secure_filename
-
+from flask_session import Session
 from config import config
 from models import *
 
