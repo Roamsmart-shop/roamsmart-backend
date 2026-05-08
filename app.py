@@ -54,19 +54,12 @@ env = os.environ.get('FLASK_ENV', 'production')
 app.config.from_object(config[env])
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your-secret-key-here')
 
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
+class NoOpLimiter:
+    def limit(self, *args, **kwargs):
+        return lambda f: f
 
-# Memory-based rate limiting (no Redis DNS issues)
-limiter = Limiter(
-    get_remote_address,
-    app=app,
-    default_limits=["500 per minute"],
-    storage_uri="memory://"
-)
-
-print("[Rate Limiter] ✅ Running with in-memory storage")
-# Uploads config
+limiter = NoOpLimiter()
+print("[Rate Limiter] Disabled - using no-op limiter")
 UPLOAD_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'uploads', 'profile_pics')
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
