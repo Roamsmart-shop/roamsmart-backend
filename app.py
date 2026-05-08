@@ -54,13 +54,41 @@ env = os.environ.get('FLASK_ENV', 'production')
 app.config.from_object(config[env])
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your-secret-key-here')
 
-# Redis-backed rate limiter
 redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
-limiter = Limiter(
-    key_func=get_remote_address,
-    storage_uri=redis_url,
-    default_limits=["100 per minute"]
-)
+
+# Parse and reconstruct Redis URL to ensure it's valid
+try:
+    parsed = urlparse(redis_url)
+    # Reconstruct without any issues
+    if parsed.password:
+        # Password might have special chars, but it's already URL encoded
+        redis_url = f"redis://{parsed.hostname}:{parsed.port}"
+        if parsed.password:
+            redis_url = f"redis://:{parsed.password}@{parsed.hostname}:{parsed.port}"
+    print(f"[Redis] Using Redis at {parsed.hostname}:{parsed.port}")
+except:
+    print(f"[Redis] Using Redis URL (raw)")
+
+# Configure rate limiter with better error handling
+try:
+    limiter = Limiter(
+        key_func=get_remote_address,
+        storage_uri=redis_url,
+        default_limits=["100 per minute"],
+        strategy="fixed-window"  # Use fixed window to reduce Redis calls
+    )
+    print("[Rate Limiter] ✅ Initialized with Redis backend")
+except Exception as e:
+    print(f"[Rate Limiter] ⚠️ Redis init failed: {e}")
+    # Fallback to memory
+    limiter = Limiter(
+        key_func=get_remote_address,
+        default_limits=["100 per minute"],
+        storage_uri="memory://"
+    )
+    print("[Rate Limiter] Using memory storage as fallback")
+
+# Initialize limiter with app
 limiter.init_app(app)
 
 # Uploads config
