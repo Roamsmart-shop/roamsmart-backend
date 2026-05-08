@@ -54,55 +54,22 @@ env = os.environ.get('FLASK_ENV', 'production')
 app.config.from_object(config[env])
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your-secret-key-here')
 
-def resolve_hostname(url):
-    """Convert internal hostnames to IP addresses"""
-    if 'redis.railway.internal' in url:
-        try:
-            ip = socket.gethostbyname('redis.railway.internal')
-            print(f"[DNS] Resolved redis.railway.internal -> {ip}")
-            return url.replace('redis.railway.internal', ip)
-        except:
-            pass
-    return url
-
-# Get and fix Redis URL
 REDIS_URL = os.environ.get("REDIS_URL", "")
-if REDIS_URL:
-    REDIS_URL = resolve_hostname(REDIS_URL)
-    print(f"[Redis] Using URL: {REDIS_URL.split('@')[-1] if '@' in REDIS_URL else REDIS_URL}")
-
-# Initialize rate limiter with fixed URL
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
-
-if REDIS_URL:
+if REDIS_URL and 'redis.railway.internal' in REDIS_URL:
     try:
-        limiter = Limiter(
-            key_func=get_remote_address,
-            storage_uri=REDIS_URL,
-            default_limits=["200 per minute", "10 per second"],
-            strategy="fixed-window",
-            storage_options={
-                "socket_connect_timeout": 5,
-                "socket_timeout": 5,
-                "retry_on_timeout": True
-            }
-        )
-        print("[Rate Limiter] ✅ Redis connected")
+        # Resolve to IP once at startup
+        redis_ip = socket.gethostbyname('redis.railway.internal')
+        REDIS_URL = REDIS_URL.replace('redis.railway.internal', redis_ip)
+        print(f"[Redis] Using IP: {redis_ip}")
     except Exception as e:
-        print(f"[Rate Limiter] Redis failed: {e}")
-        limiter = Limiter(
-            key_func=get_remote_address,
-            storage_uri="memory://",
-            default_limits=["200 per minute"]
-        )
-        print("[Rate Limiter] Using memory fallback")
-else:
-    limiter = Limiter(
-        key_func=get_remote_address,
-        storage_uri="memory://",
-        default_limits=["200 per minute"]
-    )
+        print(f"[Redis] Failed to resolve: {e}")
+
+# Now initialize limiter
+limiter = Limiter(
+    key_func=get_remote_address,
+    storage_uri=REDIS_URL if REDIS_URL else "memory://",
+    default_limits=["200 per minute"]
+)
 
 limiter.init_app(app)
 
