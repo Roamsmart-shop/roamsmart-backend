@@ -40,22 +40,19 @@ COMPANY_PHONE = "0557388622"
 COMPANY_WEBSITE = "https://roamsmart.shop"
 COMPANY_DOMAIN = "roamsmart.shop"
 
-# ========== TEMPORARY STORAGE FOR VERIFICATION (NO SESSIONS) ==========
-# Use a simple dict for storing verification codes
-# In production, replace with Redis
+
 temp_storage = {}
 
-# ========== INITIALIZE FLASK APP ==========
+
 app = Flask(__name__)
 
-# ========== LOAD CONFIGURATION ==========
+
 env = os.environ.get('FLASK_ENV', 'production')
 app.config.from_object(config[env])
 
-# ========== BASIC CONFIGURATION (NO SESSIONS) ==========
+
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your-secret-key-here')
 
-# ========== UPLOAD CONFIGURATION ==========
 UPLOAD_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'uploads', 'profile_pics')
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
@@ -73,38 +70,35 @@ db.init_app(app)
 
 def get_allowed_origins():
     """Get allowed origins for CORS (supports Railway and Vercel deployment)"""
-    # Default local origins
     origins = [
+        # Local development
         'http://localhost:3000',
         'http://localhost:5000',
         'http://127.0.0.1:3000',
         'http://127.0.0.1:5000',
-    ]
-    
-    # ALWAYS add production domains (don't rely on FLASK_ENV)
-    origins.extend([
+
+        # Production domains
         'https://roamsmart.shop',
         'https://www.roamsmart.shop',
         'https://api.roamsmart.shop',
         'https://roamsmart-frontend.vercel.app',
         'https://roamsmart-frontend-cgggs8bm4-roamsmart-shops-projects.vercel.app',
-    ])
-    
+    ]
+
     # Add Railway frontend URL if provided
     railway_frontend = os.environ.get('RAILWAY_FRONTEND_URL')
     if railway_frontend:
         origins.append(railway_frontend)
-    
+
     # Add Railway backend URL if available
     railway_backend = os.environ.get('RAILWAY_PUBLIC_DOMAIN')
     if railway_backend:
         origins.append(f'https://{railway_backend}')
-        origins.append(f'https://{railway_backend}')  # Also allow without protocol?
-    
-    # Remove duplicates
+
+    # Remove duplicates while preserving order
     return list(dict.fromkeys(origins))
 
-# Define allowed headers
+# Allowed headers and methods
 ALLOWED_HEADERS = [
     'Content-Type',
     'Authorization',
@@ -112,44 +106,33 @@ ALLOWED_HEADERS = [
     'X-Company',
     'X-Request-Time',
     'X-Price-Auth',
-    'X-App-Version'  
-
+    'X-App-Version'
 ]
 
-# Define allowed methods
 ALLOWED_METHODS = ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH']
 
-# Get allowed origins
+# Unified origins
 ALLOWED_ORIGINS = get_allowed_origins()
-
 print(f"[CORS] Allowed origins: {ALLOWED_ORIGINS}")
 
+# Apply CORS
 CORS(app,
      origins=ALLOWED_ORIGINS,
      supports_credentials=True,
-     allow_headers=['Content-Type', 'Authorization', 'X-Requested-With', 'X-Company', 'X-Request-Time', 'X-Price-Auth', 'X-App-Version'],
+     allow_headers=ALLOWED_HEADERS,
      methods=ALLOWED_METHODS,
      expose_headers=ALLOWED_HEADERS,
      max_age=3600
 )
-# 4. Initialize Rate Limiter
+
+# Rate limiter (consider Redis for production)
 limiter = Limiter(app=app, key_func=get_remote_address, default_limits=["100 per minute"])
 
+# Socket.IO with unified origins
 socketio = SocketIO(
-    app, 
-    cors_allowed_origins=[
-        'http://localhost:3000',
-        'http://127.0.0.1:3000',
-        'http://localhost:5000',
-        'http://127.0.0.1:5000',
-        'https://roamsmart.shop',
-        'https://www.roamsmart.shop',
-        'https://api.roamsmart.shop',
-        'https://roamsmart-frontend.vercel.app',
-        'https://roamsmart-frontend-cgggs8bm4-roamsmart-shops-projects.vercel.app',
-        'https://roamsmart-backend-production.up.railway.app'
-    ],
-    async_mode='threading',
+    app,
+    cors_allowed_origins=ALLOWED_ORIGINS,
+    async_mode='eventlet',   # switched from threading
     ping_timeout=60,
     ping_interval=25,
     logger=True,

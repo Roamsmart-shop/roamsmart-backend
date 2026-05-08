@@ -1,11 +1,9 @@
 # gunicorn_config.py
-import multiprocessing
 import os
 
 bind = f"0.0.0.0:{os.environ.get('PORT', '5000')}"
-workers = multiprocessing.cpu_count() * 2 + 1
-threads = 2
-worker_class = 'sync'
+worker_class = 'eventlet'   # switched from sync to eventlet
+workers = 1                 # eventlet handles concurrency internally
 timeout = 120
 keepalive = 5
 max_requests = 1000
