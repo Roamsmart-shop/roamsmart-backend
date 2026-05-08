@@ -1,5 +1,10 @@
+import os
 import eventlet
-eventlet.monkey_patch(dns=False)
+
+# Disable Eventlet's greendns resolver to avoid Redis DNS lookup issues
+os.environ["EVENTLET_NO_GREENDNS"] = "yes"
+eventlet.monkey_patch()
+
 
 import os
 import uuid
