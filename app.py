@@ -56,38 +56,51 @@ app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your-secret-key-here')
 
 redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
 
-# Parse and reconstruct Redis URL to ensure it's valid
-try:
-    parsed = urlparse(redis_url)
-    # Reconstruct without any issues
-    if parsed.password:
-        # Password might have special chars, but it's already URL encoded
-        redis_url = f"redis://{parsed.hostname}:{parsed.port}"
-        if parsed.password:
-            redis_url = f"redis://:{parsed.password}@{parsed.hostname}:{parsed.port}"
-    print(f"[Redis] Using Redis at {parsed.hostname}:{parsed.port}")
-except:
-    print(f"[Redis] Using Redis URL (raw)")
+# Fix Redis URL for Eventlet compatibility
+def fix_redis_url(url):
+    """Convert internal hostnames to IP addresses for Eventlet"""
+    try:
+        parsed = urlparse(url)
+        # Check if hostname is railway.internal or localhost
+        if parsed.hostname and ('railway.internal' in parsed.hostname or parsed.hostname == 'localhost'):
+            # Try to resolve hostname to IP
+            ip = socket.gethostbyname(parsed.hostname)
+            # Rebuild URL with IP
+            if parsed.password:
+                fixed_url = f"redis://:{parsed.password}@{ip}:{parsed.port}"
+            elif parsed.username:
+                fixed_url = f"redis://{parsed.username}@{ip}:{parsed.port}"
+            else:
+                fixed_url = f"redis://{ip}:{parsed.port}"
+            print(f"[Redis] Fixed URL: {parsed.hostname} -> {ip}")
+            return fixed_url
+    except Exception as e:
+        print(f"[Redis] Warning: Could not fix URL: {e}")
+    return url
 
-# Configure rate limiter with better error handling
+# Apply the fix
+fixed_redis_url = fix_redis_url(redis_url)
+
+# Initialize rate limiter with fixed Redis URL
 try:
     limiter = Limiter(
         key_func=get_remote_address,
-        storage_uri=redis_url,
+        storage_uri=fixed_redis_url,
         default_limits=["100 per minute"],
-        strategy="fixed-window"  # Use fixed window to reduce Redis calls
+        strategy="fixed-window"  # Reduces Redis calls
     )
-    print("[Rate Limiter] ✅ Initialized with Redis backend")
+    limiter.init_app(app)
+    print("[Rate Limiter] ✅ Connected to Redis successfully")
 except Exception as e:
-    print(f"[Rate Limiter] ⚠️ Redis init failed: {e}")
+    print(f"[Rate Limiter] ⚠️ Redis connection failed: {e}")
     # Fallback to memory
     limiter = Limiter(
         key_func=get_remote_address,
-        default_limits=["100 per minute"],
-        storage_uri="memory://"
+        storage_uri="memory://",
+        default_limits=["100 per minute"]
     )
+    limiter.init_app(app)
     print("[Rate Limiter] Using memory storage as fallback")
-
 # Initialize limiter with app
 limiter.init_app(app)
 
