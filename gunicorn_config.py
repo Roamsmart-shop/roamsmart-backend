@@ -1,25 +1,24 @@
-# gunicorn_config.py
 import os
 
+# Bind to the port Railway provides, default to 5000 locally
 bind = f"0.0.0.0:{os.environ.get('PORT', '5000')}"
-worker_class = 'eventlet'   # switched from sync to eventlet
-workers = 1                 # eventlet handles concurrency internally
+
+# Use eventlet for async concurrency
+worker_class = "eventlet"
+workers = 1
+threads = 2
 timeout = 120
 keepalive = 5
+
+# Performance and stability
+preload_app = True
+graceful_timeout = 30
 max_requests = 1000
 max_requests_jitter = 50
-graceful_timeout = 30
 
-# Logging
-accesslog = 'logs/access.log'
-errorlog = 'logs/error.log'
-loglevel = 'info'
+# Logging (stdout/stderr so Railway captures logs)
+accesslog = "-"
+errorlog = "-"
+loglevel = "info"
 
-# For better performance
-preload_app = True
-daemon = False
-pidfile = 'roamsmart.pid'
-
-# SSL (if using)
-certfile = '/etc/ssl/certs/roamsmart.crt'
-keyfile = '/etc/ssl/private/roamsmart.key'
+# No SSL here — Railway handles HTTPS at the proxy level
