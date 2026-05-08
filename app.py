@@ -139,8 +139,15 @@ socketio = SocketIO(
     app, 
     cors_allowed_origins=[
         'http://localhost:3000',
+        'http://127.0.0.1:3000',
+        'http://localhost:5000',
+        'http://127.0.0.1:5000',
+        'https://roamsmart.shop',
+        'https://www.roamsmart.shop',
+        'https://api.roamsmart.shop',
         'https://roamsmart-frontend.vercel.app',
-        'https://roamsmart-frontend-cgggs8bm4-roamsmart-shops-projects.vercel.app'
+        'https://roamsmart-frontend-cgggs8bm4-roamsmart-shops-projects.vercel.app',
+        'https://roamsmart-backend-production.up.railway.app'
     ],
     async_mode='threading',
     ping_timeout=60,
@@ -148,6 +155,7 @@ socketio = SocketIO(
     logger=True,
     engineio_logger=True
 )
+
 
 # ========== AFRICA'S TALKING CONFIGURATION ==========
 AFRICASTALKING_API_KEY = os.environ.get('AFRICASTALKING_API_KEY')
