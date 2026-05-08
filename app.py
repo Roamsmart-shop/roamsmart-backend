@@ -1,3 +1,6 @@
+import eventlet
+eventlet.monkey_patch(dns=False)
+
 import os
 import uuid
 import re
@@ -404,6 +407,18 @@ def normalize_phone(self, phone):
     if phone.startswith('0'):
         phone = '233' + phone[1:]
     return phone
+
+@app.route("/test-redis")
+def test_redis():
+    from redis import Redis
+    import os
+    try:
+        r = Redis.from_url(os.environ.get("REDIS_URL"))
+        r.set("ping", "pong")
+        return {"redis": r.get("ping").decode()}
+    except Exception as e:
+        return {"error": str(e)}
+
 
 def get_current_utc():
     """Get current UTC time (timezone naive but in UTC)"""
