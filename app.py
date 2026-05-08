@@ -4,7 +4,6 @@ os.environ["EVENTLET_NO_GREENDNS"] = "yes"  # Use system DNS
 import eventlet
 eventlet.monkey_patch()
 
-
 import os
 import uuid
 import re
@@ -18,7 +17,7 @@ from datetime import datetime, timedelta
 from functools import wraps
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-
+from urllib.parse import urlparse
 from flask import Flask, request, jsonify, session, send_from_directory, g
 import bcrypt
 import pyotp
@@ -55,57 +54,18 @@ env = os.environ.get('FLASK_ENV', 'production')
 app.config.from_object(config[env])
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your-secret-key-here')
 
-def fix_redis_url(redis_url):
-    """Convert railway.internal to IP address"""
-    if not redis_url:
-        return None
-    
-    try:
-        parsed = urlparse(redis_url)
-        hostname = parsed.hostname
-        
-        # If it's railway internal hostname, resolve to IP
-        if hostname and 'railway.internal' in hostname:
-            ip = socket.gethostbyname(hostname)
-            print(f"[DNS] Resolved {hostname} -> {ip}")
-            
-            # Rebuild URL with IP instead of hostname
-            if parsed.password:
-                return f"redis://:{parsed.password}@{ip}:{parsed.port}"
-            else:
-                return f"redis://{ip}:{parsed.port}"
-    except Exception as e:
-        print(f"[DNS] Failed to resolve: {e}")
-    
-    return redis_url
-
-# Get and fix Redis URL
-REDIS_URL = os.environ.get("REDIS_URL", "")
-FIXED_REDIS_URL = fix_redis_url(REDIS_URL) if REDIS_URL else None
-
-# Initialize rate limiter with fixed URL
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 
-if FIXED_REDIS_URL:
-    limiter = Limiter(
-        app,
-        key_func=get_remote_address,
-        default_limits=["500 per minute"],
-        storage_uri=FIXED_REDIS_URL
-    )
-    print("[Rate Limiter] ✅ Redis connected with IP address")
-else:
-    limiter = Limiter(
-        app,
-        key_func=get_remote_address,
-        default_limits=["500 per minute"],
-        storage_uri="memory://"
-    )
-    print("[Rate Limiter] Using memory storage")
+# Memory-based rate limiting (no Redis DNS issues)
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=["500 per minute"],
+    storage_uri="memory://"
+)
 
-limiter.init_app(app)
-
+print("[Rate Limiter] ✅ Running with in-memory storage")
 # Uploads config
 UPLOAD_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'uploads', 'profile_pics')
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
