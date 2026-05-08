@@ -1,4 +1,3 @@
-
 import os
 import uuid
 import re
@@ -12,7 +11,8 @@ from datetime import datetime, timedelta
 from functools import wraps
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from flask import Flask, request, jsonify, session
+
+from flask import Flask, request, jsonify, session, send_from_directory, g
 import bcrypt
 import pyotp
 import qrcode
@@ -20,7 +20,6 @@ import requests
 import sendgrid
 from sendgrid.helpers.mail import Mail, Email, To, Content
 
-from flask import Flask, jsonify, request, send_from_directory, g
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
@@ -40,33 +39,35 @@ COMPANY_PHONE = "0557388622"
 COMPANY_WEBSITE = "https://roamsmart.shop"
 COMPANY_DOMAIN = "roamsmart.shop"
 
-
-temp_storage = {}
-
-
+# Flask app setup
 app = Flask(__name__)
 
-
+# Environment config
 env = os.environ.get('FLASK_ENV', 'production')
 app.config.from_object(config[env])
-
-
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your-secret-key-here')
 
+# Redis-backed rate limiter
+redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
+limiter = Limiter(
+    key_func=get_remote_address,
+    storage_uri=redis_url,
+    default_limits=["100 per minute"]
+)
+limiter.init_app(app)
+
+# Uploads config
 UPLOAD_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'uploads', 'profile_pics')
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
 
-# Ensure upload directory exists
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
 
-# ========== INITIALIZE EXTENSIONS ==========
-# 1. Initialize Database
+# Initialize database
 db.init_app(app)
-
 
 def get_allowed_origins():
     """Get allowed origins for CORS (supports Railway and Vercel deployment)"""
@@ -125,9 +126,6 @@ CORS(app,
      max_age=3600
 )
 
-# Rate limiter (consider Redis for production)
-limiter = Limiter(app=app, key_func=get_remote_address, default_limits=["100 per minute"])
-
 # Socket.IO with unified origins
 socketio = SocketIO(
     app,
@@ -140,7 +138,6 @@ socketio = SocketIO(
 )
 
 
-# ========== AFRICA'S TALKING CONFIGURATION ==========
 AFRICASTALKING_API_KEY = os.environ.get('AFRICASTALKING_API_KEY')
 AFRICASTALKING_USERNAME = os.environ.get('AFRICASTALKING_USERNAME', 'sandbox')
 AFRICASTALKING_SENDER_ID = os.environ.get('AFRICASTALKING_SENDER_ID', 'Roamsmart')
