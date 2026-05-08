@@ -1,8 +1,6 @@
 import os
 
-# Bind to Railway's provided PORT or default to 5000 locally
 bind = f"0.0.0.0:{os.environ.get('PORT', '5000')}"
-
 worker_class = "eventlet"
 workers = 1
 threads = 2
