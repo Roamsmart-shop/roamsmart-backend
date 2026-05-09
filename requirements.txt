@@ -6,20 +6,20 @@ Flask-Migrate==4.0.5
 Werkzeug==2.3.7
 python-dotenv==1.0.0
 
-# ========== ASGI Servers (Replaces eventlet/gevent) ==========
+# ========== ASGI Servers ==========
 gunicorn==21.2.0
 uvicorn[standard]==0.27.0
 uvloop==0.19.0
 httptools==0.6.1
 asgiref==3.7.2
 
-# ========== Async HTTP Client (Better DNS) ==========
+# ========== Async HTTP Client ==========
 httpx==0.25.2
 aiohttp==3.9.0
 
 # ========== Database ==========
 psycopg2-binary==2.9.9
-asyncpg==0.29.0  # Async PostgreSQL driver
+asyncpg==0.29.0
 
 # ========== Authentication & Security ==========
 PyJWT==2.8.0
@@ -31,14 +31,13 @@ cryptography==41.0.7
 # ========== Rate Limiting ==========
 flask-limiter==3.5.0
 
-# ========== WebSocket (ASGI Compatible) ==========
+# ========== WebSocket ==========
 flask-socketio==5.3.4
 python-socketio==5.10.0
 python-engineio==4.7.0
 
-# ========== SMS (Africa's Talking) - FIXED ==========
+# ========== SMS (Africa's Talking) ==========
 africastalking==1.2.0
-# Use httpx instead of requests for better DNS
 
 # ========== 2FA ==========
 qrcode==7.4.2
@@ -47,7 +46,6 @@ Pillow==10.1.0
 
 # ========== Email ==========
 sendgrid==6.10.0
-aiohttp-sendgrid==1.0.0  # Async SendGrid
 
 # ========== Excel/Data Processing ==========
 pandas==2.1.3
