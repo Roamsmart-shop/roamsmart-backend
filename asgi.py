@@ -1,10 +1,9 @@
 # asgi.py - Place this in your backend root
 import os
 from app import app
-from socketio import ASGIApp
 import socketio
 
-# Create Socket.IO server (ASGI mode)
+# Create Socket.IO server in ASGI mode
 sio = socketio.AsyncServer(
     cors_allowed_origins="*",
     async_mode='asgi',
@@ -13,6 +12,7 @@ sio = socketio.AsyncServer(
 )
 
 # Wrap Flask app
+from socketio import ASGIApp
 asgi_app = ASGIApp(sio, app)
 
 # Export for uvicorn

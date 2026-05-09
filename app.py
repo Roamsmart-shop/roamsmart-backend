@@ -1,27 +1,4 @@
 import os
-os.environ["EVENTLET_NO_GREENDNS"] = "yes"  # Disable eventlet's DNS
-os.environ["DNS_TIMEOUT"] = "30"  # Increase timeout
-
-import eventlet
-eventlet.monkey_patch()
-
-# Force system DNS resolver
-import socket
-import dns.resolver
-
-# Use Google DNS as fallback
-dns.resolver.default_resolver = dns.resolver.Resolver()
-dns.resolver.default_resolver.nameservers = ['8.8.8.8', '8.8.4.4']
-
-# Pre-resolve API domains at startup
-try:
-    AFRICA_TALKING_IP = socket.gethostbyname('api.africastalking.com')
-    print(f"[DNS] Resolved api.africastalking.com -> {AFRICA_TALKING_IP}")
-except:
-    AFRICA_TALKING_IP = None
-    print("[DNS] Could not resolve api.africastalking.com")
-
-import os
 import uuid
 import re
 import base64
@@ -35,14 +12,14 @@ from functools import wraps
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from urllib.parse import urlparse
-from flask import Flask, request, jsonify, session, send_from_directory, g
+
 import bcrypt
 import pyotp
 import qrcode
 import requests
 import sendgrid
 from sendgrid.helpers.mail import Mail, Email, To, Content
-
+from flask import Flask, request, jsonify, session, send_from_directory, g
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
@@ -51,8 +28,12 @@ from sqlalchemy import func, and_, or_
 from werkzeug.utils import secure_filename
 from flask_session import Session
 from config import config
-import socket
 from models import *
+
+# ========== ASGI IMPORTS ==========
+import socket
+import httpx  # Better DNS than requests
+from asgiref.wsgi import WsgiToAsgi
 
 # ========== COMPANY CONFIGURATION ==========
 COMPANY_NAME = "Roamsmart Digital Service"
@@ -71,12 +52,15 @@ env = os.environ.get('FLASK_ENV', 'production')
 app.config.from_object(config[env])
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your-secret-key-here')
 
+# ========== RATE LIMITER ==========
 class NoOpLimiter:
     def limit(self, *args, **kwargs):
         return lambda f: f
 
 limiter = NoOpLimiter()
 print("[Rate Limiter] Disabled - using no-op limiter")
+
+# ========== UPLOAD CONFIGURATION ==========
 UPLOAD_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'uploads', 'profile_pics')
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
@@ -89,16 +73,14 @@ app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
 # Initialize database
 db.init_app(app)
 
+# ========== CORS CONFIGURATION ==========
 def get_allowed_origins():
-    """Get allowed origins for CORS (supports Railway and Vercel deployment)"""
+    """Get allowed origins for CORS"""
     origins = [
-        # Local development
         'http://localhost:3000',
         'http://localhost:5000',
         'http://127.0.0.1:3000',
         'http://127.0.0.1:5000',
-
-        # Production domains
         'https://roamsmart.shop',
         'https://www.roamsmart.shop',
         'https://api.roamsmart.shop',
@@ -106,80 +88,66 @@ def get_allowed_origins():
         'https://roamsmart-frontend-cgggs8bm4-roamsmart-shops-projects.vercel.app',
     ]
 
-    # Add Railway frontend URL if provided
     railway_frontend = os.environ.get('RAILWAY_FRONTEND_URL')
     if railway_frontend:
         origins.append(railway_frontend)
 
-    # Add Railway backend URL if available
     railway_backend = os.environ.get('RAILWAY_PUBLIC_DOMAIN')
     if railway_backend:
         origins.append(f'https://{railway_backend}')
 
-    # Remove duplicates while preserving order
     return list(dict.fromkeys(origins))
 
-# Allowed headers and methods
 ALLOWED_HEADERS = [
-    'Content-Type',
-    'Authorization',
-    'X-Requested-With',
-    'X-Company',
-    'X-Request-Time',
-    'X-Price-Auth',
-    'X-App-Version'
+    'Content-Type', 'Authorization', 'X-Requested-With', 'X-Company',
+    'X-Request-Time', 'X-Price-Auth', 'X-App-Version'
 ]
 
 ALLOWED_METHODS = ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH']
-
-# Unified origins
 ALLOWED_ORIGINS = get_allowed_origins()
 print(f"[CORS] Allowed origins: {ALLOWED_ORIGINS}")
 
-# Apply CORS
 CORS(app,
      origins=ALLOWED_ORIGINS,
      supports_credentials=True,
      allow_headers=ALLOWED_HEADERS,
      methods=ALLOWED_METHODS,
      expose_headers=ALLOWED_HEADERS,
-     max_age=3600
-)
+     max_age=3600)
 
-# Socket.IO with unified origins
+# ========== SOCKET.IO (ASGI mode) ==========
 socketio = SocketIO(
     app,
     cors_allowed_origins=ALLOWED_ORIGINS,
-    async_mode='eventlet',
+    async_mode='asgi',  # Changed from eventlet to asgi
     ping_timeout=60,
     ping_interval=25,
     max_http_buffer_size=1000000,
-    allow_upgrades=True,  # Allow WebSocket upgrade
-    transports=['polling', 'websocket'],  # Support both
+    allow_upgrades=True,
+    transports=['polling', 'websocket'],
     logger=True,
     engineio_logger=True
 )
 
-
+# ========== AFRICA'S TALKING ==========
 AFRICASTALKING_API_KEY = os.environ.get('AFRICASTALKING_API_KEY')
 AFRICASTALKING_USERNAME = os.environ.get('AFRICASTALKING_USERNAME', 'sandbox')
 AFRICASTALKING_SENDER_ID = os.environ.get('AFRICASTALKING_SENDER_ID', 'Roamsmart')
 
-# Initialize Africa's Talking
 africas_talking_sms = None
 if AFRICASTALKING_API_KEY and AFRICASTALKING_API_KEY != 'mock_key':
     try:
         import africastalking
         africastalking.initialize(AFRICASTALKING_USERNAME, AFRICASTALKING_API_KEY)
         africas_talking_sms = africastalking.SMS
-        print(f"[Africa's Talking] ✅ Initialized successfully")
+        print(f"[Africa's Talking] ✅ Initialized")
         print(f"[Africa's Talking] Username: {AFRICASTALKING_USERNAME}")
         print(f"[Africa's Talking] Sender ID: {AFRICASTALKING_SENDER_ID}")
     except Exception as e:
         print(f"[Africa's Talking] ❌ Error: {e}")
 else:
-    print("[Africa's Talking] No API key found - SMS will not be sent")
-
+    print("[Africa's Talking] No API key found - SMS disabled")
+    
 class PhoneVerificationService:
     """Handle phone number verification - SMS first, Email only if SMS fails or resend requested"""
     
