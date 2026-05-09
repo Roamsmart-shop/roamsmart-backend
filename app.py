@@ -1,15 +1,25 @@
 import os
-os.environ["EVENTLET_NO_GREENDNS"] = "yes"  # Force system DNS
-os.environ["DNS_TIMEOUT"] = "10"  # Increase timeout
+os.environ["EVENTLET_NO_GREENDNS"] = "yes"  # Disable eventlet's DNS
+os.environ["DNS_TIMEOUT"] = "30"  # Increase timeout
 
 import eventlet
 eventlet.monkey_patch()
 
-# Force DNS resolver to use system DNS
+# Force system DNS resolver
 import socket
 import dns.resolver
+
+# Use Google DNS as fallback
 dns.resolver.default_resolver = dns.resolver.Resolver()
-dns.resolver.default_resolver.nameservers = ['8.8.8.8', '8.8.4.4']  # Google DNS
+dns.resolver.default_resolver.nameservers = ['8.8.8.8', '8.8.4.4']
+
+# Pre-resolve API domains at startup
+try:
+    AFRICA_TALKING_IP = socket.gethostbyname('api.africastalking.com')
+    print(f"[DNS] Resolved api.africastalking.com -> {AFRICA_TALKING_IP}")
+except:
+    AFRICA_TALKING_IP = None
+    print("[DNS] Could not resolve api.africastalking.com")
 
 import os
 import uuid
