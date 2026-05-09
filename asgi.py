@@ -1,19 +1,32 @@
-# asgi.py - Place this in your backend root
+# asgi.py
 import os
-from app import app
-import socketio
+import sys
 
-# Create Socket.IO server in ASGI mode
-sio = socketio.AsyncServer(
-    cors_allowed_origins="*",
-    async_mode='asgi',
-    logger=True,
-    engineio_logger=True
-)
+# Add the current directory to path
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-# Wrap Flask app
-from socketio import ASGIApp
-asgi_app = ASGIApp(sio, app)
+# Import the Flask app
+try:
+    from app import app
+    print("[ASGI] Flask app imported successfully")
+except Exception as e:
+    print(f"[ASGI] Error importing app: {e}")
+    raise
 
-# Export for uvicorn
-application = asgi_app
+# Create ASGI app
+try:
+    from socketio import ASGIApp
+    import socketio
+    
+    sio = socketio.AsyncServer(
+        cors_allowed_origins="*",
+        async_mode='asgi'
+    )
+    
+    asgi_app = ASGIApp(sio, app)
+    application = asgi_app
+    print("[ASGI] ASGI app created successfully")
+except Exception as e:
+    print(f"[ASGI] Error creating ASGI app: {e}")
+    # Fallback to just the Flask app
+    application = app
