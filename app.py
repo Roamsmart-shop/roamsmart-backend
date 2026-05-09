@@ -1,4 +1,29 @@
+# ========== DNS FIX FOR EVENTLET - MUST BE FIRST ==========
 import os
+os.environ["EVENTLET_NO_GREENDNS"] = "yes"  # Disable eventlet's DNS resolver
+
+import eventlet
+eventlet.monkey_patch()
+
+# Force system DNS resolver
+import socket
+import dns.resolver
+dns.resolver.default_resolver = dns.resolver.Resolver()
+dns.resolver.default_resolver.nameservers = ['8.8.8.8', '8.8.4.4']
+
+# Pre-resolve external domains at startup for faster access
+def pre_resolve_domains():
+    domains = ['api.africastalking.com', 'api.sendgrid.com', 'smtp.sendgrid.net']
+    for domain in domains:
+        try:
+            ip = socket.gethostbyname(domain)
+            print(f"[DNS] ✅ Resolved {domain} -> {ip}")
+        except Exception as e:
+            print(f"[DNS] ❌ Failed to resolve {domain}: {e}")
+
+pre_resolve_domains()
+
+# Now regular imports
 import uuid
 import re
 import base64
@@ -30,11 +55,6 @@ from flask_session import Session
 from config import config
 from models import *
 
-# ========== ASGI IMPORTS ==========
-import socket
-import httpx  # Better DNS than requests
-from asgiref.wsgi import WsgiToAsgi
-
 # ========== COMPANY CONFIGURATION ==========
 COMPANY_NAME = "Roamsmart Digital Service"
 COMPANY_SHORT = "Roamsmart"
@@ -63,19 +83,17 @@ print("[Rate Limiter] Disabled - using no-op limiter")
 # ========== UPLOAD CONFIGURATION ==========
 UPLOAD_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'uploads', 'profile_pics')
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
-MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
+MAX_FILE_SIZE = 5 * 1024 * 1024
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 
 # Initialize database
 db.init_app(app)
 
 # ========== CORS CONFIGURATION ==========
 def get_allowed_origins():
-    """Get allowed origins for CORS"""
     origins = [
         'http://localhost:3000',
         'http://localhost:5000',
@@ -87,22 +105,18 @@ def get_allowed_origins():
         'https://roamsmart-frontend.vercel.app',
         'https://roamsmart-frontend-cgggs8bm4-roamsmart-shops-projects.vercel.app',
     ]
-
     railway_frontend = os.environ.get('RAILWAY_FRONTEND_URL')
     if railway_frontend:
         origins.append(railway_frontend)
-
     railway_backend = os.environ.get('RAILWAY_PUBLIC_DOMAIN')
     if railway_backend:
         origins.append(f'https://{railway_backend}')
-
     return list(dict.fromkeys(origins))
 
 ALLOWED_HEADERS = [
     'Content-Type', 'Authorization', 'X-Requested-With', 'X-Company',
     'X-Request-Time', 'X-Price-Auth', 'X-App-Version'
 ]
-
 ALLOWED_METHODS = ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH']
 ALLOWED_ORIGINS = get_allowed_origins()
 print(f"[CORS] Allowed origins: {ALLOWED_ORIGINS}")
@@ -115,11 +129,11 @@ CORS(app,
      expose_headers=ALLOWED_HEADERS,
      max_age=3600)
 
-# ========== SOCKET.IO (ASGI mode) ==========
+# ========== SOCKET.IO ==========
 socketio = SocketIO(
     app,
     cors_allowed_origins=ALLOWED_ORIGINS,
-    async_mode='asgi',  # Changed from eventlet to asgi
+    async_mode='eventlet',
     ping_timeout=60,
     ping_interval=25,
     max_http_buffer_size=1000000,
@@ -140,14 +154,15 @@ if AFRICASTALKING_API_KEY and AFRICASTALKING_API_KEY != 'mock_key':
         import africastalking
         africastalking.initialize(AFRICASTALKING_USERNAME, AFRICASTALKING_API_KEY)
         africas_talking_sms = africastalking.SMS
-        print(f"[Africa's Talking] ✅ Initialized")
+        print(f"[Africa's Talking] ✅ Initialized successfully")
         print(f"[Africa's Talking] Username: {AFRICASTALKING_USERNAME}")
         print(f"[Africa's Talking] Sender ID: {AFRICASTALKING_SENDER_ID}")
     except Exception as e:
         print(f"[Africa's Talking] ❌ Error: {e}")
 else:
-    print("[Africa's Talking] No API key found - SMS disabled")
-    
+    print("[Africa's Talking] No API key found - SMS will not be sent")
+
+
 class PhoneVerificationService:
     """Handle phone number verification - SMS first, Email only if SMS fails or resend requested"""
     
