@@ -1,8 +1,15 @@
 import os
-os.environ["EVENTLET_NO_GREENDNS"] = "yes"  # Use system DNS
+os.environ["EVENTLET_NO_GREENDNS"] = "yes"  # Force system DNS
+os.environ["DNS_TIMEOUT"] = "10"  # Increase timeout
 
 import eventlet
 eventlet.monkey_patch()
+
+# Force DNS resolver to use system DNS
+import socket
+import dns.resolver
+dns.resolver.default_resolver = dns.resolver.Resolver()
+dns.resolver.default_resolver.nameservers = ['8.8.8.8', '8.8.4.4']  # Google DNS
 
 import os
 import uuid
@@ -133,9 +140,12 @@ CORS(app,
 socketio = SocketIO(
     app,
     cors_allowed_origins=ALLOWED_ORIGINS,
-    async_mode='eventlet',   # switched from threading
+    async_mode='eventlet',
     ping_timeout=60,
     ping_interval=25,
+    max_http_buffer_size=1000000,
+    allow_upgrades=True,  # Allow WebSocket upgrade
+    transports=['polling', 'websocket'],  # Support both
     logger=True,
     engineio_logger=True
 )
