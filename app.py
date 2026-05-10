@@ -13797,14 +13797,16 @@ class EmailService:
 @app.route('/api/agent/apply', methods=['POST'])
 @token_required
 def apply_for_agent():
-    """Submit agent application with payment"""
+    """Submit agent application with payment (JSON only)"""
     try:
         print("=" * 50)
         print("AGENT APPLICATION STARTED")
-        print(f"Content-Type: {request.content_type}")
-        print(f"Request Method: {request.method}")
-        print(f"Has Files: {request.files}")
-        print(f"Form Data: {list(request.form.keys())}")
+        print("=" * 50)
+        
+        # Get JSON data
+        data = request.get_json()
+        if not data:
+            return jsonify({'success': False, 'error': 'No JSON data provided'}), 400
         
         user = g.current_user
         print(f"User: {user.username} (ID: {user.id})")
@@ -13822,13 +13824,15 @@ def apply_for_agent():
         if existing:
             return jsonify({'success': False, 'error': 'You already have a pending application'}), 400
         
-        # Get data from form (NOT from JSON)
-        payment_method = request.form.get('payment_method', 'manual')
-        phone = request.form.get('phone', user.phone or '')
-        payment_reference_from_form = request.form.get('payment_reference', '')
+        # Get data from JSON
+        payment_method = data.get('payment_method', 'manual')
+        phone = data.get('phone', user.phone or '')
+        proof_base64 = data.get('proof_base64', None)
+        proof_filename = data.get('proof_filename', 'proof.jpg')
         
         print(f"Payment Method: {payment_method}")
         print(f"Phone: {phone}")
+        print(f"Has Proof: {proof_base64 is not None}")
         
         # VALIDATE PAYMENT METHOD
         valid_payment_methods = ['mobile_money', 'paystack', 'manual']
@@ -13852,36 +13856,42 @@ def apply_for_agent():
             created_at=datetime.utcnow()
         )
         
-        # Handle proof upload
-        if 'proof' in request.files:
-            proof = request.files['proof']
-            if proof and proof.filename:
-                print(f"Processing proof file: {proof.filename}")
-                allowed_extensions = {'png', 'jpg', 'jpeg', 'pdf', 'PNG', 'JPG', 'JPEG', 'PDF'}
-                file_extension = proof.filename.rsplit('.', 1)[1].lower() if '.' in proof.filename else ''
-                if file_extension in allowed_extensions:
-                    # Create uploads directory if it doesn't exist
-                    upload_folder = os.path.join(app.root_path, 'uploads', 'agent_proofs')
-                    if not os.path.exists(upload_folder):
-                        os.makedirs(upload_folder)
-                    
-                    # Secure the filename
-                    filename = f"agent_proof_{reference}_{uuid.uuid4().hex[:8]}.{file_extension}"
-                    filepath = os.path.join(upload_folder, filename)
-                    proof.save(filepath)
-                    application.payment_proof_url = f"/uploads/agent_proofs/{filename}"
-                    print(f"Proof saved to: {application.payment_proof_url}")
-                else:
-                    print(f"Invalid file extension: {file_extension}")
+        # Handle base64 proof upload
+        if proof_base64:
+            try:
+                import base64
+                # Remove data URL prefix if present
+                if ',' in proof_base64:
+                    proof_base64 = proof_base64.split(',')[1]
+                
+                # Decode base64
+                file_data = base64.b64decode(proof_base64)
+                
+                # Create uploads directory
+                upload_folder = os.path.join(app.root_path, 'uploads', 'agent_proofs')
+                if not os.path.exists(upload_folder):
+                    os.makedirs(upload_folder)
+                
+                # Save file
+                file_extension = proof_filename.rsplit('.', 1)[1].lower() if '.' in proof_filename else 'jpg'
+                filename = f"agent_proof_{reference}_{uuid.uuid4().hex[:8]}.{file_extension}"
+                filepath = os.path.join(upload_folder, filename)
+                
+                with open(filepath, 'wb') as f:
+                    f.write(file_data)
+                
+                application.payment_proof_url = f"/uploads/agent_proofs/{filename}"
+                print(f"Proof saved to: {application.payment_proof_url}")
+            except Exception as file_error:
+                print(f"File save error: {file_error}")
         
         # Save to database
         db.session.add(application)
         db.session.commit()
         print(f"✅ Application saved to database with ID: {application.id}")
         
-        # Try to send emails (wrap in try-catch so they don't break the response)
+        # Try to send emails
         try:
-            # Send confirmation email to applicant
             send_email(
                 user.email,
                 f"Agent Application Received - {COMPANY_NAME}",
