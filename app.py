@@ -13795,8 +13795,6 @@ class EmailService:
 
 # ========== AGENT APPLICATION ROUTES (Updated) ==========
 
-
-
 @app.route('/api/agent/apply', methods=['POST'])
 @token_required
 def apply_for_agent():
@@ -13817,21 +13815,34 @@ def apply_for_agent():
         if existing:
             return jsonify({'success': False, 'error': 'You already have a pending application'}), 400
         
-        # Get form data
-        amount = 100.00
-        payment_method = request.form.get('payment_method', 'mobile_money')
-        phone = request.form.get('phone', user.phone or '')
-        payment_reference_from_form = request.form.get('payment_reference', '')
+        # Get form data - handle both FormData and JSON
+        if request.is_json:
+            data = request.get_json()
+            payment_method = data.get('payment_method', 'manual')
+            phone = data.get('phone', user.phone or '')
+            payment_reference_from_form = data.get('payment_reference', '')
+        else:
+            payment_method = request.form.get('payment_method', 'manual')
+            phone = request.form.get('phone', user.phone or '')
+            payment_reference_from_form = request.form.get('payment_reference', '')
         
-        # Generate unique reference
+        # VALIDATE PAYMENT METHOD
+        valid_payment_methods = ['mobile_money', 'paystack', 'manual']
+        if payment_method not in valid_payment_methods:
+            return jsonify({
+                'success': False, 
+                'error': f'Invalid payment method. Choose from: {", ".join(valid_payment_methods)}'
+            }), 400
+        
+        amount = 100.00
         reference = f"AGENT-{uuid.uuid4().hex[:8].upper()}"
         
-        # Create application
+        # Create application with payment_method
         application = AgentApplication(
             user_id=user.id,
             payment_reference=reference,
             payment_amount=amount,
-            payment_method=payment_method,
+            payment_method=payment_method,  # This matches your model
             status='pending',
             created_at=datetime.utcnow()
         )
@@ -13854,6 +13865,8 @@ def apply_for_agent():
         
         db.session.add(application)
         db.session.commit()
+        
+        print(f"✅ Agent application created: {reference} with payment_method: {payment_method}")
         
         # Send confirmation email to applicant
         send_email(
@@ -13923,6 +13936,36 @@ def apply_for_agent():
 @app.route('/api/agent/application/status', methods=['GET'])
 @token_required
 def get_agent_application_status():
+    """Get user's agent application status"""
+    try:
+        application = AgentApplication.query.filter_by(
+            user_id=g.current_user.id
+        ).order_by(AgentApplication.created_at.desc()).first()
+        
+        if not application:
+            return jsonify({'success': True, 'data': {'has_applied': False, 'status': None}})
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'has_applied': True,
+                'status': application.status,
+                'rejection_reason': application.rejection_reason,
+                'submitted_at': application.created_at.isoformat(),
+                'approved_at': application.approved_at.isoformat() if application.approved_at else None,
+                'payment_reference': application.payment_reference,
+                'payment_proof_url': application.payment_proof_url
+            }
+        })
+        
+    except Exception as e:
+        print(f"Get agent application status error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/agent/application/status', methods=['GET'])
+@token_required
+def get_agent_application_status():
     """Get agent application status"""
     try:
         user = g.current_user
@@ -13968,125 +14011,7 @@ def get_agent_application_status():
     except Exception as e:
         print(f"Get application status error: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
-
-
-def get_payment_instructions(method, reference, amount, phone):
-    """Get payment instructions based on payment method"""
-    instructions = {
-        'mobile_money': {
-            'type': 'mobile_money',
-            'number': COMPANY_PHONE,
-            'reference': reference,
-            'amount': amount,
-            'steps': [
-                f'Go to your mobile money wallet (MTN MoMo, Telecel Cash, or AirtelTigo Money)',
-                f'Select "Send Money"',
-                f'Enter number: {COMPANY_PHONE}',
-                f'Enter amount: GHS {amount:.2f}',
-                f'Enter reference: {reference}',
-                f'Complete the transaction',
-                f'Keep the transaction ID for reference'
-            ]
-        },
-        'paystack': {
-            'type': 'paystack',
-            'reference': reference,
-            'amount': amount,
-            'steps': [
-                f'Click the Paystack payment button below',
-                f'Choose your preferred payment method (Card or Bank Transfer)',
-                f'Complete the payment securely',
-                f'Your application will be automatically processed after payment'
-            ],
-            'payment_url': f"{COMPANY_WEBSITE}/pay/agent/{reference}"
-        },
-        'manual': {
-            'type': 'manual',
-            'number': COMPANY_PHONE,
-            'reference': reference,
-            'amount': amount,
-            'steps': [
-                f'Send GHS {amount:.2f} to {COMPANY_PHONE}',
-                f'Use reference: {reference}',
-                f'Upload your payment proof/screenshot',
-                f'Application will be reviewed within 24 hours after payment confirmation'
-            ]
-        }
-    }
-    return instructions.get(method, instructions['manual'])
-
-
-def get_payment_instructions_html(method, reference, amount, phone):
-    """Get HTML payment instructions"""
-    instructions = get_payment_instructions(method, reference, amount, phone)
     
-    html = f"""
-    <div style="background: #fff3cd; border: 1px solid #ffc107; padding: 15px; border-radius: 8px; margin: 20px 0;">
-        <h3 style="color: #856404; margin-top: 0;">📋 Payment Instructions</h3>
-        <p><strong>Amount to Pay:</strong> GHS {amount:.2f}</p>
-        <p><strong>Reference:</strong> <code>{reference}</code></p>
-    """
-    
-    if method in ['mobile_money', 'manual']:
-        html += f"""
-        <p><strong>Send Money To:</strong> {COMPANY_PHONE}</p>
-        <ol>
-            {''.join([f'<li>{step}</li>' for step in instructions['steps']])}
-        </ol>
-        """
-    elif method == 'paystack':
-        html += f"""
-        <ol>
-            {''.join([f'<li>{step}</li>' for step in instructions['steps']])}
-        </ol>
-        <a href="{instructions['payment_url']}" style="background: #00B3E6; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
-            Pay with Paystack →
-        </a>
-        """
-    
-    html += """
-        <p class="text-muted" style="margin-top: 15px;">⚠️ Keep your payment reference for future correspondence</p>
-    </div>
-    """
-    
-    return html
-
-
-@app.route('/api/admin/agent-applications', methods=['GET'])
-@token_required
-@admin_required
-def get_agent_applications():
-    """Get all agent applications for admin"""
-    try:
-        status = request.args.get('status', 'pending')
-        
-        applications = AgentApplication.query.filter_by(status=status).order_by(
-            AgentApplication.created_at.desc()
-        ).all()
-        
-        result = []
-        for app in applications:
-            user = User.query.get(app.user_id)
-            result.append({
-                'id': app.id,
-                'user_id': app.user_id,
-                'username': user.username if user else 'Unknown',
-                'email': user.email if user else 'Unknown',
-                'phone': user.phone if user else 'Unknown',
-                'amount': float(app.payment_amount),
-                'payment_reference': app.payment_reference,
-                'payment_proof_url': app.payment_proof_url,
-                'submitted_at': app.created_at.isoformat(),
-                'status': app.status
-            })
-        
-        return jsonify({'success': True, 'data': result})
-        
-    except Exception as e:
-        print(f"Get agent applications error: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
 @app.route('/api/admin/agent-applications/<int:app_id>/approve', methods=['POST'])
 @token_required
 @admin_required
