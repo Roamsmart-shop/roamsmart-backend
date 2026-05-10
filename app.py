@@ -13794,13 +13794,17 @@ class EmailService:
 
 
 # ========== AGENT APPLICATION ROUTES (Updated) ==========
-
 @app.route('/api/agent/apply', methods=['POST'])
 @token_required
 def apply_for_agent():
     """Submit agent application with payment"""
     try:
+        print("=" * 50)
+        print("AGENT APPLICATION STARTED")
+        print("=" * 50)
+        
         user = g.current_user
+        print(f"User: {user.username} (ID: {user.id})")
         
         # Check if user is already an agent
         if user.is_agent and user.agent_approved:
@@ -13815,16 +13819,30 @@ def apply_for_agent():
         if existing:
             return jsonify({'success': False, 'error': 'You already have a pending application'}), 400
         
-        # Get form data - handle both FormData and JSON
-        if request.is_json:
+        # Handle both JSON and FormData
+        payment_method = 'manual'
+        phone = user.phone or ''
+        payment_reference_from_form = ''
+        
+        # Check content type and parse accordingly
+        content_type = request.headers.get('Content-Type', '')
+        
+        if 'application/json' in content_type:
+            # Handle JSON request
             data = request.get_json()
             payment_method = data.get('payment_method', 'manual')
             phone = data.get('phone', user.phone or '')
             payment_reference_from_form = data.get('payment_reference', '')
+            print("Processing JSON request")
         else:
+            # Handle FormData (multipart/form-data)
             payment_method = request.form.get('payment_method', 'manual')
             phone = request.form.get('phone', user.phone or '')
             payment_reference_from_form = request.form.get('payment_reference', '')
+            print("Processing FormData request")
+        
+        print(f"Payment Method: {payment_method}")
+        print(f"Phone: {phone}")
         
         # VALIDATE PAYMENT METHOD
         valid_payment_methods = ['mobile_money', 'paystack', 'manual']
@@ -13836,23 +13854,25 @@ def apply_for_agent():
         
         amount = 100.00
         reference = f"AGENT-{uuid.uuid4().hex[:8].upper()}"
+        print(f"Generated Reference: {reference}")
         
-        # Create application with payment_method
+        # Create application
         application = AgentApplication(
             user_id=user.id,
             payment_reference=reference,
             payment_amount=amount,
-            payment_method=payment_method,  # This matches your model
+            payment_method=payment_method,
             status='pending',
             created_at=datetime.utcnow()
         )
         
-        # Handle proof upload for manual payments
+        # Handle proof upload (only for multipart/form-data)
         if 'proof' in request.files:
             proof = request.files['proof']
             if proof and proof.filename:
+                print(f"Processing proof file: {proof.filename}")
                 allowed_extensions = {'png', 'jpg', 'jpeg', 'pdf'}
-                file_extension = proof.filename.rsplit('.', 1)[1].lower()
+                file_extension = proof.filename.rsplit('.', 1)[1].lower() if '.' in proof.filename else ''
                 if file_extension in allowed_extensions:
                     upload_folder = app.config.get('UPLOAD_FOLDER', 'uploads/agent_proofs')
                     if not os.path.exists(upload_folder):
@@ -13862,58 +13882,47 @@ def apply_for_agent():
                     filepath = os.path.join(upload_folder, filename)
                     proof.save(filepath)
                     application.payment_proof_url = f"/uploads/agent_proofs/{filename}"
+                    print(f"Proof saved to: {application.payment_proof_url}")
         
+        # Save to database
         db.session.add(application)
         db.session.commit()
+        print(f"✅ Application saved to database with ID: {application.id}")
         
-        print(f"✅ Agent application created: {reference} with payment_method: {payment_method}")
-        
-        # Send confirmation email to applicant
-        send_email(
-            user.email,
-            f"Agent Application Received - {COMPANY_NAME}",
-            f"""
-            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-                <h2 style="color: #8B0000;">Application Received - {COMPANY_NAME}</h2>
-                <p>Dear {user.username},</p>
-                <p>Thank you for your interest in becoming a Roamsmart agent.</p>
-                
-                <div style="background: #f5f5f5; padding: 15px; border-radius: 8px; margin: 20px 0;">
-                    <p><strong>Application Reference:</strong> {reference}</p>
-                    <p><strong>Amount:</strong> GHS {amount:.2f}</p>
-                    <p><strong>Payment Method:</strong> {payment_method.upper()}</p>
-                </div>
-                
-                {get_payment_instructions_html(payment_method, reference, amount, phone)}
-                
-                <a href="{COMPANY_WEBSITE}/agent/status" style="background: #8B0000; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin: 20px 0;">Track Application Status</a>
-                
-                <p>Best regards,<br/>{COMPANY_NAME} Team</p>
-            </div>
-            """
-        )
-        
-        # Notify admin via email
-        admins = User.query.filter(User.role.in_(['admin', 'super_admin'])).all()
-        for admin in admins:
+        # Try to send email (don't fail if email fails)
+        try:
+            # Send confirmation email to applicant
             send_email(
-                admin.email,
-                f"New Agent Application - {reference} - {COMPANY_NAME}",
+                user.email,
+                f"Agent Application Received - {COMPANY_NAME}",
                 f"""
-                <h3>New Agent Application - {COMPANY_NAME}</h3>
-                <p><strong>Applicant:</strong> {user.username}</p>
-                <p><strong>Email:</strong> {user.email}</p>
-                <p><strong>Phone:</strong> {phone or user.phone}</p>
-                <p><strong>Payment Method:</strong> {payment_method.upper()}</p>
-                <p><strong>Reference:</strong> {reference}</p>
-                <p><strong>Amount:</strong> GHS {amount:.2f}</p>
-                <a href="{COMPANY_WEBSITE}/admin/agent-applications/{application.id}">Review Application</a>
+                <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                    <h2 style="color: #8B0000;">Application Received - {COMPANY_NAME}</h2>
+                    <p>Dear {user.username},</p>
+                    <p>Thank you for your interest in becoming a Roamsmart agent.</p>
+                    
+                    <div style="background: #f5f5f5; padding: 15px; border-radius: 8px; margin: 20px 0;">
+                        <p><strong>Application Reference:</strong> {reference}</p>
+                        <p><strong>Amount:</strong> GHS {amount:.2f}</p>
+                        <p><strong>Payment Method:</strong> {payment_method.upper()}</p>
+                    </div>
+                    
+                    <p><strong>Payment Instructions:</strong></p>
+                    <ul>
+                        <li>Send GHS {amount:.2f} to {COMPANY_PHONE}</li>
+                        <li>Use reference: <strong>{reference}</strong></li>
+                        <li>Your application will be reviewed after payment confirmation</li>
+                    </ul>
+                    
+                    <p>Best regards,<br/>{COMPANY_NAME} Team</p>
+                </div>
                 """
             )
+            print(f"✅ Email sent to applicant: {user.email}")
+        except Exception as email_error:
+            print(f"Email error (non-critical): {email_error}")
         
-        # Log activity
-        log_activity(user.id, 'apply_agent', f'Submitted agent application via {payment_method}: {reference}')
-        
+        # Return success response
         return jsonify({
             'success': True,
             'message': f'Application submitted successfully to {COMPANY_NAME}!',
@@ -13923,12 +13932,18 @@ def apply_for_agent():
                 'amount': amount,
                 'status': application.status,
                 'payment_method': payment_method,
-                'instructions': get_payment_instructions(payment_method, reference, amount, phone)
+                'instructions': {
+                    'amount': amount,
+                    'reference': reference,
+                    'phone': COMPANY_PHONE
+                }
             }
-        })
+        }), 201
         
     except Exception as e:
-        print(f"Apply for agent error: {e}")
+        print(f"❌ ERROR in apply_for_agent: {str(e)}")
+        import traceback
+        traceback.print_exc()
         db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
 
