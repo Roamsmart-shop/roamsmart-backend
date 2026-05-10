@@ -13801,7 +13801,10 @@ def apply_for_agent():
     try:
         print("=" * 50)
         print("AGENT APPLICATION STARTED")
-        print("=" * 50)
+        print(f"Content-Type: {request.content_type}")
+        print(f"Request Method: {request.method}")
+        print(f"Has Files: {request.files}")
+        print(f"Form Data: {list(request.form.keys())}")
         
         user = g.current_user
         print(f"User: {user.username} (ID: {user.id})")
@@ -13819,27 +13822,10 @@ def apply_for_agent():
         if existing:
             return jsonify({'success': False, 'error': 'You already have a pending application'}), 400
         
-        # Handle both JSON and FormData
-        payment_method = 'manual'
-        phone = user.phone or ''
-        payment_reference_from_form = ''
-        
-        # Check content type and parse accordingly
-        content_type = request.headers.get('Content-Type', '')
-        
-        if 'application/json' in content_type:
-            # Handle JSON request
-            data = request.get_json()
-            payment_method = data.get('payment_method', 'manual')
-            phone = data.get('phone', user.phone or '')
-            payment_reference_from_form = data.get('payment_reference', '')
-            print("Processing JSON request")
-        else:
-            # Handle FormData (multipart/form-data)
-            payment_method = request.form.get('payment_method', 'manual')
-            phone = request.form.get('phone', user.phone or '')
-            payment_reference_from_form = request.form.get('payment_reference', '')
-            print("Processing FormData request")
+        # Get data from form (NOT from JSON)
+        payment_method = request.form.get('payment_method', 'manual')
+        phone = request.form.get('phone', user.phone or '')
+        payment_reference_from_form = request.form.get('payment_reference', '')
         
         print(f"Payment Method: {payment_method}")
         print(f"Phone: {phone}")
@@ -13866,30 +13852,34 @@ def apply_for_agent():
             created_at=datetime.utcnow()
         )
         
-        # Handle proof upload (only for multipart/form-data)
+        # Handle proof upload
         if 'proof' in request.files:
             proof = request.files['proof']
             if proof and proof.filename:
                 print(f"Processing proof file: {proof.filename}")
-                allowed_extensions = {'png', 'jpg', 'jpeg', 'pdf'}
+                allowed_extensions = {'png', 'jpg', 'jpeg', 'pdf', 'PNG', 'JPG', 'JPEG', 'PDF'}
                 file_extension = proof.filename.rsplit('.', 1)[1].lower() if '.' in proof.filename else ''
                 if file_extension in allowed_extensions:
-                    upload_folder = app.config.get('UPLOAD_FOLDER', 'uploads/agent_proofs')
+                    # Create uploads directory if it doesn't exist
+                    upload_folder = os.path.join(app.root_path, 'uploads', 'agent_proofs')
                     if not os.path.exists(upload_folder):
                         os.makedirs(upload_folder)
                     
+                    # Secure the filename
                     filename = f"agent_proof_{reference}_{uuid.uuid4().hex[:8]}.{file_extension}"
                     filepath = os.path.join(upload_folder, filename)
                     proof.save(filepath)
                     application.payment_proof_url = f"/uploads/agent_proofs/{filename}"
                     print(f"Proof saved to: {application.payment_proof_url}")
+                else:
+                    print(f"Invalid file extension: {file_extension}")
         
         # Save to database
         db.session.add(application)
         db.session.commit()
         print(f"✅ Application saved to database with ID: {application.id}")
         
-        # Try to send email (don't fail if email fails)
+        # Try to send emails (wrap in try-catch so they don't break the response)
         try:
             # Send confirmation email to applicant
             send_email(
