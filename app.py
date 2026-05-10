@@ -1315,35 +1315,45 @@ def get_avatar(filename):
 
 # ========== PAYSTACK PAYMENT ENDPOINTS ==========
 
-@app.route('/api/paystack/initialize', methods=['POST'])
+@app.route('/api/payment/paystack/initialize', methods=['POST'])
 @token_required
-def initialize_payment():
+def initialize_paystack_payment():
     """Initialize Paystack payment for wallet funding"""
     try:
         data = request.get_json()
         amount = data.get('amount')
+        email = data.get('email')
+        phone = data.get('phone')
         
         if not amount or amount < 10:
             return jsonify({'success': False, 'error': 'Minimum amount is GHS 10'}), 400
         
+        if not email:
+            return jsonify({'success': False, 'error': 'Email is required'}), 400
+        
         user = g.current_user
         
-        # Initialize transaction
+        # Generate unique reference
+        reference = f"PAYSTACK_{int(datetime.utcnow().timestamp())}_{user.id}_{secrets.token_hex(4)}"
+        
+        # Initialize transaction with Paystack
         result = initialize_paystack_transaction(
-            email=user.email,
+            email=email,
             amount=amount,
+            reference=reference,
             metadata={
                 'user_id': user.id,
                 'username': user.username,
+                'phone': phone,
                 'type': 'wallet_funding'
             }
         )
         
         if result['success']:
-            # Store pending transaction in database
+            # Store pending transaction using your existing model
             pending_tx = PendingTransaction(
                 user_id=user.id,
-                reference=result['reference'],
+                reference=reference,
                 amount=amount,
                 payment_method='paystack',
                 status='pending',
@@ -1354,27 +1364,26 @@ def initialize_payment():
             
             return jsonify({
                 'success': True,
-                'authorization_url': result['authorization_url'],
-                'reference': result['reference'],
-                'amount': amount
+                'data': {
+                    'authorization_url': result['authorization_url'],
+                    'reference': reference,
+                    'amount': amount
+                }
             })
         else:
             return jsonify({'success': False, 'error': result.get('error', 'Payment initialization failed')}), 500
         
     except Exception as e:
-        print(f"Initialize payment error: {e}")
+        print(f"Initialize Paystack payment error: {e}")
         db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
-@app.route('/api/paystack/verify', methods=['POST'])
+@app.route('/api/payment/paystack/verify/<reference>', methods=['GET'])
 @token_required
-def verify_payment():
-    """Verify Paystack payment after callback"""
+def verify_paystack_payment(reference):
+    """Verify Paystack payment status"""
     try:
-        data = request.get_json()
-        reference = data.get('reference')
-        
         if not reference:
             return jsonify({'success': False, 'error': 'Reference required'}), 400
         
@@ -1384,60 +1393,90 @@ def verify_payment():
         if not result['success']:
             return jsonify({'success': False, 'error': 'Payment verification failed'}), 400
         
-        # Check if already processed
+        # Check if already processed using your existing model
         pending_tx = PendingTransaction.query.filter_by(
             reference=reference,
             status='pending'
         ).first()
         
         if not pending_tx:
-            return jsonify({'success': False, 'error': 'Transaction not found or already processed'}), 404
+            # Check if already completed in transactions
+            completed_tx = Transaction.query.filter_by(reference=reference).first()
+            if completed_tx:
+                return jsonify({
+                    'success': True,
+                    'data': {
+                        'status': 'success',
+                        'amount': float(completed_tx.amount),
+                        'message': 'Payment already processed'
+                    }
+                })
+            return jsonify({'success': False, 'error': 'Transaction not found'}), 404
         
-        # Update user wallet
-        user = User.query.get(pending_tx.user_id)
-        if not user:
-            return jsonify({'success': False, 'error': 'User not found'}), 404
-        
-        # Add to wallet
-        balance_before = user.wallet_balance
-        user.wallet_balance += result['amount']
-        
-        # Update transaction status
-        pending_tx.status = 'completed'
-        pending_tx.completed_at = datetime.utcnow()
-        
-        # Create transaction record
-        transaction = Transaction(
-            user_id=user.id,
-            type='fund',
-            amount=result['amount'],
-            balance_before=balance_before,
-            balance_after=user.wallet_balance,
-            description=f'Wallet funding via Paystack - {reference}',
-            reference=reference,
-            status='completed'
-        )
-        db.session.add(transaction)
-        
-        db.session.commit()
-        
-        # Send email confirmation
-        send_wallet_funding_email(user.email, user.username, result['amount'], user.wallet_balance)
-        
-        return jsonify({
-            'success': True,
-            'message': f'Successfully added GHS {result["amount"]:.2f} to your wallet',
-            'new_balance': float(user.wallet_balance),
-            'amount': result['amount']
-        })
+        if result['status'] == 'success':
+            # Update user wallet
+            user = User.query.get(pending_tx.user_id)
+            if not user:
+                return jsonify({'success': False, 'error': 'User not found'}), 404
+            
+            # Add to wallet
+            balance_before = user.wallet_balance
+            user.wallet_balance += result['amount']
+            
+            # Update pending transaction
+            pending_tx.status = 'completed'
+            pending_tx.completed_at = datetime.utcnow()
+            
+            # Create transaction record using your existing model
+            transaction = Transaction(
+                user_id=user.id,
+                type='fund',
+                amount=result['amount'],
+                balance_before=balance_before,
+                balance_after=user.wallet_balance,
+                description=f'Wallet funding via Paystack - {reference}',
+                reference=reference,
+                status='completed',
+                meta_data={
+                    'payment_method': 'paystack',
+                    'reference': reference
+                }
+            )
+            db.session.add(transaction)
+            db.session.commit()
+            
+            # Send email confirmation
+            send_wallet_funding_email(user.email, user.username, result['amount'], user.wallet_balance)
+            
+            return jsonify({
+                'success': True,
+                'data': {
+                    'status': 'success',
+                    'amount': float(result['amount']),
+                    'new_balance': float(user.wallet_balance),
+                    'message': f'Successfully added GHS {result["amount"]:.2f} to your wallet'
+                }
+            })
+        else:
+            # Update failed transaction
+            pending_tx.status = 'failed'
+            db.session.commit()
+            
+            return jsonify({
+                'success': False,
+                'data': {
+                    'status': 'failed',
+                    'message': 'Payment was not successful'
+                }
+            }), 400
         
     except Exception as e:
-        print(f"Verify payment error: {e}")
+        print(f"Verify Paystack payment error: {e}")
         db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
-@app.route('/api/paystack/webhook', methods=['POST'])
+@app.route('/api/payment/paystack/webhook', methods=['POST'])
 def paystack_webhook():
     """Paystack webhook for automatic payment confirmation"""
     try:
@@ -1453,12 +1492,13 @@ def paystack_webhook():
         if event == 'charge.success':
             data = event_data.get('data', {})
             reference = data.get('reference')
-            amount = data.get('amount', 0) / 100
+            amount = data.get('amount', 0) / 100  # Convert from pesewas
             
-            # Process the payment
+            # Find pending transaction using your existing model
             pending_tx = PendingTransaction.query.filter_by(
                 reference=reference,
-                status='pending'
+                status='pending',
+                payment_method='paystack'
             ).first()
             
             if pending_tx and pending_tx.status == 'pending':
@@ -1470,6 +1510,7 @@ def paystack_webhook():
                     pending_tx.status = 'completed'
                     pending_tx.completed_at = datetime.utcnow()
                     
+                    # Create transaction record using your existing model
                     transaction = Transaction(
                         user_id=user.id,
                         type='fund',
@@ -1478,17 +1519,22 @@ def paystack_webhook():
                         balance_after=user.wallet_balance,
                         description=f'Wallet funding via Paystack - {reference}',
                         reference=reference,
-                        status='completed'
+                        status='completed',
+                        meta_data={
+                            'payment_method': 'paystack',
+                            'webhook': True
+                        }
                     )
                     db.session.add(transaction)
                     db.session.commit()
                     
-                    print(f"[WEBHOOK] Processed payment {reference} for {user.email}")
+                    print(f"[WEBHOOK] Processed Paystack payment {reference} for {user.email}")
         
         return jsonify({'success': True})
         
     except Exception as e:
-        print(f"Webhook error: {e}")
+        print(f"Paystack webhook error: {e}")
+        db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
     
 def send_wallet_funding_email(email, username, amount, new_balance):
@@ -1515,6 +1561,434 @@ def send_wallet_funding_email(email, username, amount, new_balance):
     </div>
     """
     send_email(email, "Wallet Funded Successfully", html_content)
+
+@app.route('/api/payment/momo/initialize', methods=['POST'])
+@token_required
+def initialize_momo_payment():
+    """Initialize MTN MoMo payment for wallet funding"""
+    try:
+        data = request.get_json()
+        amount = data.get('amount')
+        phone = data.get('phone')
+        name = data.get('name')
+        
+        if not amount or amount < 10:
+            return jsonify({'success': False, 'error': 'Minimum amount is GHS 10'}), 400
+        
+        if not phone:
+            return jsonify({'success': False, 'error': 'Phone number is required'}), 400
+        
+        if not name:
+            return jsonify({'success': False, 'error': 'Name is required'}), 400
+        
+        user = g.current_user
+        
+        # Validate Ghana phone number
+        if not validate_ghana_phone(phone):
+            return jsonify({'success': False, 'error': 'Invalid Ghana phone number'}), 400
+        
+        # Generate unique reference
+        reference = f"MOMO_{int(datetime.utcnow().timestamp())}_{user.id}_{secrets.token_hex(4)}"
+        
+        # Initialize MTN MoMo transaction
+        result = initialize_momo_transaction(
+            amount=amount,
+            phone=phone,
+            reference=reference,
+            name=name,
+            metadata={
+                'user_id': user.id,
+                'username': user.username,
+                'type': 'wallet_funding'
+            }
+        )
+        
+        if result['success']:
+            # Store pending transaction using your existing model
+            pending_tx = PendingTransaction(
+                user_id=user.id,
+                reference=reference,
+                amount=amount,
+                payment_method='momo',
+                status='pending',
+                created_at=datetime.utcnow()
+            )
+            db.session.add(pending_tx)
+            db.session.commit()
+            
+            return jsonify({
+                'success': True,
+                'data': {
+                    'paymentReference': result['payment_reference'],
+                    'checkoutRequestId': result['checkout_request_id'],
+                    'reference': reference,
+                    'amount': amount,
+                    'message': 'Payment initiated. Please check your phone to authorize.'
+                }
+            })
+        else:
+            return jsonify({'success': False, 'error': result.get('error', 'Payment initialization failed')}), 500
+        
+    except Exception as e:
+        print(f"Initialize MoMo payment error: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/payment/momo/verify/<reference>', methods=['GET'])
+@token_required
+def verify_momo_payment(reference):
+    """Verify MTN MoMo payment status"""
+    try:
+        if not reference:
+            return jsonify({'success': False, 'error': 'Reference required'}), 400
+        
+        # Verify with MTN MoMo
+        result = verify_momo_transaction(reference)
+        
+        if not result['success']:
+            return jsonify({'success': False, 'error': 'Payment verification failed'}), 400
+        
+        # Check if already processed using your existing model
+        pending_tx = PendingTransaction.query.filter_by(
+            reference=reference,
+            status='pending'
+        ).first()
+        
+        if not pending_tx:
+            # Check if already completed in transactions
+            completed_tx = Transaction.query.filter_by(reference=reference).first()
+            if completed_tx:
+                return jsonify({
+                    'success': True,
+                    'data': {
+                        'status': 'success',
+                        'amount': float(completed_tx.amount),
+                        'message': 'Payment already processed'
+                    }
+                })
+            return jsonify({'success': False, 'error': 'Transaction not found'}), 404
+        
+        if result['status'] == 'success':
+            # Update user wallet
+            user = User.query.get(pending_tx.user_id)
+            if not user:
+                return jsonify({'success': False, 'error': 'User not found'}), 404
+            
+            # Add to wallet
+            balance_before = user.wallet_balance
+            user.wallet_balance += result['amount']
+            
+            # Update pending transaction
+            pending_tx.status = 'completed'
+            pending_tx.completed_at = datetime.utcnow()
+            
+            # Create transaction record using your existing model
+            transaction = Transaction(
+                user_id=user.id,
+                type='fund',
+                amount=result['amount'],
+                balance_before=balance_before,
+                balance_after=user.wallet_balance,
+                description=f'Wallet funding via MTN MoMo - {reference}',
+                reference=reference,
+                status='completed',
+                meta_data={
+                    'payment_method': 'momo',
+                    'reference': reference
+                }
+            )
+            db.session.add(transaction)
+            db.session.commit()
+            
+            # Send SMS confirmation
+            send_momo_confirmation_sms(user.phone or phone, result['amount'], user.wallet_balance)
+            
+            return jsonify({
+                'success': True,
+                'data': {
+                    'status': 'success',
+                    'amount': float(result['amount']),
+                    'new_balance': float(user.wallet_balance),
+                    'message': f'Successfully added GHS {result["amount"]:.2f} to your wallet'
+                }
+            })
+        elif result['status'] == 'pending':
+            return jsonify({
+                'success': True,
+                'data': {
+                    'status': 'pending',
+                    'message': 'Payment is still pending. Please check your phone and authorize.'
+                }
+            })
+        else:
+            # Update failed transaction
+            pending_tx.status = 'failed'
+            db.session.commit()
+            
+            return jsonify({
+                'success': False,
+                'data': {
+                    'status': 'failed',
+                    'message': 'Payment was not successful'
+                }
+            }), 400
+        
+    except Exception as e:
+        print(f"Verify MoMo payment error: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/payment/momo/webhook', methods=['POST'])
+def momo_webhook():
+    """MTN MoMo webhook for automatic payment confirmation"""
+    try:
+        # Get webhook data
+        data = request.get_json()
+        
+        # Process based on webhook type
+        if data.get('status') == 'successful':
+            reference = data.get('reference')
+            transaction_id = data.get('transactionId')
+            amount = data.get('amount', 0)
+            
+            # Find pending transaction using your existing model
+            pending_tx = PendingTransaction.query.filter_by(
+                reference=reference,
+                status='pending',
+                payment_method='momo'
+            ).first()
+            
+            if pending_tx and pending_tx.status == 'pending':
+                user = User.query.get(pending_tx.user_id)
+                if user:
+                    balance_before = user.wallet_balance
+                    user.wallet_balance += amount
+                    
+                    pending_tx.status = 'completed'
+                    pending_tx.completed_at = datetime.utcnow()
+                    
+                    # Create transaction record using your existing model
+                    transaction = Transaction(
+                        user_id=user.id,
+                        type='fund',
+                        amount=amount,
+                        balance_before=balance_before,
+                        balance_after=user.wallet_balance,
+                        description=f'Wallet funding via MTN MoMo - {reference}',
+                        reference=reference,
+                        status='completed',
+                        meta_data={
+                            'payment_method': 'momo',
+                            'webhook': True,
+                            'transaction_id': transaction_id
+                        }
+                    )
+                    db.session.add(transaction)
+                    db.session.commit()
+                    
+                    print(f"[WEBHOOK] Processed MoMo payment {reference} for {user.email}")
+        
+        return jsonify({'success': True})
+        
+    except Exception as e:
+        print(f"MoMo webhook error: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# Helper Functions
+
+def initialize_paystack_transaction(email, amount, reference, metadata):
+    """Initialize Paystack transaction"""
+    try:
+        import requests
+        
+        url = "https://api.paystack.co/transaction/initialize"
+        headers = {
+            "Authorization": f"Bearer {PAYSTACK_SECRET_KEY}",
+            "Content-Type": "application/json"
+        }
+        data = {
+            "email": email,
+            "amount": int(amount * 100),  # Convert to pesewas
+            "reference": reference,
+            "metadata": metadata,
+            "callback_url": f"{COMPANY_WEBSITE}/wallet"
+        }
+        
+        response = requests.post(url, json=data, headers=headers, timeout=30)
+        result = response.json()
+        
+        if result.get('status'):
+            return {
+                'success': True,
+                'authorization_url': result['data']['authorization_url'],
+                'reference': result['data']['reference']
+            }
+        else:
+            return {
+                'success': False,
+                'error': result.get('message', 'Paystack initialization failed')
+            }
+            
+    except Exception as e:
+        print(f"Paystack initialization error: {e}")
+        return {'success': False, 'error': str(e)}
+
+
+def verify_paystack_transaction(reference):
+    """Verify Paystack transaction"""
+    try:
+        import requests
+        
+        url = f"https://api.paystack.co/transaction/verify/{reference}"
+        headers = {
+            "Authorization": f"Bearer {PAYSTACK_SECRET_KEY}"
+        }
+        
+        response = requests.get(url, headers=headers, timeout=30)
+        result = response.json()
+        
+        if result.get('status') and result['data']['status'] == 'success':
+            return {
+                'success': True,
+                'status': 'success',
+                'amount': result['data']['amount'] / 100,
+                'reference': reference
+            }
+        else:
+            return {
+                'success': True,
+                'status': 'failed',
+                'message': result.get('message', 'Payment not successful')
+            }
+            
+    except Exception as e:
+        print(f"Paystack verification error: {e}")
+        return {'success': False, 'error': str(e)}
+
+
+def initialize_momo_transaction(amount, phone, reference, name, metadata):
+    """Initialize MTN MoMo transaction"""
+    try:
+        import requests
+        
+        # Get access token
+        token_url = f"{MOMO_BASE_URL}/collection/token/"
+        token_headers = {
+            "Authorization": f"Basic {MOMO_API_KEY}",
+            "Ocp-Apim-Subscription-Key": MOMO_SUBSCRIPTION_KEY
+        }
+        
+        token_response = requests.post(token_url, headers=token_headers, timeout=30)
+        access_token = token_response.json().get('access_token')
+        
+        if not access_token:
+            return {'success': False, 'error': 'Failed to get access token'}
+        
+        # Initialize payment
+        payment_url = f"{MOMO_BASE_URL}/collection/v1_0/requesttopay"
+        payment_headers = {
+            "Authorization": f"Bearer {access_token}",
+            "X-Reference-Id": reference,
+            "X-Target-Environment": MOMO_ENVIRONMENT,
+            "Content-Type": "application/json",
+            "Ocp-Apim-Subscription-Key": MOMO_SUBSCRIPTION_KEY
+        }
+        
+        payment_data = {
+            "amount": str(amount),
+            "currency": "GHS",
+            "externalId": reference,
+            "payer": {
+                "partyIdType": "MSISDN",
+                "partyId": phone
+            },
+            "payerMessage": f"Fund {COMPANY_NAME} Wallet",
+            "payeeNote": f"Wallet funding for {name}"
+        }
+        
+        response = requests.post(payment_url, json=payment_data, headers=payment_headers, timeout=30)
+        
+        if response.status_code == 202:
+            return {
+                'success': True,
+                'payment_reference': reference,
+                'checkout_request_id': reference,
+                'status': 'pending'
+            }
+        else:
+            return {
+                'success': False,
+                'error': f'MoMo initialization failed: {response.text}'
+            }
+            
+    except Exception as e:
+        print(f"MoMo initialization error: {e}")
+        return {'success': False, 'error': str(e)}
+
+
+def verify_momo_transaction(reference):
+    """Verify MTN MoMo transaction status"""
+    try:
+        import requests
+        
+        # Get access token
+        token_url = f"{MOMO_BASE_URL}/collection/token/"
+        token_headers = {
+            "Authorization": f"Basic {MOMO_API_KEY}",
+            "Ocp-Apim-Subscription-Key": MOMO_SUBSCRIPTION_KEY
+        }
+        
+        token_response = requests.post(token_url, headers=token_headers, timeout=30)
+        access_token = token_response.json().get('access_token')
+        
+        if not access_token:
+            return {'success': False, 'error': 'Failed to get access token'}
+        
+        # Check payment status
+        status_url = f"{MOMO_BASE_URL}/collection/v1_0/requesttopay/{reference}"
+        status_headers = {
+            "Authorization": f"Bearer {access_token}",
+            "X-Target-Environment": MOMO_ENVIRONMENT,
+            "Ocp-Apim-Subscription-Key": MOMO_SUBSCRIPTION_KEY
+        }
+        
+        response = requests.get(status_url, headers=status_headers, timeout=30)
+        result = response.json()
+        
+        if result.get('status') == 'SUCCESSFUL':
+            return {
+                'success': True,
+                'status': 'success',
+                'amount': float(result.get('amount', 0)),
+                'reference': reference
+            }
+        elif result.get('status') == 'PENDING':
+            return {
+                'success': True,
+                'status': 'pending',
+                'message': 'Payment pending'
+            }
+        else:
+            return {
+                'success': True,
+                'status': 'failed',
+                'message': result.get('status', 'Payment failed')
+            }
+            
+    except Exception as e:
+        print(f"MoMo verification error: {e}")
+        return {'success': False, 'error': str(e)}
+
+
+def validate_ghana_phone(phone):
+    """Validate Ghana phone number"""
+    import re
+    pattern = r'^(024|025|026|027|028|020|054|055|059|050|057|053|056)[0-9]{7}$'
+    return bool(re.match(pattern, phone))
 
 @app.route('/api/auth/verify-2fa-code', methods=['POST'])
 @limiter.limit("10 per minute")
@@ -13321,70 +13795,92 @@ class EmailService:
 
 # ========== AGENT APPLICATION ROUTES (Updated) ==========
 
+
+
 @app.route('/api/agent/apply', methods=['POST'])
 @token_required
 def apply_for_agent():
-    """Submit agent application (Email ONLY)"""
+    """Submit agent application with payment"""
     try:
-        data = request.get_json() or request.form
-        payment_method = data.get('payment_method', 'manual')
+        user = g.current_user
         
-        if g.current_user.is_agent and g.current_user.agent_approved:
+        # Check if user is already an agent
+        if user.is_agent and user.agent_approved:
             return jsonify({'success': False, 'error': f'You are already an agent on {COMPANY_NAME}'}), 400
         
+        # Check for existing pending application
         existing = AgentApplication.query.filter_by(
-            user_id=g.current_user.id, status='pending'
+            user_id=user.id, 
+            status='pending'
         ).first()
+        
         if existing:
             return jsonify({'success': False, 'error': 'You already have a pending application'}), 400
         
+        # Get form data
         amount = 100.00
+        payment_method = request.form.get('payment_method', 'mobile_money')
+        phone = request.form.get('phone', user.phone or '')
+        payment_reference_from_form = request.form.get('payment_reference', '')
+        
+        # Generate unique reference
         reference = f"AGENT-{uuid.uuid4().hex[:8].upper()}"
         
+        # Create application
         application = AgentApplication(
-            user_id=g.current_user.id,
+            user_id=user.id,
             payment_reference=reference,
             payment_amount=amount,
+            payment_method=payment_method,
             status='pending',
             created_at=datetime.utcnow()
         )
         
+        # Handle proof upload for manual payments
         if 'proof' in request.files:
             proof = request.files['proof']
-            if proof:
+            if proof and proof.filename:
                 allowed_extensions = {'png', 'jpg', 'jpeg', 'pdf'}
                 file_extension = proof.filename.rsplit('.', 1)[1].lower()
                 if file_extension in allowed_extensions:
-                    upload_folder = app.config.get('UPLOAD_FOLDER', 'uploads')
+                    upload_folder = app.config.get('UPLOAD_FOLDER', 'uploads/agent_proofs')
                     if not os.path.exists(upload_folder):
                         os.makedirs(upload_folder)
                     
                     filename = f"agent_proof_{reference}_{uuid.uuid4().hex[:8]}.{file_extension}"
                     filepath = os.path.join(upload_folder, filename)
                     proof.save(filepath)
-                    application.payment_proof_url = f"/uploads/{filename}"
+                    application.payment_proof_url = f"/uploads/agent_proofs/{filename}"
         
         db.session.add(application)
         db.session.commit()
         
-        # Send confirmation email to applicant (Email ONLY)
+        # Send confirmation email to applicant
         send_email(
-            g.current_user.email,
-            f"Agent Application Submitted - {COMPANY_NAME}",
+            user.email,
+            f"Agent Application Received - {COMPANY_NAME}",
             f"""
             <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
                 <h2 style="color: #8B0000;">Application Received - {COMPANY_NAME}</h2>
-                <p>Dear {g.current_user.username},</p>
-                <p>Thank you for your interest in becoming an agent.</p>
-                <p><strong>Application Reference:</strong> {reference}</p>
-                <p><strong>Amount:</strong> GHS {amount:.2f}</p>
-                <p><strong>Payment Instructions:</strong> Send GHS {amount:.2f} to {COMPANY_PHONE} with reference: {reference}</p>
-                <a href="{COMPANY_WEBSITE}/agent/status" style="background: #8B0000; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Track Application</a>
+                <p>Dear {user.username},</p>
+                <p>Thank you for your interest in becoming a Roamsmart agent.</p>
+                
+                <div style="background: #f5f5f5; padding: 15px; border-radius: 8px; margin: 20px 0;">
+                    <p><strong>Application Reference:</strong> {reference}</p>
+                    <p><strong>Amount:</strong> GHS {amount:.2f}</p>
+                    <p><strong>Payment Method:</strong> {payment_method.upper()}</p>
+                </div>
+                
+                {get_payment_instructions_html(payment_method, reference, amount, phone)}
+                
+                <a href="{COMPANY_WEBSITE}/agent/status" style="background: #8B0000; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin: 20px 0;">Track Application Status</a>
+                
+                <p>Best regards,<br/>{COMPANY_NAME} Team</p>
             </div>
             """
         )
         
-        # Notify admin via email (Email ONLY)
+        # Notify admin via email
         admins = User.query.filter(User.role.in_(['admin', 'super_admin'])).all()
         for admin in admins:
             send_email(
@@ -13392,29 +13888,29 @@ def apply_for_agent():
                 f"New Agent Application - {reference} - {COMPANY_NAME}",
                 f"""
                 <h3>New Agent Application - {COMPANY_NAME}</h3>
-                <p><strong>Applicant:</strong> {g.current_user.username}</p>
-                <p><strong>Email:</strong> {g.current_user.email}</p>
-                <p><strong>Phone:</strong> {g.current_user.phone}</p>
+                <p><strong>Applicant:</strong> {user.username}</p>
+                <p><strong>Email:</strong> {user.email}</p>
+                <p><strong>Phone:</strong> {phone or user.phone}</p>
+                <p><strong>Payment Method:</strong> {payment_method.upper()}</p>
                 <p><strong>Reference:</strong> {reference}</p>
+                <p><strong>Amount:</strong> GHS {amount:.2f}</p>
                 <a href="{COMPANY_WEBSITE}/admin/agent-applications/{application.id}">Review Application</a>
                 """
             )
         
-        log_activity(g.current_user.id, 'apply_agent', f'Submitted agent application: {reference}')
+        # Log activity
+        log_activity(user.id, 'apply_agent', f'Submitted agent application via {payment_method}: {reference}')
         
         return jsonify({
             'success': True,
-            'message': f'Application submitted successfully to {COMPANY_NAME}! Check your email for confirmation.',
+            'message': f'Application submitted successfully to {COMPANY_NAME}!',
             'data': {
                 'application_id': application.id,
                 'reference': reference,
                 'amount': amount,
-                'status': 'pending',
-                'instructions': {
-                    'mobile_money': COMPANY_PHONE,
-                    'reference': reference,
-                    'amount': amount
-                }
+                'status': application.status,
+                'payment_method': payment_method,
+                'instructions': get_payment_instructions(payment_method, reference, amount, phone)
             }
         })
         
@@ -13427,31 +13923,133 @@ def apply_for_agent():
 @app.route('/api/agent/application/status', methods=['GET'])
 @token_required
 def get_agent_application_status():
-    """Get user's agent application status"""
+    """Get agent application status"""
     try:
+        user = g.current_user
+        
+        # Check if user is already an agent
+        if user.is_agent and user.agent_approved:
+            return jsonify({
+                'success': True,
+                'data': {
+                    'is_agent': True,
+                    'has_applied': True,
+                    'status': 'approved',
+                    'approved_at': user.agent_approved_at
+                }
+            })
+        
+        # Get latest application
         application = AgentApplication.query.filter_by(
-            user_id=g.current_user.id
+            user_id=user.id
         ).order_by(AgentApplication.created_at.desc()).first()
         
         if not application:
-            return jsonify({'success': True, 'data': {'has_applied': False, 'status': None}})
+            return jsonify({
+                'success': True,
+                'data': {
+                    'has_applied': False,
+                    'status': None
+                }
+            })
         
         return jsonify({
             'success': True,
             'data': {
                 'has_applied': True,
                 'status': application.status,
-                'rejection_reason': application.rejection_reason,
-                'submitted_at': application.created_at.isoformat(),
-                'approved_at': application.approved_at.isoformat() if application.approved_at else None,
                 'payment_reference': application.payment_reference,
-                'payment_proof_url': application.payment_proof_url
+                'submitted_at': application.created_at,
+                'rejection_reason': application.rejection_reason if application.status == 'rejected' else None,
+                'payment_method': application.payment_method or 'manual'
             }
         })
         
     except Exception as e:
-        print(f"Get agent application status error: {e}")
+        print(f"Get application status error: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
+
+
+def get_payment_instructions(method, reference, amount, phone):
+    """Get payment instructions based on payment method"""
+    instructions = {
+        'mobile_money': {
+            'type': 'mobile_money',
+            'number': COMPANY_PHONE,
+            'reference': reference,
+            'amount': amount,
+            'steps': [
+                f'Go to your mobile money wallet (MTN MoMo, Telecel Cash, or AirtelTigo Money)',
+                f'Select "Send Money"',
+                f'Enter number: {COMPANY_PHONE}',
+                f'Enter amount: GHS {amount:.2f}',
+                f'Enter reference: {reference}',
+                f'Complete the transaction',
+                f'Keep the transaction ID for reference'
+            ]
+        },
+        'paystack': {
+            'type': 'paystack',
+            'reference': reference,
+            'amount': amount,
+            'steps': [
+                f'Click the Paystack payment button below',
+                f'Choose your preferred payment method (Card or Bank Transfer)',
+                f'Complete the payment securely',
+                f'Your application will be automatically processed after payment'
+            ],
+            'payment_url': f"{COMPANY_WEBSITE}/pay/agent/{reference}"
+        },
+        'manual': {
+            'type': 'manual',
+            'number': COMPANY_PHONE,
+            'reference': reference,
+            'amount': amount,
+            'steps': [
+                f'Send GHS {amount:.2f} to {COMPANY_PHONE}',
+                f'Use reference: {reference}',
+                f'Upload your payment proof/screenshot',
+                f'Application will be reviewed within 24 hours after payment confirmation'
+            ]
+        }
+    }
+    return instructions.get(method, instructions['manual'])
+
+
+def get_payment_instructions_html(method, reference, amount, phone):
+    """Get HTML payment instructions"""
+    instructions = get_payment_instructions(method, reference, amount, phone)
+    
+    html = f"""
+    <div style="background: #fff3cd; border: 1px solid #ffc107; padding: 15px; border-radius: 8px; margin: 20px 0;">
+        <h3 style="color: #856404; margin-top: 0;">📋 Payment Instructions</h3>
+        <p><strong>Amount to Pay:</strong> GHS {amount:.2f}</p>
+        <p><strong>Reference:</strong> <code>{reference}</code></p>
+    """
+    
+    if method in ['mobile_money', 'manual']:
+        html += f"""
+        <p><strong>Send Money To:</strong> {COMPANY_PHONE}</p>
+        <ol>
+            {''.join([f'<li>{step}</li>' for step in instructions['steps']])}
+        </ol>
+        """
+    elif method == 'paystack':
+        html += f"""
+        <ol>
+            {''.join([f'<li>{step}</li>' for step in instructions['steps']])}
+        </ol>
+        <a href="{instructions['payment_url']}" style="background: #00B3E6; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
+            Pay with Paystack →
+        </a>
+        """
+    
+    html += """
+        <p class="text-muted" style="margin-top: 15px;">⚠️ Keep your payment reference for future correspondence</p>
+    </div>
+    """
+    
+    return html
 
 
 @app.route('/api/admin/agent-applications', methods=['GET'])
