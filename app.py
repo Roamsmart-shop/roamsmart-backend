@@ -13936,36 +13936,6 @@ def apply_for_agent():
 @app.route('/api/agent/application/status', methods=['GET'])
 @token_required
 def get_agent_application_status():
-    """Get user's agent application status"""
-    try:
-        application = AgentApplication.query.filter_by(
-            user_id=g.current_user.id
-        ).order_by(AgentApplication.created_at.desc()).first()
-        
-        if not application:
-            return jsonify({'success': True, 'data': {'has_applied': False, 'status': None}})
-        
-        return jsonify({
-            'success': True,
-            'data': {
-                'has_applied': True,
-                'status': application.status,
-                'rejection_reason': application.rejection_reason,
-                'submitted_at': application.created_at.isoformat(),
-                'approved_at': application.approved_at.isoformat() if application.approved_at else None,
-                'payment_reference': application.payment_reference,
-                'payment_proof_url': application.payment_proof_url
-            }
-        })
-        
-    except Exception as e:
-        print(f"Get agent application status error: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@app.route('/api/agent/application/status', methods=['GET'])
-@token_required
-def get_agent_application_status():
     """Get agent application status"""
     try:
         user = g.current_user
