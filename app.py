@@ -13810,6 +13810,7 @@ def apply_for_agent():
         
         user = g.current_user
         print(f"User: {user.username} (ID: {user.id})")
+        print(f"Raw data received: {data}")
         
         # Check if user is already an agent
         if user.is_agent and user.agent_approved:
@@ -13830,17 +13831,26 @@ def apply_for_agent():
         proof_base64 = data.get('proof_base64', None)
         proof_filename = data.get('proof_filename', 'proof.jpg')
         
-        print(f"Payment Method: {payment_method}")
+        # IMPORTANT: Normalize the payment_method value
+        payment_method = str(payment_method).strip().lower()
+        
+        print(f"Payment Method (normalized): '{payment_method}'")
+        print(f"Payment Method type: {type(payment_method)}")
         print(f"Phone: {phone}")
         print(f"Has Proof: {proof_base64 is not None}")
         
-        # VALIDATE PAYMENT METHOD
+        # VALIDATE PAYMENT METHOD - Accept 'manual' specifically
         valid_payment_methods = ['mobile_money', 'paystack', 'manual']
+        
+        # Check if payment_method is in valid list
         if payment_method not in valid_payment_methods:
+            print(f"❌ Payment method '{payment_method}' not in {valid_payment_methods}")
             return jsonify({
                 'success': False, 
-                'error': f'Invalid payment method. Choose from: {", ".join(valid_payment_methods)}'
+                'error': f'Invalid payment method: "{payment_method}". Valid options are: {", ".join(valid_payment_methods)}'
             }), 400
+        
+        print(f"✅ Payment method '{payment_method}' is valid!")
         
         amount = 100.00
         reference = f"AGENT-{uuid.uuid4().hex[:8].upper()}"
@@ -13890,42 +13900,128 @@ def apply_for_agent():
         db.session.commit()
         print(f"✅ Application saved to database with ID: {application.id}")
         
-        # Try to send emails
-        try:
-            send_email(
-                user.email,
-                f"Agent Application Received - {COMPANY_NAME}",
-                f"""
-                <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-                    <h2 style="color: #8B0000;">Application Received - {COMPANY_NAME}</h2>
-                    <p>Dear {user.username},</p>
-                    <p>Thank you for your interest in becoming a Roamsmart agent.</p>
+        # ========== SEND EMAILS ==========
+        
+        # 1. Send confirmation email to applicant
+        applicant_email_html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+                body {{ font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.6; }}
+                .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+                .header {{ background: linear-gradient(135deg, #8B0000, #D2691E); color: white; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }}
+                .content {{ padding: 30px; background: #f9f9f9; }}
+                .details {{ background: white; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #8B0000; }}
+                .button {{ display: inline-block; background: #8B0000; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; margin: 20px 0; }}
+                .footer {{ text-align: center; padding: 20px; color: #666; font-size: 12px; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h2>🎉 Application Received!</h2>
+                    <p>{COMPANY_NAME} Agent Program</p>
+                </div>
+                <div class="content">
+                    <p>Dear <strong>{user.username}</strong>,</p>
+                    <p>Thank you for your interest in becoming a {COMPANY_NAME} agent. Your application has been received and is pending review.</p>
                     
-                    <div style="background: #f5f5f5; padding: 15px; border-radius: 8px; margin: 20px 0;">
-                        <p><strong>Application Reference:</strong> {reference}</p>
-                        <p><strong>Amount:</strong> GHS {amount:.2f}</p>
+                    <div class="details">
+                        <h3 style="color: #8B0000; margin-top: 0;">📋 Application Details</h3>
+                        <p><strong>Reference Number:</strong> {reference}</p>
+                        <p><strong>Application Date:</strong> {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}</p>
+                        <p><strong>Registration Fee:</strong> GHS {amount:.2f}</p>
                         <p><strong>Payment Method:</strong> {payment_method.upper()}</p>
                     </div>
                     
-                    <p><strong>Payment Instructions:</strong></p>
-                    <ul>
-                        <li>Send GHS {amount:.2f} to {COMPANY_PHONE}</li>
-                        <li>Use reference: <strong>{reference}</strong></li>
-                        <li>Your application will be reviewed after payment confirmation</li>
-                    </ul>
+                    <div class="details">
+                        <h3 style="color: #8B0000; margin-top: 0;">💰 Payment Instructions</h3>
+                        <p>To complete your registration, please send <strong>GHS {amount:.2f}</strong> to:</p>
+                        <p><strong>Mobile Money Number:</strong> {COMPANY_PHONE}</p>
+                        <p><strong>Reference:</strong> <code style="background: #f0f0f0; padding: 4px 8px; border-radius: 4px;">{reference}</code></p>
+                        <p>After payment, your application will be reviewed within 24 hours.</p>
+                    </div>
                     
-                    <p>Best regards,<br/>{COMPANY_NAME} Team</p>
+                    <div style="text-align: center;">
+                        <a href="{COMPANY_WEBSITE}/agent/status" class="button">Track Application Status</a>
+                    </div>
+                    
+                    <p>Need help? Contact our support team at <strong>{COMPANY_PHONE}</strong></p>
                 </div>
-                """
-            )
-            print(f"✅ Email sent to applicant: {user.email}")
-        except Exception as email_error:
-            print(f"Email error (non-critical): {email_error}")
+                <div class="footer">
+                    <p>&copy; 2024 {COMPANY_NAME}. All rights reserved.</p>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        
+        send_email(user.email, f"🎉 Agent Application Received - {COMPANY_NAME}", applicant_email_html)
+        print(f"✅ Application confirmation email sent to {user.email}")
+        
+        # 2. Send notification to all admins
+        admins = User.query.filter(User.role.in_(['admin', 'super_admin'])).all()
+        
+        admin_email_html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+                body {{ font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.6; }}
+                .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+                .header {{ background: linear-gradient(135deg, #28a745, #20c997); color: white; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }}
+                .content {{ padding: 30px; background: #f9f9f9; }}
+                .details {{ background: white; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #28a745; }}
+                .button {{ display: inline-block; background: #28a745; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; margin: 20px 0; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h2>📢 New Agent Application</h2>
+                    <p>{COMPANY_NAME} Admin Notification</p>
+                </div>
+                <div class="content">
+                    <p>A new agent application requires your review.</p>
+                    
+                    <div class="details">
+                        <h3 style="color: #28a745; margin-top: 0;">👤 Applicant Details</h3>
+                        <p><strong>Name:</strong> {user.username}</p>
+                        <p><strong>Email:</strong> {user.email}</p>
+                        <p><strong>Phone:</strong> {phone or user.phone or 'Not provided'}</p>
+                        <p><strong>Member Since:</strong> {user.created_at.strftime('%Y-%m-%d') if user.created_at else 'N/A'}</p>
+                    </div>
+                    
+                    <div class="details">
+                        <h3 style="color: #28a745; margin-top: 0;">📋 Application Details</h3>
+                        <p><strong>Reference:</strong> {reference}</p>
+                        <p><strong>Application Date:</strong> {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}</p>
+                        <p><strong>Registration Fee:</strong> GHS {amount:.2f}</p>
+                        <p><strong>Payment Method:</strong> {payment_method.upper()}</p>
+                        {"<p><strong>Payment Proof:</strong> <a href='" + COMPANY_WEBSITE + application.payment_proof_url + "'>View Proof</a></p>" if application.payment_proof_url else ""}
+                    </div>
+                    
+                    <div style="text-align: center;">
+                        <a href="{COMPANY_WEBSITE}/admin/agent-applications/{application.id}" class="button">Review Application</a>
+                    </div>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        
+        for admin in admins:
+            try:
+                send_email(admin.email, f"📢 New Agent Application - {reference} - {COMPANY_NAME}", admin_email_html)
+                print(f"✅ Notification email sent to admin: {admin.email}")
+            except Exception as admin_email_error:
+                print(f"Failed to send email to admin {admin.email}: {admin_email_error}")
         
         # Return success response
         return jsonify({
             'success': True,
-            'message': f'Application submitted successfully to {COMPANY_NAME}!',
+            'message': f'Application submitted successfully to {COMPANY_NAME}! Check your email for confirmation.',
             'data': {
                 'application_id': application.id,
                 'reference': reference,
