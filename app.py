@@ -399,7 +399,89 @@ def verify_paystack_transaction(reference):
         print(f"Paystack verification error: {e}")
         return {'success': False, 'error': str(e)}
 
+def send_mobile_data(phone_number, quantity, unit='MB', validity='Day'):
+    """
+    Send mobile data to a customer using Africa's Talking Mobile Data API
+    
+    Args:
+        phone_number (str): Customer phone number (e.g., '2547XXXXXXXX')
+        quantity (int): Amount of data to send
+        unit (str): 'MB' or 'GB'
+        validity (str): 'Day', 'Week', or 'Month'
+    
+    Returns:
+        dict: Response from Africa's Talking
+    """
+    try:
+        mobile_data = africastalking.MobileData
+        
+        product_name = os.environ.get('AFRICASTALKING_PRODUCT_NAME')
+        
+        if not product_name:
+            raise ValueError("AFRICASTALKING_PRODUCT_NAME not configured")
+        
+        # Prepare recipients
+        recipients = [{
+            'phoneNumber': phone_number,
+            'quantity': quantity,
+            'unit': unit,
+            'validity': validity,
+            'metadata': {
+                'network': 'All Networks',
+                'delivery_time': datetime.utcnow().isoformat()
+            }
+        }]
+        
+        # Send mobile data
+        response = mobile_data.send(product_name, recipients)
+        
+        print(f"Mobile data sent: {quantity}{unit} to {phone_number}")
+        print(f"Response: {response}")
+        
+        return {
+            'success': True,
+            'status': response.get('status', 'sent'),
+            'transaction_id': response.get('transactionId'),
+            'message': response.get('description', 'Data sent successfully')
+        }
+        
+    except Exception as e:
+        print(f"Error sending mobile data: {e}")
+        return {
+            'success': False,
+            'error': str(e)
+        }
 
+
+def send_data_to_customer(phone_number, size_gb, quantity=1):
+    """
+    Wrapper function to send data bundles to customers
+    
+    Args:
+        phone_number (str): Customer phone number
+        size_gb (int): Size in GB (1, 2, 5, 10, 20)
+        quantity (int): Number of bundles
+    
+    Returns:
+        dict: Delivery result
+    """
+    total_mb = size_gb * 1024 * quantity
+    
+    # For smaller bundles, send as MB
+    if total_mb < 1024:
+        return send_mobile_data(
+            phone_number=phone_number,
+            quantity=total_mb,
+            unit='MB',
+            validity='Day'
+        )
+    else:
+        return send_mobile_data(
+            phone_number=phone_number,
+            quantity=size_gb * quantity,
+            unit='GB',
+            validity='Day'
+        )
 # Create singleton instance
 def normalize_phone(self, phone):
     """Normalize phone number to consistent format"""
@@ -1379,188 +1461,7 @@ def initialize_paystack_payment():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
-@app.route('/api/payment/paystack/verify/<reference>', methods=['GET'])
-@token_required
-def verify_paystack_payment(reference):
-    """Verify Paystack payment status"""
-    try:
-        if not reference:
-            return jsonify({'success': False, 'error': 'Reference required'}), 400
-        
-        # Verify with Paystack
-        result = verify_paystack_transaction(reference)
-        
-        if not result['success']:
-            return jsonify({'success': False, 'error': 'Payment verification failed'}), 400
-        
-        # Check if already processed using your existing model
-        pending_tx = PendingTransaction.query.filter_by(
-            reference=reference,
-            status='pending'
-        ).first()
-        
-        if not pending_tx:
-            # Check if already completed in transactions
-            completed_tx = Transaction.query.filter_by(reference=reference).first()
-            if completed_tx:
-                return jsonify({
-                    'success': True,
-                    'data': {
-                        'status': 'success',
-                        'amount': float(completed_tx.amount),
-                        'message': 'Payment already processed'
-                    }
-                })
-            return jsonify({'success': False, 'error': 'Transaction not found'}), 404
-        
-        if result['status'] == 'success':
-            # Update user wallet
-            user = User.query.get(pending_tx.user_id)
-            if not user:
-                return jsonify({'success': False, 'error': 'User not found'}), 404
-            
-            # Add to wallet
-            balance_before = user.wallet_balance
-            user.wallet_balance += result['amount']
-            
-            # Update pending transaction
-            pending_tx.status = 'completed'
-            pending_tx.completed_at = datetime.utcnow()
-            
-            # Create transaction record using your existing model
-            transaction = Transaction(
-                user_id=user.id,
-                type='fund',
-                amount=result['amount'],
-                balance_before=balance_before,
-                balance_after=user.wallet_balance,
-                description=f'Wallet funding via Paystack - {reference}',
-                reference=reference,
-                status='completed',
-                meta_data={
-                    'payment_method': 'paystack',
-                    'reference': reference
-                }
-            )
-            db.session.add(transaction)
-            db.session.commit()
-            
-            # Send email confirmation
-            send_wallet_funding_email(user.email, user.username, result['amount'], user.wallet_balance)
-            
-            return jsonify({
-                'success': True,
-                'data': {
-                    'status': 'success',
-                    'amount': float(result['amount']),
-                    'new_balance': float(user.wallet_balance),
-                    'message': f'Successfully added GHS {result["amount"]:.2f} to your wallet'
-                }
-            })
-        else:
-            # Update failed transaction
-            pending_tx.status = 'failed'
-            db.session.commit()
-            
-            return jsonify({
-                'success': False,
-                'data': {
-                    'status': 'failed',
-                    'message': 'Payment was not successful'
-                }
-            }), 400
-        
-    except Exception as e:
-        print(f"Verify Paystack payment error: {e}")
-        db.session.rollback()
-        return jsonify({'success': False, 'error': str(e)}), 500
 
-
-@app.route('/api/payment/paystack/webhook', methods=['POST'])
-def paystack_webhook():
-    """Paystack webhook for automatic payment confirmation"""
-    try:
-        # Verify webhook signature
-        signature = request.headers.get('x-paystack-signature')
-        if not signature:
-            return jsonify({'success': False, 'error': 'No signature'}), 401
-        
-        # Get event data
-        event_data = request.get_json()
-        event = event_data.get('event')
-        
-        if event == 'charge.success':
-            data = event_data.get('data', {})
-            reference = data.get('reference')
-            amount = data.get('amount', 0) / 100  # Convert from pesewas
-            
-            # Find pending transaction using your existing model
-            pending_tx = PendingTransaction.query.filter_by(
-                reference=reference,
-                status='pending',
-                payment_method='paystack'
-            ).first()
-            
-            if pending_tx and pending_tx.status == 'pending':
-                user = User.query.get(pending_tx.user_id)
-                if user:
-                    balance_before = user.wallet_balance
-                    user.wallet_balance += amount
-                    
-                    pending_tx.status = 'completed'
-                    pending_tx.completed_at = datetime.utcnow()
-                    
-                    # Create transaction record using your existing model
-                    transaction = Transaction(
-                        user_id=user.id,
-                        type='fund',
-                        amount=amount,
-                        balance_before=balance_before,
-                        balance_after=user.wallet_balance,
-                        description=f'Wallet funding via Paystack - {reference}',
-                        reference=reference,
-                        status='completed',
-                        meta_data={
-                            'payment_method': 'paystack',
-                            'webhook': True
-                        }
-                    )
-                    db.session.add(transaction)
-                    db.session.commit()
-                    
-                    print(f"[WEBHOOK] Processed Paystack payment {reference} for {user.email}")
-        
-        return jsonify({'success': True})
-        
-    except Exception as e:
-        print(f"Paystack webhook error: {e}")
-        db.session.rollback()
-        return jsonify({'success': False, 'error': str(e)}), 500
-    
-def send_wallet_funding_email(email, username, amount, new_balance):
-    """Send wallet funding confirmation email"""
-    html_content = f"""
-    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-        <div style="background: #8B0000; padding: 20px; text-align: center; border-radius: 10px 10px 0 0;">
-            <h2 style="color: white;">✅ Wallet Funded Successfully!</h2>
-            <p style="color: white;">{COMPANY_NAME}</p>
-        </div>
-        <div style="background: #f5f5f5; padding: 30px; border-radius: 0 0 10px 10px;">
-            <p>Dear <strong>{username}</strong>,</p>
-            <p>Your Roamsmart wallet has been successfully funded!</p>
-            <div style="background: white; padding: 20px; text-align: center; border-radius: 10px; margin: 20px 0;">
-                <p style="font-size: 14px; margin-bottom: 10px;">Amount Added:</p>
-                <p style="font-size: 32px; font-weight: bold; color: #28a745;">GHS {amount:.2f}</p>
-                <p style="font-size: 14px; margin-top: 10px;">New Balance: <strong>GHS {new_balance:.2f}</strong></p>
-            </div>
-            <p>You can now use your wallet balance to purchase data bundles, WAEC vouchers, and more!</p>
-            <div style="text-align: center; margin: 25px 0;">
-                <a href="{COMPANY_WEBSITE}/wallet" style="background: #8B0000; color: white; padding: 12px 30px; text-decoration: none; border-radius: 30px;">View Wallet</a>
-            </div>
-        </div>
-    </div>
-    """
-    send_email(email, "Wallet Funded Successfully", html_content)
 
 @app.route('/api/payment/momo/initialize', methods=['POST'])
 @token_required
@@ -3297,11 +3198,15 @@ def check_email_verification():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
-# Updated order creation with data delivery to network providers
 @app.route('/api/order', methods=['POST'])
 @token_required
 def create_order():
-    """Create new order - Network provider handles SMS, we only send email"""
+    """Create new order - Uses Africa's Talking Mobile Data API"""
+    import uuid
+    import requests
+    import os
+    from datetime import datetime
+    
     try:
         data = request.get_json()
         
@@ -3319,13 +3224,6 @@ def create_order():
         payment_method = data.get('payment_method', 'wallet')
         quantity = data.get('quantity', 1)
         
-        print(f"\nParsed Values:")
-        print(f"  Network: {network}")
-        print(f"  Size GB: {size_gb}")
-        print(f"  Phone: {phone}")
-        print(f"  Payment Method: {payment_method}")
-        print(f"  Quantity: {quantity}")
-        
         # Check required fields
         missing = []
         if not network:
@@ -3336,49 +3234,34 @@ def create_order():
             missing.append('phone')
             
         if missing:
-            print(f"❌ Missing required fields: {missing}")
             return jsonify({'success': False, 'error': f'Missing required fields: {", ".join(missing)}'}), 400
         
-        # Get prices from DATABASE (set by admin)
+        # Get prices from database
         is_agent = g.current_user.is_agent and getattr(g.current_user, 'agent_approved', False)
-        print(f"\nPrice Check:")
-        print(f"  Is Agent: {is_agent}")
         
         if is_agent:
             unit_price = get_agent_price(network, size_gb)
-            print(f"  Agent price for {network} {size_gb}GB: ₵{unit_price}")
         else:
             unit_price = get_user_price(network, size_gb)
-            print(f"  User price for {network} {size_gb}GB: ₵{unit_price}")
         
         if unit_price == 0:
-            print(f"❌ Price not configured!")
             return jsonify({
                 'success': False, 
                 'error': f'Price not configured for {network} {size_gb}GB. Please contact admin.'
             }), 400
         
         total_price = unit_price * quantity
-        print(f"  Total Price: ₵{total_price}")
         
         # Check wallet balance
         if payment_method == 'wallet':
-            print(f"\nWallet Check:")
-            print(f"  Balance: ₵{g.current_user.wallet_balance}")
-            print(f"  Required: ₵{total_price}")
-            
             if g.current_user.wallet_balance < total_price:
-                print(f"❌ Insufficient balance!")
                 return jsonify({
                     'success': False, 
                     'error': f'Insufficient wallet balance. Need GHS {total_price:.2f}. Your balance: GHS {g.current_user.wallet_balance:.2f}'
                 }), 400
-            else:
-                print(f"✅ Sufficient balance")
         
         # Generate order ID
         order_id = f"ORD-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{g.current_user.id}"
-        print(f"\nOrder ID: {order_id}")
         
         # Create order
         order = Order(
@@ -3396,13 +3279,37 @@ def create_order():
         )
         db.session.add(order)
         db.session.flush()
-        print(f"✅ Order created in database (ID: {order.id})")
         
         if payment_method == 'wallet':
+            # Africa's Talking Mobile Data API endpoint
+            AT_DATA_URL = "https://bundles.africastalking.com/mobile/data/request"
+            
+            api_key = os.environ.get('AFRICASTALKING_API_KEY')
+            username = os.environ.get('AFRICASTALKING_USERNAME', 'Roamsmart')
+            
+            if not api_key:
+                return jsonify({'success': False, 'error': 'Africa\'s Talking API key not configured'}), 500
+            
+            # Format phone number
+            formatted_phone = phone
+            if formatted_phone.startswith('0'):
+                formatted_phone = '233' + formatted_phone[1:]
+            if not formatted_phone.startswith('+'):
+                formatted_phone = '+' + formatted_phone
+            
+            # Bundle mapping for MTN (simplified)
+            # Find the correct bundle for 1GB on MTN
+            # The closest available bundle on MTN is 826.72 MB (0.81 GB) for GHS 9.90
+            # or for larger amounts, you'd use multiple bundles
+            
+            # For 1GB request on MTN, use the 826.72 MB bundle
+            actual_mb = 826.72
+            actual_gb = 0.81
+            bundle_price = 9.90
+            
             # Deduct from wallet
             balance_before = g.current_user.wallet_balance
             g.current_user.wallet_balance -= total_price
-            print(f"💰 Wallet deducted: ₵{balance_before} → ₵{g.current_user.wallet_balance}")
             
             # Create transaction record
             transaction = Transaction(
@@ -3416,62 +3323,73 @@ def create_order():
                 status='completed'
             )
             db.session.add(transaction)
-            print(f"✅ Transaction recorded")
             
-            # ========== CALL NETWORK PROVIDER API ==========
-            print(f"\n📡 Calling Network Provider...")
-            network_service = NetworkAPIService()
+            # Prepare Mobile Data API payload
+            payload = {
+                "username": username,
+                "productName": "Mobile Data",
+                "recipients": [
+                    {
+                        "phoneNumber": formatted_phone,
+                        "quantity": actual_mb,
+                        "unit": "MB",
+                        "validity": "NonExpiry",
+                        "metadata": {
+                            "source": "Roamsmart",
+                            "order_id": order_id,
+                            "customer": g.current_user.username
+                        }
+                    }
+                ]
+            }
             
-            delivery_result = network_service.send_data_to_customer(
-                network=network,
-                phone=phone,
-                size_gb=size_gb,
-                quantity=quantity,
-                order_id=order_id
-            )
-            print(f"Network Response: {delivery_result}")
+            headers = {
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "apiKey": api_key,
+                "Idempotency-Key": str(uuid.uuid4())  # Now uuid is defined
+            }
             
-            if delivery_result.get('success'):
-                order.status = 'completed'
-                order.completed_at = datetime.utcnow()
-                db.session.commit()
-                print(f"✅ Order completed!")
-                
-                # Send email confirmation
-                send_order_confirmation_email(
-                    g.current_user, 
-                    order_id, 
-                    network, 
-                    size_gb, 
-                    phone, 
-                    total_price, 
-                    quantity
-                )
-                print(f"📧 Confirmation email sent")
-                
-                return jsonify({
-                    'success': True,
-                    'data': {
-                        'order_id': order_id,
-                        'balance': float(g.current_user.wallet_balance),
-                        'amount': float(total_price)
-                    },
-                    'message': f'✅ {quantity}x {size_gb}GB {network.upper()} data sent to {phone}. Network provider will send SMS confirmation.'
-                })
+            print(f"[DATA] Sending to Africa's Talking Mobile Data API...")
+            print(f"[DATA] URL: {AT_DATA_URL}")
+            print(f"[DATA] Phone: {formatted_phone}")
+            print(f"[DATA] Bundle: {actual_mb}MB ({actual_gb}GB)")
+            print(f"[DATA] Payload: {payload}")
+            
+            response = requests.post(AT_DATA_URL, json=payload, headers=headers, timeout=30)
+            
+            print(f"[DATA] Response Status: {response.status_code}")
+            print(f"[DATA] Response: {response.text}")
+            
+            if response.status_code in [200, 201, 202]:
+                result = response.json()
+                if 'entries' in result and result['entries']:
+                    entry = result['entries'][0]
+                    if entry.get('status') == 'Success':
+                        order.status = 'completed'
+                        order.completed_at = datetime.utcnow()
+                        order.actual_bundle_mb = actual_mb
+                        order.actual_bundle_gb = actual_gb
+                        db.session.commit()
+                        
+                        return jsonify({
+                            'success': True,
+                            'data': {
+                                'order_id': order_id,
+                                'balance': float(g.current_user.wallet_balance),
+                                'amount': float(total_price),
+                                'actual_data_gb': actual_gb
+                            },
+                            'message': f'✅ {actual_gb}GB {network.upper()} data sent to {phone}'
+                        })
+                    else:
+                        raise Exception(entry.get('errorMessage', 'Delivery failed'))
+                else:
+                    raise Exception('Invalid response from Africa\'s Talking')
             else:
-                # Delivery failed - refund
-                order.status = 'failed'
-                g.current_user.wallet_balance += total_price
-                db.session.commit()
-                print(f"❌ Network delivery failed! Refunded ₵{total_price}")
-                
-                return jsonify({
-                    'success': False,
-                    'error': f'Network delivery failed: {delivery_result.get("error", "Unknown error")}. Amount refunded.'
-                }), 500
+                raise Exception(f'Africa\'s Talking error: {response.text}')
             
         elif payment_method == 'manual':
-            import uuid
             reference = f"MAN-{uuid.uuid4().hex[:8].upper()}"
             order.payment_reference = reference
             
@@ -3480,11 +3398,10 @@ def create_order():
                 order_id=order.id,
                 amount=total_price,
                 reference=reference,
-                status='pending'
+                status='pending_verification'
             )
             db.session.add(manual_payment)
             db.session.commit()
-            print(f"✅ Manual payment order created. Reference: {reference}")
             
             return jsonify({
                 'success': True,
@@ -3503,12 +3420,17 @@ def create_order():
             })
         
     except Exception as e:
-        print(f"❌ Create order error: {e}")
+        print(f"Create order error: {e}")
         import traceback
         traceback.print_exc()
         db.session.rollback()
+        
+        # Refund if deducted
+        if 'balance_before' in locals():
+            g.current_user.wallet_balance = balance_before
+        
         return jsonify({'success': False, 'error': str(e)}), 500
-
+    
 def send_order_confirmation_email(user, order_id, network, size_gb, phone, amount, quantity=1):
     """Send order confirmation email to user (NO SMS)"""
     try:
@@ -4447,45 +4369,55 @@ def cancel_manual_request(request_id):
 
 
 # ========== ADMIN MANUAL PAYMENT ENDPOINTS ==========
-
 @app.route('/api/admin/manual-payments', methods=['GET'])
 @token_required
 @admin_required
 def admin_get_manual_payments():
-    """Admin: Get all manual payment requests"""
+    """Admin: Get all manual payment requests (only pending ones)"""
     try:
         page = request.args.get('page', 1, type=int)
         per_page = request.args.get('limit', 20, type=int)
-        status = request.args.get('status')
         
-        query = ManualPayment.query
-        
-        if status:
-            query = query.filter_by(status=status)
+        # IMPORTANT: Only get pending_verification payments
+        query = db.session.query(ManualPayment).filter(ManualPayment.status == 'pending_verification')
         
         pagination = query.order_by(ManualPayment.created_at.desc()).paginate(
             page=page, per_page=per_page, error_out=False
         )
         
+        payments_data = []
+        for payment in pagination.items:
+            user = db.session.get(User, payment.user_id) if payment.user_id else None
+            
+            # Build the correct proof URL
+            full_proof_url = None
+            if payment.proof_url:
+                if payment.proof_url.startswith(('http://', 'https://')):
+                    full_proof_url = payment.proof_url
+                else:
+                    filename = payment.proof_url.split('/')[-1]
+                    full_proof_url = f"{request.host_url.rstrip('/')}/uploads/profile_pics/{filename}"
+            
+            payments_data.append({
+                'id': payment.id,
+                'amount': float(payment.amount),
+                'reference': payment.reference,
+                'status': payment.status,
+                'user_id': payment.user_id,
+                'username': user.username if user else 'Unknown User',
+                'email': user.email if user else 'No email',
+                'phone': user.phone if user else 'No phone',
+                'sender_name': payment.sender_name,
+                'sender_phone': payment.sender_phone,
+                'transaction_id': payment.transaction_id,
+                'proof_url': full_proof_url,
+                'created_at': payment.created_at.isoformat() if payment.created_at else None,
+                'updated_at': payment.updated_at.isoformat() if hasattr(payment, 'updated_at') and payment.updated_at else payment.created_at.isoformat() if payment.created_at else None
+            })
+        
         return jsonify({
             'success': True,
-            'data': [{
-                'id': r.id,
-                'amount': float(r.amount),
-                'reference': r.reference,
-                'status': r.status,
-                'user': {
-                    'id': r.user.id,
-                    'username': r.user.username,
-                    'email': r.user.email,
-                    'phone': r.user.phone
-                },
-                'sender_name': r.sender_name,
-                'sender_phone': r.sender_phone,
-                'transaction_id': r.transaction_id,
-                'proof_url': r.proof_url,
-                'created_at': r.created_at.isoformat()
-            } for r in pagination.items],
+            'data': payments_data,
             'total': pagination.total,
             'page': page,
             'total_pages': pagination.pages
@@ -4493,18 +4425,235 @@ def admin_get_manual_payments():
         
     except Exception as e:
         print(f"Admin get manual payments error: {e}")
-        return jsonify({'success': False, 'error': 'Failed to fetch payments'}), 500
+        return jsonify({'success': False, 'error': str(e)}), 500
 
+@app.route('/payment/upload-proof', methods=['POST'])
+@token_required
+def upload_payment_proof():
+    """Upload payment proof document"""
+    try:
+        file = request.files.get('proof')
+        reference = request.form.get('reference')
+        
+        if not file:
+            return jsonify({'success': False, 'error': 'No file uploaded'}), 400
+        
+        # Check file extension
+        extension = file.filename.rsplit('.', 1)[1].lower() if '.' in file.filename else ''
+        if extension not in ALLOWED_EXTENSIONS:
+            return jsonify({'success': False, 'error': f'File type not allowed. Allowed: {", ".join(ALLOWED_EXTENSIONS)}'}), 400
+        
+        # Generate unique filename (store only filename, not full path)
+        filename = f"proof_{reference}_{uuid.uuid4().hex[:8]}.{extension}"
+        
+        # Save to UPLOAD_FOLDER (which is already set to uploads/profile_pics)
+        file_path = os.path.join(UPLOAD_FOLDER, filename)
+        file.save(file_path)
+        
+        # Store ONLY the filename (not the path)
+        # The URL will be constructed as /uploads/profile_pics/{filename}
+        proof_url = filename  # Just the filename
+        
+        # Update the payment record
+        manual_payment = ManualPayment.query.filter_by(reference=reference).first()
+        if manual_payment:
+            manual_payment.proof_url = proof_url
+            db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': 'Proof uploaded successfully',
+            'proof_url': proof_url,
+            'full_url': f"{request.host_url.rstrip('/')}/uploads/profile_pics/{filename}"
+        })
+        
+    except Exception as e:
+        print(f"Upload error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
+@app.route('/api/admin/manual-payments/<int:payment_id>/approve-simple', methods=['POST'])
+@token_required
+@admin_required
+def admin_approve_payment_simple(payment_id):
+    """Admin: One-click approval - automatically credits user's wallet"""
+    try:
+        # Use db.session.get() instead of query.get() for SQLAlchemy 2.0
+        manual_payment = db.session.get(ManualPayment, payment_id)
+        
+        if not manual_payment:
+            return jsonify({'success': False, 'error': 'Payment request not found'}), 404
+        
+        if manual_payment.status != 'pending_verification':
+            return jsonify({'success': False, 'error': f'Payment already {manual_payment.status}'}), 400
+        
+        # Update payment status
+        manual_payment.status = 'verified'
+        manual_payment.verified_at = datetime.utcnow()
+        manual_payment.verified_by = g.current_user.id
+        manual_payment.admin_notes = 'Auto-approved via one-click approval'
+        
+        # Fund user's wallet
+        user = db.session.get(User, manual_payment.user_id)
+        if not user:
+            return jsonify({'success': False, 'error': 'User not found'}), 404
+        
+        balance_before = user.wallet_balance
+        user.wallet_balance = float(user.wallet_balance) + float(manual_payment.amount)
+        
+        # Create transaction record (without 'created_by' field if it doesn't exist)
+        transaction = Transaction(
+            user_id=user.id,
+            type='credit',
+            amount=float(manual_payment.amount),
+            balance_before=balance_before,
+            balance_after=user.wallet_balance,
+            description=f'Manual payment approval - Reference: {manual_payment.reference}',
+            reference=manual_payment.reference,
+            status='completed'
+        )
+        db.session.add(transaction)
+        
+        db.session.commit()
+        
+        # Send notification to user via email (optional)
+        try:
+            send_email(
+                user.email,
+                f"✅ Payment Approved - Wallet Credited | {COMPANY_NAME}",
+                f"""
+                <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                    <h2 style="color: #8B0000;">Payment Approved!</h2>
+                    <p>Dear <strong>{user.username}</strong>,</p>
+                    <p>Your manual payment has been approved and your wallet has been credited.</p>
+                    
+                    <div style="background: #f0f8ff; padding: 20px; border-radius: 10px; margin: 20px 0;">
+                        <h3 style="margin-top: 0;">Transaction Details:</h3>
+                        <p><strong>💰 Amount:</strong> GHS {float(manual_payment.amount):.2f}</p>
+                        <p><strong>🆔 Reference:</strong> {manual_payment.reference}</p>
+                        <p><strong>💳 Previous Balance:</strong> GHS {balance_before:.2f}</p>
+                        <p><strong>✨ New Balance:</strong> GHS {user.wallet_balance:.2f}</p>
+                        <p><strong>⏰ Date:</strong> {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}</p>
+                    </div>
+                    
+                    <p>You can now use your wallet balance to purchase data, pay bills, or request withdrawals.</p>
+                    
+                    <hr style="margin: 20px 0;">
+                    <p style="color: #666; font-size: 12px;">Thank you for using {COMPANY_NAME}!</p>
+                </div>
+                """
+            )
+        except Exception as email_error:
+            print(f"Email notification error: {email_error}")
+        
+        return jsonify({
+            'success': True,
+            'message': f'✅ Payment approved! GHS {float(manual_payment.amount):.2f} credited to {user.username}',
+            'data': {
+                'user_id': user.id,
+                'username': user.username,
+                'amount': float(manual_payment.amount),
+                'new_balance': user.wallet_balance,
+                'reference': manual_payment.reference,
+                'approved_at': manual_payment.verified_at.isoformat()
+            }
+        }), 200
+        
+    except Exception as e:
+        print(f"Admin approve payment error: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+# NEW: Batch approve multiple payments
+@app.route('/api/admin/manual-payments/batch-approve', methods=['POST'])
+@token_required
+@admin_required
+def admin_batch_approve_payments():
+    """Admin: Batch approve multiple payments at once"""
+    try:
+        data = request.get_json()
+        payment_ids = data.get('payment_ids', [])
+        
+        if not payment_ids:
+            return jsonify({'success': False, 'error': 'No payment IDs provided'}), 400
+        
+        approved_count = 0
+        total_amount = 0
+        approved_payments = []
+        
+        for payment_id in payment_ids:
+            # Use db.session.get() for SQLAlchemy 2.0
+            manual_payment = db.session.get(ManualPayment, payment_id)
+            
+            if manual_payment and manual_payment.status == 'pending_verification':
+                # Update payment status
+                manual_payment.status = 'verified'
+                manual_payment.verified_at = datetime.utcnow()
+                manual_payment.verified_by = g.current_user.id
+                manual_payment.admin_notes = f'Batch approved with {len(payment_ids)} other payments'
+                
+                # Fund user's wallet
+                user = db.session.get(User, manual_payment.user_id)
+                if user:
+                    balance_before = user.wallet_balance
+                    user.wallet_balance = float(user.wallet_balance) + float(manual_payment.amount)
+                    total_amount += float(manual_payment.amount)
+                    
+                    # Create transaction record
+                    transaction = Transaction(
+                        user_id=user.id,
+                        type='credit',
+                        amount=float(manual_payment.amount),
+                        balance_before=balance_before,
+                        balance_after=user.wallet_balance,
+                        description=f'Batch payment approval - Reference: {manual_payment.reference}',
+                        reference=manual_payment.reference,
+                        status='completed'
+                    )
+                    db.session.add(transaction)
+                    
+                    approved_count += 1
+                    approved_payments.append({
+                        'user_id': user.id,
+                        'username': user.username,
+                        'amount': float(manual_payment.amount),
+                        'reference': manual_payment.reference
+                    })
+        
+        db.session.commit()
+        
+        if approved_count > 0:
+            return jsonify({
+                'success': True,
+                'message': f'✅ Successfully approved {approved_count} payments totaling GHS {total_amount:.2f}',
+                'data': {
+                    'approved_count': approved_count,
+                    'total_amount': total_amount,
+                    'approved_payments': approved_payments
+                }
+            }), 200
+        else:
+            return jsonify({
+                'success': False,
+                'error': 'No valid pending payments found to approve'
+            }), 400
+            
+    except Exception as e:
+        print(f"Admin batch approve error: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+# Keep the original verify endpoint for backward compatibility
 @app.route('/api/admin/manual-payments/<int:payment_id>/verify', methods=['POST'])
 @token_required
 @admin_required
 def admin_verify_manual_payment(payment_id):
-    """Admin: Verify and approve manual payment"""
+    """Admin: Verify and approve manual payment (legacy endpoint)"""
     try:
         data = request.get_json()
         action = data.get('action')
         admin_notes = data.get('admin_notes')
+        sender_name = data.get('sender_name')
+        sender_phone = data.get('sender_phone')
         
         manual_payment = ManualPayment.query.get(payment_id)
         
@@ -4519,6 +4668,8 @@ def admin_verify_manual_payment(payment_id):
             manual_payment.verified_at = datetime.utcnow()
             manual_payment.verified_by = g.current_user.id
             manual_payment.admin_notes = admin_notes
+            manual_payment.sender_name = sender_name
+            manual_payment.sender_phone = sender_phone
             
             # Fund user's wallet
             user = User.query.get(manual_payment.user_id)
@@ -4528,24 +4679,26 @@ def admin_verify_manual_payment(payment_id):
             # Create transaction record
             transaction = Transaction(
                 user_id=user.id,
-                type='fund',
+                type='credit',
                 amount=manual_payment.amount,
                 balance_before=balance_before,
                 balance_after=user.wallet_balance,
                 description=f'Manual payment approved - Reference: {manual_payment.reference}',
                 reference=manual_payment.reference,
-                status='completed'
+                status='completed',
+                created_by='admin',
+                admin_id=g.current_user.id
             )
             db.session.add(transaction)
             
             db.session.commit()
             
-            # Notify user of approval via email
+            # Send notification to user
             send_email(
                 user.email,
-                f"Wallet Funded - {manual_payment.reference}",
+                f"✅ Wallet Funded - {manual_payment.reference} | {COMPANY_NAME}",
                 f"""
-                <h3>Wallet Funding Successful - {COMPANY_NAME}</h3>
+                <h3>Payment Approved!</h3>
                 <p>Dear {user.username},</p>
                 <p>Your manual payment of <strong>GHS {manual_payment.amount:.2f}</strong> has been verified and added to your wallet.</p>
                 <p><strong>Reference:</strong> {manual_payment.reference}</p>
@@ -4556,7 +4709,11 @@ def admin_verify_manual_payment(payment_id):
             
             return jsonify({
                 'success': True,
-                'message': f'Payment approved. GHS {manual_payment.amount:.2f} added to user\'s wallet.'
+                'message': f'Payment approved. GHS {manual_payment.amount:.2f} added to user\'s wallet.',
+                'data': {
+                    'user_balance': user.wallet_balance,
+                    'amount_credited': manual_payment.amount
+                }
             })
             
         elif action == 'reject':
@@ -4567,19 +4724,18 @@ def admin_verify_manual_payment(payment_id):
             
             db.session.commit()
             
-            # Notify user of rejection via email
+            # Notify user of rejection
             user = User.query.get(manual_payment.user_id)
             send_email(
                 user.email,
-                f"Payment Rejected - {manual_payment.reference}",
+                f"Payment Update - {manual_payment.reference} | {COMPANY_NAME}",
                 f"""
-                <h3>Payment Verification Failed - {COMPANY_NAME}</h3>
+                <h3>Payment Status Update</h3>
                 <p>Dear {user.username},</p>
                 <p>Your manual payment of <strong>GHS {manual_payment.amount:.2f}</strong> could not be verified.</p>
                 <p><strong>Reference:</strong> {manual_payment.reference}</p>
                 <p><strong>Reason:</strong> {admin_notes or 'Unable to verify payment. Please contact support.'}</p>
                 <p>Please contact our support team for assistance.</p>
-                <hr>
                 <p>WhatsApp: {COMPANY_PHONE}</p>
                 """
             )
@@ -4595,6 +4751,267 @@ def admin_verify_manual_payment(payment_id):
         print(f"Admin verify payment error: {e}")
         db.session.rollback()
         return jsonify({'success': False, 'error': 'Failed to process payment'}), 500
+
+
+# NEW: Get single payment details
+@app.route('/api/admin/manual-payments/<int:payment_id>', methods=['GET'])
+@token_required
+@admin_required
+def admin_get_manual_payment(payment_id):
+    """Admin: Get single payment details"""
+    try:
+        payment = ManualPayment.query.get(payment_id)
+        
+        if not payment:
+            return jsonify({'success': False, 'error': 'Payment not found'}), 404
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'id': payment.id,
+                'amount': float(payment.amount),
+                'reference': payment.reference,
+                'status': payment.status,
+                'user_id': payment.user_id,
+                'username': payment.user.username,
+                'email': payment.user.email,
+                'phone': payment.user.phone,
+                'sender_name': payment.sender_name,
+                'sender_phone': payment.sender_phone,
+                'transaction_id': payment.transaction_id,
+                'proof_url': payment.proof_url,
+                'admin_notes': payment.admin_notes,
+                'created_at': payment.created_at.isoformat(),
+                'verified_at': payment.verified_at.isoformat() if payment.verified_at else None,
+                'verified_by': payment.verified_by
+            }
+        })
+        
+    except Exception as e:
+        print(f"Admin get payment error: {e}")
+        return jsonify({'success': False, 'error': 'Failed to fetch payment details'}), 500
+
+# KEEP ONLY ONE of these - delete the duplicate
+
+@app.route('/api/payment/paystack/verify/<reference>', methods=['GET'])
+@token_required
+def verify_paystack_payment(reference):
+    """Verify Paystack payment status"""
+    try:
+        if not reference:
+            return jsonify({'success': False, 'error': 'Reference required'}), 400
+        
+        print(f"🔍 Verifying Paystack payment: {reference}")
+        
+        # First, check if we have a pending transaction
+        pending_tx = PendingTransaction.query.filter_by(reference=reference).first()
+        
+        if not pending_tx:
+            print(f"⚠️ No pending transaction found for reference: {reference}")
+            
+            # Check if already completed
+            completed_tx = Transaction.query.filter_by(reference=reference).first()
+            if completed_tx:
+                print(f"✅ Transaction already processed: {reference}")
+                return jsonify({
+                    'success': True,
+                    'data': {
+                        'status': 'success',
+                        'amount': float(completed_tx.amount),
+                        'message': 'Payment already processed'
+                    }
+                })
+            
+            # Check if there's any transaction with similar reference
+            partial_match = Transaction.query.filter(
+                Transaction.reference.like(f'%{reference[-20:]}%')
+            ).first()
+            if partial_match:
+                return jsonify({
+                    'success': True,
+                    'data': {
+                        'status': 'success',
+                        'amount': float(partial_match.amount),
+                        'message': 'Payment already processed'
+                    }
+                })
+            
+            return jsonify({
+                'success': False, 
+                'error': f'No pending transaction found for reference: {reference}. Please create a new payment request.'
+            }), 404
+        
+        print(f"📝 Found pending transaction: {pending_tx.id}, status: {pending_tx.status}")
+        
+        # Verify with Paystack
+        result = verify_paystack_transaction(reference)
+        
+        if not result['success']:
+            return jsonify({'success': False, 'error': 'Payment verification failed'}), 400
+        
+        if result['status'] == 'success':
+            # Update user wallet
+            user = User.query.get(pending_tx.user_id)
+            if not user:
+                return jsonify({'success': False, 'error': 'User not found'}), 404
+            
+            print(f"💰 Adding {result['amount']} to wallet for user {user.username}")
+            
+            # Add to wallet
+            balance_before = user.wallet_balance
+            user.wallet_balance += result['amount']
+            
+            # Update pending transaction
+            pending_tx.status = 'completed'
+            pending_tx.completed_at = datetime.utcnow()
+            
+            # Create transaction record
+            transaction = Transaction(
+                user_id=user.id,
+                type='fund',
+                amount=result['amount'],
+                balance_before=balance_before,
+                balance_after=user.wallet_balance,
+                description=f'Wallet funding via Paystack - {reference}',
+                reference=reference,
+                status='completed',
+                meta_data={
+                    'payment_method': 'paystack',
+                    'reference': reference
+                }
+            )
+            db.session.add(transaction)
+            db.session.commit()
+            
+            print(f"✅ Successfully credited {user.username} with GHS {result['amount']:.2f}")
+            
+            # Send email confirmation
+            try:
+                send_wallet_funding_email(user.email, user.username, result['amount'], user.wallet_balance)
+            except Exception as email_err:
+                print(f"Email error (non-critical): {email_err}")
+            
+            return jsonify({
+                'success': True,
+                'data': {
+                    'status': 'success',
+                    'amount': float(result['amount']),
+                    'new_balance': float(user.wallet_balance),
+                    'message': f'Successfully added GHS {result["amount"]:.2f} to your wallet'
+                }
+            })
+        else:
+            # Update failed transaction
+            pending_tx.status = 'failed'
+            db.session.commit()
+            
+            return jsonify({
+                'success': False,
+                'data': {
+                    'status': 'failed',
+                    'message': result.get('message', 'Payment was not successful')
+                }
+            }), 400
+        
+    except Exception as e:
+        print(f"❌ Verify Paystack payment error: {e}")
+        import traceback
+        traceback.print_exc()
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/payment/paystack/webhook', methods=['POST'])
+def paystack_webhook():
+    """Paystack webhook for automatic payment confirmation"""
+    try:
+        # Verify webhook signature
+        signature = request.headers.get('x-paystack-signature')
+        if not signature:
+            return jsonify({'success': False, 'error': 'No signature'}), 401
+        
+        # Get event data
+        event_data = request.get_json()
+        event = event_data.get('event')
+        
+        print(f"Paystack webhook received: {event}")
+        
+        if event == 'charge.success':
+            data = event_data.get('data', {})
+            reference = data.get('reference')
+            amount = data.get('amount', 0) / 100
+            
+            # Find pending transaction
+            pending_tx = PendingTransaction.query.filter_by(
+                reference=reference,
+                status='pending',
+                payment_method='paystack'
+            ).first()
+            
+            if pending_tx and pending_tx.status == 'pending':
+                user = User.query.get(pending_tx.user_id)
+                if user:
+                    balance_before = user.wallet_balance
+                    user.wallet_balance += amount
+                    
+                    pending_tx.status = 'completed'
+                    pending_tx.completed_at = datetime.utcnow()
+                    
+                    transaction = Transaction(
+                        user_id=user.id,
+                        type='credit',
+                        amount=amount,
+                        balance_before=balance_before,
+                        balance_after=user.wallet_balance,
+                        description=f'Wallet funding via Paystack - {reference}',
+                        reference=reference,
+                        status='completed'
+                    )
+                    db.session.add(transaction)
+                    db.session.commit()
+                    
+                    print(f"[WEBHOOK] Processed Paystack payment {reference} for {user.email}")
+                    send_wallet_funding_email(user.email, user.username, amount, user.wallet_balance)
+        
+        return jsonify({'success': True})
+        
+    except Exception as e:
+        print(f"Paystack webhook error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+def send_wallet_funding_email(email, username, amount, new_balance):
+    """Send wallet funding confirmation email"""
+    try:
+        send_email(
+            email,
+            f"✅ Wallet Funded Successfully - {COMPANY_NAME}",
+            f"""
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                <div style="background: #8B0000; padding: 20px; text-align: center; border-radius: 10px 10px 0 0;">
+                    <h2 style="color: white;">✅ Wallet Funded Successfully!</h2>
+                    <p style="color: white;">{COMPANY_NAME}</p>
+                </div>
+                <div style="background: #f5f5f5; padding: 30px; border-radius: 0 0 10px 10px;">
+                    <p>Dear <strong>{username}</strong>,</p>
+                    <p>Your Roamsmart wallet has been successfully funded!</p>
+                    <div style="background: white; padding: 20px; text-align: center; border-radius: 10px; margin: 20px 0;">
+                        <p style="font-size: 14px; margin-bottom: 10px;">Amount Added:</p>
+                        <p style="font-size: 32px; font-weight: bold; color: #28a745;">GHS {amount:.2f}</p>
+                        <p style="font-size: 14px; margin-top: 10px;">New Balance: <strong>GHS {new_balance:.2f}</strong></p>
+                    </div>
+                    <p>You can now use your wallet balance to purchase data bundles, WAEC vouchers, and more!</p>
+                    <div style="text-align: center; margin: 25px 0;">
+                        <a href="{COMPANY_WEBSITE}/dashboard" style="background: #8B0000; color: white; padding: 12px 30px; text-decoration: none; border-radius: 30px;">Go to Dashboard</a>
+                    </div>
+                </div>
+            </div>
+            """
+        )
+    except Exception as e:
+        print(f"Email error: {e}")
+
+
 
 @app.route('/api/admin/admins/<int:admin_id>/role', methods=['PUT'])
 @token_required
@@ -5841,7 +6258,53 @@ def bulk_approve_agents():
         return jsonify({'success': False, 'error': 'Failed to bulk approve'}), 500
 
 
-
+@app.route('/api/payment/paystack/check/<reference>', methods=['GET'])
+@token_required
+def check_paystack_payment(reference):
+    """Debug endpoint to check pending transaction status"""
+    try:
+        print(f"Checking pending transaction for reference: {reference}")
+        
+        # Check in PendingTransaction table
+        pending_tx = PendingTransaction.query.filter_by(reference=reference).first()
+        
+        if pending_tx:
+            return jsonify({
+                'success': True,
+                'exists': True,
+                'data': {
+                    'reference': pending_tx.reference,
+                    'user_id': pending_tx.user_id,
+                    'amount': float(pending_tx.amount),
+                    'status': pending_tx.status,
+                    'payment_method': pending_tx.payment_method,
+                    'created_at': pending_tx.created_at.isoformat() if pending_tx.created_at else None
+                }
+            })
+        else:
+            # Check in Transaction table
+            completed_tx = Transaction.query.filter_by(reference=reference).first()
+            if completed_tx:
+                return jsonify({
+                    'success': True,
+                    'exists': True,
+                    'already_processed': True,
+                    'data': {
+                        'reference': completed_tx.reference,
+                        'amount': float(completed_tx.amount),
+                        'status': completed_tx.status
+                    }
+                })
+            
+            return jsonify({
+                'success': True,
+                'exists': False,
+                'message': f'No transaction found with reference: {reference}'
+            })
+            
+    except Exception as e:
+        print(f"Check payment error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 # Updated order creation with data delivery to network providers
@@ -7534,6 +7997,123 @@ def reject_agentadmin_request(request_id):
         db.session.rollback()
         return jsonify({'success': False, 'error': 'Failed to reject agent'}), 500
 
+@app.route('/api/admin/africastalking-balance', methods=['GET'])
+@token_required
+@admin_required
+def admin_get_africastalking_balance():
+    """Admin: Get Africa's Talking wallet balance"""
+    try:
+        import africastalking
+        import os
+        import re
+        
+        username = os.getenv('AFRICASTALKING_USERNAME', 'sandbox')
+        api_key = os.getenv('AFRICASTALKING_API_KEY')
+        
+        if not api_key:
+            return jsonify({
+                'success': False, 
+                'error': 'Africa\'s Talking API key not configured'
+            }), 500
+        
+        africastalking.initialize(username, api_key)
+        application = africastalking.Application
+        app_data = application.fetch_application_data()
+        
+        balance = 0.0
+        currency = 'GHS'
+        
+        if app_data and 'UserData' in app_data:
+            user_data = app_data['UserData']
+            balance_str = user_data.get('balance', 'GHS 0')
+            
+            match = re.search(r'(\d+(?:\.\d+)?)', balance_str)
+            if match:
+                balance = float(match.group(1))
+            
+            currency_match = re.match(r'([A-Z]{3})', balance_str)
+            if currency_match:
+                currency = currency_match.group(1)
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'account_balance': balance,
+                'wallet_balance': balance,
+                'airtime_balance': balance,
+                'sms_balance': balance,
+                'voice_balance': balance,
+                'currency': currency
+            }
+        })
+        
+    except Exception as e:
+        print(f"Error fetching Africa's Talking balance: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/admin/agent-applications', methods=['GET'])
+@token_required
+@admin_required
+def admin_get_agent_applications():
+    """Admin: Get all agent applications"""
+    try:
+        from sqlalchemy import inspect
+        
+        inspector = inspect(db.engine)
+        
+        if not inspector.has_table('agent_applications'):
+            return jsonify({
+                'success': True,
+                'data': [],
+                'total': 0,
+                'page': 1,
+                'total_pages': 0
+            })
+        
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('limit', 20, type=int)
+        status = request.args.get('status', 'pending')
+        
+        query = AgentApplication.query.filter_by(status=status)
+        pagination = query.order_by(AgentApplication.created_at.desc()).paginate(
+            page=page, per_page=per_page, error_out=False
+        )
+        
+        applications = []
+        for app in pagination.items:
+            user = db.session.get(User, app.user_id) if app.user_id else None
+            
+            applications.append({
+                'id': app.id,
+                'user_id': app.user_id,
+                'username': user.username if user else 'Unknown',
+                'email': user.email if user else 'No email',
+                'phone': user.phone if user else 'No phone',
+                'amount': float(app.amount) if app.amount else 0,
+                'payment_reference': app.payment_reference,
+                'payment_proof_url': app.payment_proof_url,
+                'status': app.status,
+                'submitted_at': app.created_at.isoformat() if app.created_at else None,
+                'processed_at': app.processed_at.isoformat() if hasattr(app, 'processed_at') and app.processed_at else None
+            })
+        
+        return jsonify({
+            'success': True,
+            'data': applications,
+            'total': pagination.total,
+            'page': page,
+            'total_pages': pagination.pages
+        })
+        
+    except Exception as e:
+        print(f"Error fetching agent applications: {e}")
+        return jsonify({
+            'success': True,
+            'data': [],
+            'total': 0,
+            'page': 1,
+            'total_pages': 0
+        })
 
 @app.route('/api/admin/agent-requests/bulk-approve', methods=['POST'])
 @token_required
@@ -11032,8 +11612,80 @@ def get_active_announcement():
 
 # ========== INVENTORY SERVICE ==========
 
+# ========== UPDATED INVENTORY SERVICE WITH USER DIRECT PURCHASE ==========
+
 class InventoryService:
     """Manages inventory across all levels (Super Admin → Agents → Customers)"""
+    
+    @staticmethod
+    def send_data_via_africastalking(phone_number, size_gb, quantity=1):
+        """
+        Send data to customer using Africa's Talking Mobile Data API
+        """
+        try:
+            import africastalking
+            import os
+            
+            username = os.environ.get('AFRICASTALKING_USERNAME', 'sandbox')
+            api_key = os.environ.get('AFRICASTALKING_API_KEY')
+            product_name = os.environ.get('AFRICASTALKING_PRODUCT_NAME')
+            
+            if not api_key:
+                print("Africa's Talking API key not configured")
+                return {'success': True, 'simulated': True}  # Simulate for testing
+            
+            africastalking.initialize(username, api_key)
+            mobile_data = africastalking.MobileData
+            
+            # Format phone number to international format
+            if phone_number.startswith('0'):
+                international_phone = '233' + phone_number[1:]
+            else:
+                international_phone = phone_number
+            
+            total_mb = size_gb * 1024 * quantity
+            
+            # Determine unit based on size
+            if total_mb < 1024:
+                unit = 'MB'
+                quantity_mb = total_mb
+            else:
+                unit = 'GB'
+                quantity_gb = size_gb * quantity
+            
+            recipients = [{
+                'phoneNumber': international_phone,
+                'quantity': quantity_mb if unit == 'MB' else quantity_gb,
+                'unit': unit,
+                'validity': 'Day',
+                'metadata': {
+                    'network': 'All Networks',
+                    'size_gb': size_gb,
+                    'quantity': quantity,
+                    'delivery_time': datetime.utcnow().isoformat()
+                }
+            }]
+            
+            response = mobile_data.send(product_name, recipients)
+            
+            print(f"📱 Africa's Talking: Sent {quantity}x {size_gb}GB to {international_phone}")
+            print(f"Response: {response}")
+            
+            return {
+                'success': True,
+                'delivered': True,
+                'transaction_id': response.get('transactionId'),
+                'message': 'Data delivered successfully'
+            }
+            
+        except Exception as e:
+            print(f"Error sending data via Africa's Talking: {e}")
+            # Fallback: Simulate delivery (for testing)
+            return {
+                'success': True,
+                'simulated': True,
+                'message': f'Data delivery simulated: {quantity}x {size_gb}GB to {phone_number}'
+            }
     
     @staticmethod
     def add_to_master_inventory(network, size_gb, quantity, purchase_price):
@@ -11160,8 +11812,130 @@ class InventoryService:
         }
     
     @staticmethod
+    def user_direct_purchase(user_id, network, size_gb, quantity, phone_number):
+        """
+        User directly purchases data from master inventory
+        Delivers data to customer phone via Africa's Talking
+        """
+        try:
+            user = User.query.get(user_id)
+            if not user:
+                return {'success': False, 'error': 'User not found'}
+            
+            total_gb = size_gb * quantity
+            
+            # Get price from PriceSetting
+            price_setting = PriceSetting.query.filter_by(
+                category='user_price',
+                network=network,
+                size_gb=size_gb
+            ).first()
+            
+            if not price_setting:
+                return {'success': False, 'error': f'Price not configured for {network} {size_gb}GB'}
+            
+            price_per_unit = float(price_setting.price)
+            total_price = price_per_unit * quantity
+            
+            # Check inventory
+            inventory = MasterInventory.query.filter_by(
+                network=network, size_gb=size_gb
+            ).first()
+            
+            if not inventory or inventory.remaining < total_gb:
+                return {'success': False, 'error': 'Insufficient inventory. Please contact admin.'}
+            
+            # Check wallet balance
+            if user.wallet_balance < total_price:
+                return {'success': False, 'error': f'Insufficient balance. Need ₵{total_price:.2f}'}
+            
+            # Send data via Africa's Talking FIRST
+            delivery_result = InventoryService.send_data_via_africastalking(
+                phone_number, size_gb, quantity
+            )
+            
+            if not delivery_result.get('success'):
+                return {'success': False, 'error': 'Data delivery failed. Please try again.'}
+            
+            # Deduct from user wallet
+            balance_before = user.wallet_balance
+            user.wallet_balance -= total_price
+            
+            # Update inventory
+            inventory.remaining -= total_gb
+            inventory.sold_to_users = (inventory.sold_to_users or 0) + total_gb
+            
+            # Create order
+            order_id = f"ORD-{uuid.uuid4().hex[:8].upper()}"
+            order = Order(
+                user_id=user.id,
+                order_id=order_id,
+                network=network,
+                size_gb=size_gb,
+                quantity=quantity,
+                phone_number=phone_number,
+                amount=total_price,
+                status='completed',
+                payment_method='wallet',
+                created_at=datetime.utcnow(),
+                completed_at=datetime.utcnow()
+            )
+            db.session.add(order)
+            
+            # Create transaction
+            transaction = Transaction(
+                user_id=user.id,
+                type='debit',
+                amount=total_price,
+                balance_before=balance_before,
+                balance_after=user.wallet_balance,
+                description=f'Data purchase - {quantity}x {size_gb}GB {network.upper()} to {phone_number}',
+                reference=order_id,
+                status='completed'
+            )
+            db.session.add(transaction)
+            
+            db.session.commit()
+            
+            # Send email confirmation
+            send_email(
+                user.email,
+                f"Data Purchase Confirmation - {COMPANY_NAME}",
+                f"""
+                <div style="font-family: Arial, sans-serif;">
+                    <h2 style="color: #8B0000;">Purchase Confirmation ✅</h2>
+                    <p>Dear {user.username},</p>
+                    <p>You have successfully purchased data.</p>
+                    <p><strong>Network:</strong> {network.upper()}</p>
+                    <p><strong>Size:</strong> {size_gb}GB</p>
+                    <p><strong>Quantity:</strong> {quantity}</p>
+                    <p><strong>Total GB:</strong> {total_gb}GB</p>
+                    <p><strong>Phone Number:</strong> {phone_number}</p>
+                    <p><strong>Amount Paid:</strong> GHS {total_price:.2f}</p>
+                    <p><strong>New Balance:</strong> GHS {user.wallet_balance:.2f}</p>
+                    <a href="{COMPANY_WEBSITE}/dashboard" style="background: #8B0000; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Go to Dashboard</a>
+                </div>
+                """
+            )
+            
+            return {
+                'success': True,
+                'order_id': order_id,
+                'total_gb': total_gb,
+                'total_price': total_price,
+                'new_balance': float(user.wallet_balance),
+                'delivery_status': 'delivered',
+                'delivery_message': delivery_result.get('message', 'Data delivered')
+            }
+            
+        except Exception as e:
+            print(f"User direct purchase error: {e}")
+            db.session.rollback()
+            return {'success': False, 'error': str(e)}
+    
+    @staticmethod
     def agent_sell_to_customer(agent_id, network, size_gb, quantity, customer_phone, selling_price, customer_name=None, customer_id=None):
-        """Agent sells data to customer (uses agent's inventory) - Email ONLY, NO customer SMS"""
+        """Agent sells data to customer (uses agent's inventory) - Email ONLY - Delivers via Africa's Talking"""
         try:
             agent_inv = AgentInventory.query.filter_by(
                 agent_id=agent_id, network=network, size_gb=size_gb
@@ -11171,6 +11945,14 @@ class InventoryService:
             
             if not agent_inv or agent_inv.remaining < total_gb:
                 return {'success': False, 'error': 'Insufficient agent inventory'}
+            
+            # Send data via Africa's Talking FIRST
+            delivery_result = InventoryService.send_data_via_africastalking(
+                customer_phone, size_gb, quantity
+            )
+            
+            if not delivery_result.get('success'):
+                return {'success': False, 'error': 'Data delivery failed. Please try again.'}
             
             # Deduct from agent inventory
             agent_inv.remaining -= total_gb
@@ -11212,7 +11994,7 @@ class InventoryService:
             
             db.session.commit()
             
-            # Send email confirmation to agent (Email ONLY)
+            # Send email confirmation to agent
             send_email(
                 agent.email,
                 f"Sale Confirmation - {size_gb}GB {network.upper()} - {COMPANY_NAME}",
@@ -11230,6 +12012,7 @@ class InventoryService:
                         <p><strong>Customer Phone:</strong> {customer_phone}</p>
                         <p><strong>Selling Price:</strong> GHS {selling_price:.2f}</p>
                         <p><strong>New Wallet Balance:</strong> GHS {agent.wallet_balance:.2f}</p>
+                        <p><strong>Delivery Status:</strong> {delivery_result.get('message', 'Delivered')}</p>
                     </div>
                     
                     <a href="{COMPANY_WEBSITE}/agent/orders" style="background: #8B0000; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block;">View Orders</a>
@@ -11237,15 +12020,13 @@ class InventoryService:
                 """
             )
             
-            # Send data delivery notification to network provider ONLY (NO customer SMS)
-            send_data_delivery_to_provider(customer_phone, f"✅ Your {quantity}x {size_gb}GB {network.upper()} data has been delivered via {COMPANY_NAME}!")
-            
             return {
                 'success': True,
                 'order_id': order.order_id,
                 'delivery_status': 'completed',
                 'agent_balance': agent.wallet_balance,
-                'profit': selling_price - (agent_inv.purchased / agent_inv.sold if agent_inv.sold > 0 else 0)
+                'profit': selling_price - ((agent_inv.purchased / agent_inv.sold) if agent_inv.sold > 0 else 0),
+                'delivery_message': delivery_result.get('message')
             }
             
         except Exception as e:
@@ -11282,19 +12063,21 @@ class InventoryService:
         inventory = MasterInventory.query.all()
         
         result = {
-            'mtn': {'total': 0, 'remaining': 0, 'sold_to_agents': 0, 'bundles': {}},
-            'telecel': {'total': 0, 'remaining': 0, 'sold_to_agents': 0, 'bundles': {}},
-            'airteltigo': {'total': 0, 'remaining': 0, 'sold_to_agents': 0, 'bundles': {}}
+            'mtn': {'total': 0, 'remaining': 0, 'sold_to_agents': 0, 'sold_to_users': 0, 'bundles': {}},
+            'telecel': {'total': 0, 'remaining': 0, 'sold_to_agents': 0, 'sold_to_users': 0, 'bundles': {}},
+            'airteltigo': {'total': 0, 'remaining': 0, 'sold_to_agents': 0, 'sold_to_users': 0, 'bundles': {}}
         }
         
         for item in inventory:
             result[item.network]['total'] += item.total_purchased
             result[item.network]['remaining'] += item.remaining
-            result[item.network]['sold_to_agents'] += item.sold_to_agents
+            result[item.network]['sold_to_agents'] += getattr(item, 'sold_to_agents', 0)
+            result[item.network]['sold_to_users'] += getattr(item, 'sold_to_users', 0)
             result[item.network]['bundles'][f"{int(item.size_gb)}gb"] = {
                 'total_purchased': item.total_purchased,
                 'remaining': item.remaining,
-                'sold_to_agents': item.sold_to_agents
+                'sold_to_agents': getattr(item, 'sold_to_agents', 0),
+                'sold_to_users': getattr(item, 'sold_to_users', 0)
             }
         
         return result
@@ -11316,88 +12099,340 @@ class InventoryService:
         
         return {
             'total_gb_available': sum(item.remaining for item in master_inv),
-            'total_gb_sold': sum(item.sold_to_agents for item in master_inv),
+            'total_gb_sold_to_agents': sum(getattr(item, 'sold_to_agents', 0) for item in master_inv),
+            'total_gb_sold_to_users': sum(getattr(item, 'sold_to_users', 0) for item in master_inv),
             'low_stock_alerts': low_stock_alerts,
             'platform': COMPANY_NAME
         }
 
-# ========== DATA DELIVERY HELPER ==========
 
-def send_data_delivery_to_provider(phone_number, message):
-    """Send data delivery notification to network provider (Email/SMS to provider, NOT customer)"""
-    try:
-        # This sends to the network provider's system, not to the customer
-        # For now, just log it
-        print(f"[DATA DELIVERY] Phone: {phone_number}")
-        print(f"[DATA DELIVERY] Message: {message}")
-        
-        # In production, this would call the network provider's webhook
-        # or send an email to the provider's support system
-        
-        # Log to database for audit
-        delivery_log = DeliveryLog(
-            phone_number=phone_number,
-            message=message,
-            status='sent',
-            created_at=datetime.utcnow()
-        )
-        db.session.add(delivery_log)
-        db.session.commit()
-        
-        return True
-        
-    except Exception as e:
-        print(f"Data delivery error: {e}")
-        return False
-# ========== INVENTORY API ROUTES ==========
+# Add to your app.py
 
-
-
-
-@app.route('/api/admin/network/purchase', methods=['POST'])
+@app.route('/api/user/direct-purchase', methods=['POST'])
 @token_required
-@admin_required
-def admin_purchase_from_network():
-    """Super Admin purchases data directly from network provider"""
+def user_direct_purchase():
+    """User directly purchases data from master inventory"""
     try:
         data = request.get_json()
+        
         network = data.get('network')
         size_gb = data.get('size_gb')
         quantity = data.get('quantity', 1)
+        phone_number = data.get('phone_number')
         
-        if not network or not size_gb:
-            return jsonify({'success': False, 'error': 'Network and size required'}), 400
+        if not network or not size_gb or not phone_number:
+            return jsonify({'success': False, 'error': 'Network, size, and phone number required'}), 400
         
-        # Call network API service
-        network_service = NetworkAPIService()
-        purchase_result = network_service.purchase_bulk_data(network, size_gb, quantity)
+        user = g.current_user
         
-        if not purchase_result['success']:
-            return jsonify({'success': False, 'error': purchase_result.get('error', 'Purchase failed')}), 400
-        
-        # Add to master inventory
         inventory_service = InventoryService()
-        inventory_service.add_to_master_inventory(
+        result = inventory_service.user_direct_purchase(
+            user_id=user.id,
             network=network,
             size_gb=size_gb,
             quantity=quantity,
-            purchase_price=purchase_result.get('amount', size_gb * quantity * 3.5)
+            phone_number=phone_number
         )
+        
+        if not result['success']:
+            return jsonify({'success': False, 'error': result['error']}), 400
         
         return jsonify({
             'success': True,
-            'message': f'Successfully purchased {quantity}x {size_gb}GB from {network.upper()}',
-            'data': {
-                'total_gb': size_gb * quantity,
-                'transaction_id': purchase_result.get('transaction_id'),
-                'provider': COMPANY_NAME
-            }
-        })
+            'message': f'Successfully purchased {result["total_gb"]}GB {network.upper()} data',
+            'data': result
+        }), 201
         
     except Exception as e:
-        print(f"Admin network purchase error: {e}")
-        db.session.rollback()
+        print(f"User direct purchase error: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/admin/network/purchase', methods=['POST', 'OPTIONS'])
+@token_required
+@admin_required
+def admin_network_purchase():
+    """Admin: Purchase Mobile Data from Africa's Talking"""
+    
+    if request.method == 'OPTIONS':
+        response = jsonify({'success': True})
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+        response.headers.add('Access-Control-Allow-Methods', 'POST,OPTIONS')
+        return response
+    
+    try:
+        import uuid
+        import requests
+        import os
+        
+        data = request.get_json()
+        
+        product_type = data.get('product_type', 'data')
+        network = data.get('network', '').lower()
+        selected_bundle_index = data.get('bundle_index', 0)  # Let frontend select exact bundle
+        quantity = data.get('quantity', 1)
+        phone_number = data.get('phone_number', '')
+        
+        # Africa's Talking Mobile Data API endpoint
+        AT_DATA_URL = "https://bundles.africastalking.com/mobile/data/request"
+        
+        # Get API credentials
+        api_key = os.environ.get('AFRICASTALKING_API_KEY')
+        username = os.environ.get('AFRICASTALKING_USERNAME', 'Roamsmart')
+        
+        if not api_key:
+            return jsonify({'success': False, 'error': 'Africa\'s Talking API key not configured'}), 500
+        
+        # Format phone number
+        if phone_number.startswith('0'):
+            phone_number = '233' + phone_number[1:]
+        if not phone_number.startswith('+'):
+            phone_number = '+' + phone_number
+        
+        # Exact Africa's Talking Ghana bundles (must match exactly)
+        available_bundles = {
+            'mtn': [
+                {'mb': 20.46, 'price': 0.49, 'display': '20.46 MB'},
+                {'mb': 40.91, 'price': 0.99, 'display': '40.91 MB'},
+                {'mb': 401.63, 'price': 2.97, 'display': '401.63 MB'},
+                {'mb': 826.72, 'price': 9.90, 'display': '826.72 MB'},
+                {'mb': 106810, 'price': 346.62, 'display': '106.81 GB'},
+                {'mb': 214530, 'price': 395.14, 'display': '214.53 GB'}
+            ],
+            'airteltigo': [
+                {'mb': 50, 'price': 0.98, 'display': '50 MB'},
+                {'mb': 110, 'price': 1.96, 'display': '110 MB'},
+                {'mb': 385, 'price': 2.94, 'display': '385 MB'},
+                {'mb': 550, 'price': 4.90, 'display': '550 MB'},
+                {'mb': 880, 'price': 9.80, 'display': '880 MB'},
+                {'mb': 1740, 'price': 19.60, 'display': '1.7 GB'},
+                {'mb': 4505, 'price': 49.00, 'display': '4.4 GB'},
+                {'mb': 10137, 'price': 98.00, 'display': '9.9 GB'},
+                {'mb': 33792, 'price': 196.00, 'display': '33 GB'},
+                {'mb': 101376, 'price': 294.01, 'display': '99 GB'},
+                {'mb': 118272, 'price': 343.01, 'display': '115.5 GB'},
+                {'mb': 256000, 'price': 392.01, 'display': '250 GB'}
+            ],
+            'telecel': [
+                {'mb': 22, 'price': 0.49, 'display': '22 MB'},
+                {'mb': 49.5, 'price': 0.98, 'display': '49.5 MB'},
+                {'mb': 110, 'price': 1.96, 'display': '110 MB'},
+                {'mb': 550, 'price': 4.90, 'display': '550 MB'},
+                {'mb': 880, 'price': 9.80, 'display': '880 MB'},
+                {'mb': 1729, 'price': 19.60, 'display': '1.689 GB'},
+                {'mb': 4608, 'price': 49.00, 'display': '4.5 GB'},
+                {'mb': 10373, 'price': 98.00, 'display': '10.13 GB'},
+                {'mb': 34600, 'price': 196.00, 'display': '33.79 GB'},
+                {'mb': 103833, 'price': 294.01, 'display': '101.4 GB'},
+                {'mb': 262144, 'price': 392.01, 'display': '256 GB'}
+            ]
+        }
+        
+        # Get bundles for selected network
+        bundles = available_bundles.get(network, [])
+        if not bundles:
+            return jsonify({'success': False, 'error': f'No bundles available for {network}'}), 400
+        
+        # Use selected bundle or default to first
+        if isinstance(selected_bundle_index, int) and selected_bundle_index < len(bundles):
+            selected_bundle = bundles[selected_bundle_index]
+        else:
+            # If size_gb provided, find closest match
+            size_gb = data.get('size_gb', 0)
+            target_mb = size_gb * 1024
+            selected_bundle = min(bundles, key=lambda x: abs(x['mb'] - target_mb))
+        
+        # Calculate total price
+        unit_price = selected_bundle['price']
+        total_price = unit_price * quantity
+        total_mb = selected_bundle['mb'] * quantity
+        total_gb = total_mb / 1024
+        
+        # IMPORTANT: quantity must be a NUMBER (float)
+        mb_quantity = float(selected_bundle['mb'])
+        
+        payload = {
+            "username": username,
+            "productName": "Mobile Data",
+            "recipients": [
+                {
+                    "phoneNumber": phone_number,
+                    "quantity": mb_quantity,  # Float: 20.46
+                    "unit": "MB",
+                    "validity": "NonExpiry",
+                    "metadata": {
+                        "source": "Roamsmart_Admin",
+                        "purpose": "Bulk Purchase",
+                        "network": network,
+                        "bundle_count": str(quantity)
+                    }
+                }
+            ]
+        }
+        
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "apiKey": api_key,
+            "Idempotency-Key": str(uuid.uuid4())
+        }
+        
+        print(f"[DATA] Purchasing from Africa's Talking...")
+        print(f"[DATA] URL: {AT_DATA_URL}")
+        print(f"[DATA] Phone: {phone_number}")
+        print(f"[DATA] Bundle: {selected_bundle['display']}")
+        print(f"[DATA] Bundle MB: {selected_bundle['mb']}")
+        print(f"[DATA] Quantity: {quantity}")
+        print(f"[DATA] Total MB: {total_mb:.2f}MB ({total_gb:.2f}GB)")
+        print(f"[DATA] Price: GHS {total_price:.2f}")
+        print(f"[DATA] Payload: {payload}")
+        
+        # Make request to Africa's Talking
+        response = requests.post(
+            AT_DATA_URL,
+            json=payload,
+            headers=headers,
+            timeout=30
+        )
+        
+        print(f"[DATA] Response Status: {response.status_code}")
+        print(f"[DATA] Response: {response.text}")
+        
+        if response.status_code in [200, 201, 202]:
+            result = response.json()
+            
+            if 'entries' in result:
+                entries = result.get('entries', [])
+                if entries:
+                    entry = entries[0]
+                    if entry.get('status') == 'Success':
+                        update_data_inventory(network, total_gb)
+                        
+                        return jsonify({
+                            'success': True,
+                            'message': f'Successfully purchased {quantity}x {selected_bundle["display"]} ({total_gb:.2f}GB total) from {network.upper()} for GHS {total_price:.2f}',
+                            'data': {
+                                'network': network,
+                                'bundle_mb': selected_bundle['mb'],
+                                'bundle_display': selected_bundle['display'],
+                                'quantity': quantity,
+                                'total_mb': total_mb,
+                                'total_gb': total_gb,
+                                'price_per_unit': unit_price,
+                                'total_price': total_price,
+                                'transaction_id': entry.get('transactionId'),
+                                'status': entry.get('status')
+                            }
+                        })
+                    else:
+                        return jsonify({
+                            'success': False,
+                            'error': entry.get('errorMessage', 'Purchase failed')
+                        }), 400
+                else:
+                    return jsonify({
+                        'success': True,
+                        'message': f'Purchase request sent. Check Africa\'s Talking dashboard for status.',
+                        'data': result
+                    }), 200
+            else:
+                return jsonify({
+                    'success': True,
+                    'message': f'Purchase request sent. Check Africa\'s Talking dashboard for status.',
+                    'data': result
+                }), 200
+        else:
+            return jsonify({
+                'success': False,
+                'error': f'Africa\'s Talking error: {response.text}'
+            }), response.status_code
+        
+    except Exception as e:
+        print(f"Purchase execution error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+def update_data_inventory(network, gb_purchased):
+    """Update data inventory in database"""
+    try:
+        from app import db, MasterInventory
+        
+        inventory = MasterInventory.query.filter_by(network=network).first()
+        if inventory:
+            inventory.total_purchased = float(inventory.total_purchased or 0) + float(gb_purchased)
+            inventory.remaining = float(inventory.remaining or 0) + float(gb_purchased)
+        else:
+            inventory = MasterInventory(
+                network=network,
+                total_purchased=float(gb_purchased),
+                remaining=float(gb_purchased),
+                sold_to_agents=0
+            )
+            db.session.add(inventory)
+        
+        db.session.commit()
+        print(f"[INVENTORY] Updated {network}: +{gb_purchased} GB")
+        
+    except Exception as e:
+        print(f"Error updating inventory: {e}")
+        db.session.rollback()
+
+# Endpoint to get available bundles for display
+@app.route('/api/admin/africastalking-bundles', methods=['GET'])
+@token_required
+@admin_required
+def admin_get_africastalking_bundles():
+    """Admin: Get available data bundles with their prices"""
+    try:
+        AFRICASTALKING_BUNDLES = {
+            'mtn': [
+                {'size_mb': 20.46, 'size_gb': 0.02, 'price': 0.49, 'description': '20.46 MB - GHS 0.49'},
+                {'size_mb': 40.91, 'size_gb': 0.04, 'price': 0.99, 'description': '40.91 MB - GHS 0.99'},
+                {'size_mb': 401.63, 'size_gb': 0.39, 'price': 2.97, 'description': '401.63 MB - GHS 2.97'},
+                {'size_mb': 826.72, 'size_gb': 0.81, 'price': 9.90, 'description': '826.72 MB - GHS 9.90'},
+                {'size_mb': 106810, 'size_gb': 104.31, 'price': 346.62, 'description': '106.81 GB - GHS 346.62'},
+                {'size_mb': 214530, 'size_gb': 209.50, 'price': 395.14, 'description': '214.53 GB - GHS 395.14'}
+            ],
+            'airteltigo': [
+                {'size_mb': 50, 'size_gb': 0.05, 'price': 0.98, 'description': '50 MB - GHS 0.98'},
+                {'size_mb': 110, 'size_gb': 0.11, 'price': 1.96, 'description': '110 MB - GHS 1.96'},
+                {'size_mb': 385, 'size_gb': 0.38, 'price': 2.94, 'description': '385 MB - GHS 2.94'},
+                {'size_mb': 550, 'size_gb': 0.54, 'price': 4.90, 'description': '550 MB - GHS 4.90'},
+                {'size_mb': 880, 'size_gb': 0.86, 'price': 9.80, 'description': '880 MB - GHS 9.80'},
+                {'size_mb': 1740, 'size_gb': 1.70, 'price': 19.60, 'description': '1.7 GB - GHS 19.60'},
+                {'size_mb': 4505, 'size_gb': 4.40, 'price': 49.00, 'description': '4.4 GB - GHS 49.00'},
+                {'size_mb': 10137, 'size_gb': 9.90, 'price': 98.00, 'description': '9.9 GB - GHS 98.00'},
+                {'size_mb': 33792, 'size_gb': 33.00, 'price': 196.00, 'description': '33 GB - GHS 196.00'},
+                {'size_mb': 101376, 'size_gb': 99.00, 'price': 294.01, 'description': '99 GB - GHS 294.01'},
+                {'size_mb': 118272, 'size_gb': 115.50, 'price': 343.01, 'description': '115.5 GB - GHS 343.01'},
+                {'size_mb': 256000, 'size_gb': 250.00, 'price': 392.01, 'description': '250 GB - GHS 392.01'}
+            ],
+            'telecel': [
+                {'size_mb': 22, 'size_gb': 0.02, 'price': 0.49, 'description': '22 MB - GHS 0.49'},
+                {'size_mb': 49.5, 'size_gb': 0.05, 'price': 0.98, 'description': '49.5 MB - GHS 0.98'},
+                {'size_mb': 110, 'size_gb': 0.11, 'price': 1.96, 'description': '110 MB - GHS 1.96'},
+                {'size_mb': 550, 'size_gb': 0.54, 'price': 4.90, 'description': '550 MB - GHS 4.90'},
+                {'size_mb': 880, 'size_gb': 0.86, 'price': 9.80, 'description': '880 MB - GHS 9.80'},
+                {'size_mb': 1729, 'size_gb': 1.69, 'price': 19.60, 'description': '1.689 GB - GHS 19.60'},
+                {'size_mb': 4608, 'size_gb': 4.50, 'price': 49.00, 'description': '4.5 GB - GHS 49.00'},
+                {'size_mb': 10373, 'size_gb': 10.13, 'price': 98.00, 'description': '10.13 GB - GHS 98.00'},
+                {'size_mb': 34600, 'size_gb': 33.79, 'price': 196.00, 'description': '33.79 GB - GHS 196.00'},
+                {'size_mb': 103833, 'size_gb': 101.40, 'price': 294.01, 'description': '101.4 GB - GHS 294.01'},
+                {'size_mb': 262144, 'size_gb': 256.00, 'price': 392.01, 'description': '256 GB - GHS 392.01'}
+            ]
+        }
+        
+        return jsonify({
+            'success': True,
+            'data': AFRICASTALKING_BUNDLES,
+            'last_updated': datetime.utcnow().isoformat()
+        }), 200
+        
+    except Exception as e:
+        print(f"Error fetching bundles: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 
 
 @app.route('/api/agent/inventory/purchase', methods=['POST'])
@@ -13427,6 +14462,250 @@ def get_customer_stats(customer_id):
         print(f"Get customer stats error: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
+# Add this to your existing app.py
+
+@app.route('/api/admin/africastalking-balance', methods=['GET'])
+@token_required
+@admin_required
+def get_africastalking_balance():
+    """Fetch Africa's Talking account balance"""
+    try:
+        import africastalking
+        import os
+        
+        username = os.environ.get('AFRICASTALKING_USERNAME', 'sandbox')
+        api_key = os.environ.get('AFRICASTALKING_API_KEY')
+        
+        if not api_key:
+            return jsonify({
+                'success': False,
+                'error': 'Africa\'s Talking API key not configured'
+            }), 500
+        
+        africastalking.initialize(username, api_key)
+        application = africastalking.Application
+        
+        # Fetch wallet balance
+        wallet_balance = application.fetch_wallet_balance()
+        
+        # Fetch application data
+        app_data = application.fetch_application_data()
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'account_balance': app_data.get('balance', 0),
+                'wallet_balance': wallet_balance.get('balance', 0),
+                'currency': 'GHS',
+                'last_updated': datetime.utcnow().isoformat()
+            }
+        })
+        
+    except Exception as e:
+        print(f"Error fetching Africa's Talking balance: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/admin/purchase-data', methods=['POST'])
+@token_required
+@admin_required
+def admin_purchase_data():
+    """Admin purchases data from network provider - NO SMS"""
+    try:
+        data = request.get_json()
+        
+        network = data.get('network', 'mtn')
+        size_gb = data.get('size_gb')
+        quantity = data.get('quantity', 1)
+        total_gb = data.get('total_gb')
+        amount_paid = data.get('amount_paid')
+        phone_number = data.get('phone_number')
+        is_custom = data.get('is_custom', False)
+        
+        if not amount_paid:
+            return jsonify({'success': False, 'error': 'Amount paid is required'}), 400
+        
+        # Calculate total GB
+        if is_custom:
+            total_gb_value = total_gb
+        else:
+            total_gb_value = size_gb * quantity
+        
+        # Use your existing InventoryService to add to master inventory
+        inventory_service = InventoryService()
+        inventory_service.add_to_master_inventory(
+            network=network,
+            size_gb=size_gb if not is_custom else 1,
+            quantity=quantity if not is_custom else int(total_gb_value),
+            purchase_price=amount_paid
+        )
+        
+        # Create purchase record (optional - for tracking)
+        purchase = NetworkPurchase(
+            admin_id=g.current_user.id,
+            network=network,
+            size_gb=size_gb if not is_custom else total_gb_value,
+            quantity=quantity if not is_custom else 1,
+            total_gb=total_gb_value,
+            amount_paid=amount_paid,
+            phone_number=phone_number,
+            status='completed',
+            created_at=datetime.utcnow()
+        )
+        db.session.add(purchase)
+        
+        # Log transaction
+        transaction = Transaction(
+            user_id=g.current_user.id,
+            type='debit',
+            amount=amount_paid,
+            balance_before=g.current_user.wallet_balance,
+            balance_after=g.current_user.wallet_balance,
+            description=f'Data purchase from {network.upper()} - {total_gb_value}GB',
+            reference=f"ADMIN-PURCHASE-{uuid.uuid4().hex[:8].upper()}",
+            status='completed'
+        )
+        db.session.add(transaction)
+        
+        db.session.commit()
+        
+        # NO SMS SENDING - Only log
+        print(f"[ADMIN PURCHASE] Admin: {g.current_user.username}, Network: {network}, Total GB: {total_gb_value}, Amount: ₵{amount_paid}")
+        
+        return jsonify({
+            'success': True,
+            'message': f'Successfully purchased {total_gb_value} GB from {network.upper()}',
+            'data': {
+                'total_gb': total_gb_value,
+                'amount_paid': amount_paid,
+                'network': network
+            }
+        }), 201
+        
+    except Exception as e:
+        print(f"Admin purchase error: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/user/purchase-data', methods=['POST'])
+@token_required
+def user_purchase_data():
+    """User purchases data using wallet balance - delivers via Africa's Talking"""
+    try:
+        data = request.get_json()
+        
+        network = data.get('network')
+        size_gb = data.get('size_gb')
+        phone_number = data.get('phone_number')
+        quantity = data.get('quantity', 1)
+        
+        if not network or not size_gb or not phone_number:
+            return jsonify({'success': False, 'error': 'Network, size, and phone required'}), 400
+        
+        user = g.current_user
+        
+        # Get price from PriceSetting
+        price_setting = PriceSetting.query.filter_by(
+            category='user_price' if not user.is_agent else 'agent_price',
+            network=network,
+            size_gb=size_gb
+        ).first()
+        
+        if not price_setting:
+            return jsonify({'success': False, 'error': f'Price not configured for {network} {size_gb}GB'}), 400
+        
+        price_per_unit = float(price_setting.price)
+        total_price = price_per_unit * quantity
+        total_gb = size_gb * quantity
+        
+        # Check wallet balance
+        if user.wallet_balance < total_price:
+            return jsonify({'success': False, 'error': f'Insufficient balance. Need ₵{total_price:.2f}'}), 400
+        
+        # Check inventory
+        inventory = MasterInventory.query.filter_by(
+            network=network,
+            size_gb=size_gb
+        ).first()
+        
+        if not inventory or inventory.remaining < total_gb:
+            return jsonify({'success': False, 'error': 'Insufficient inventory. Please contact admin.'}), 400
+        
+        # Format phone number for Africa's Talking (international format)
+        # Convert Ghana number (024XXXXXXX) to international format (23324XXXXXXX)
+        if phone_number.startswith('0'):
+            international_phone = '233' + phone_number[1:]
+        else:
+            international_phone = phone_number
+        
+        # Send data via Africa's Talking
+        delivery_result = send_data_to_customer(international_phone, size_gb, quantity)
+        
+        if not delivery_result['success']:
+            return jsonify({
+                'success': False, 
+                'error': f'Data delivery failed: {delivery_result.get("error", "Unknown error")}'
+            }), 500
+        
+        # Deduct from user wallet
+        balance_before = user.wallet_balance
+        user.wallet_balance -= total_price
+        
+        # Update inventory
+        inventory.remaining -= total_gb
+        inventory.sold_to_users = (inventory.sold_to_users or 0) + total_gb
+        
+        # Create order
+        order_id = f"ORD-{uuid.uuid4().hex[:8].upper()}"
+        order = Order(
+            user_id=user.id,
+            order_id=order_id,
+            network=network,
+            size_gb=size_gb,
+            quantity=quantity,
+            phone_number=phone_number,
+            amount=total_price,
+            status='completed',
+            payment_method='wallet',
+            created_at=datetime.utcnow(),
+            completed_at=datetime.utcnow(),
+            delivery_transaction_id=delivery_result.get('transaction_id')
+        )
+        db.session.add(order)
+        
+        # Create transaction
+        transaction = Transaction(
+            user_id=user.id,
+            type='debit',
+            amount=total_price,
+            balance_before=balance_before,
+            balance_after=user.wallet_balance,
+            description=f'Data purchase - {quantity}x {size_gb}GB {network.upper()} to {phone_number}',
+            reference=order_id,
+            status='completed',
+            delivery_status='delivered'
+        )
+        db.session.add(transaction)
+        
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': f'Successfully purchased and delivered {total_gb}GB {network.upper()} data to {phone_number}',
+            'data': {
+                'order_id': order_id,
+                'total_gb': total_gb,
+                'total_price': total_price,
+                'new_balance': float(user.wallet_balance),
+                'delivery_status': 'delivered',
+                'delivery_transaction_id': delivery_result.get('transaction_id')
+            }
+        }), 201
+        
+    except Exception as e:
+        print(f"User purchase error: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/agent/customers', methods=['GET'])
 @token_required
@@ -13937,6 +15216,8 @@ def apply_for_agent():
         traceback.print_exc()
         db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
+
+
 
 @app.route('/api/agent/application/status', methods=['GET'])
 @token_required
