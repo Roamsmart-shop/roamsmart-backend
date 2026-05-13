@@ -1136,6 +1136,7 @@ def agent_required(f):
 def init_db():
     """Initialize database with default data"""
     with app.app_context():
+        # Create all tables from all models
         db.create_all()
         
         # Create ONLY ONE Super Admin (no support admin, no demo users/agents)
@@ -1161,6 +1162,18 @@ def init_db():
             admin.set_password('Roamsmart123@$')
             db.session.commit()
             print("✅ Super Admin password updated to: Roamsmart123@$")
+        
+        # Create PendingTransaction table if it doesn't exist (ensure it's created)
+        # This is handled by db.create_all() above, but let's verify
+        from sqlalchemy import inspect
+        inspector = inspect(db.engine)
+        if 'pending_transactions' not in inspector.get_table_names():
+            print("⚠️ pending_transactions table not found, creating...")
+            # Create table directly if model exists
+            PendingTransaction.__table__.create(db.engine)
+            print("✅ pending_transactions table created")
+        else:
+            print("✅ pending_transactions table already exists")
         
         # Create default price settings if none exist
         if PriceSetting.query.count() == 0:
@@ -1238,13 +1251,21 @@ def init_db():
             print("✅ Announcement created")
         
         db.session.commit()
+        
+        # Final verification
         print("\n" + "="*60)
         print("✅ DATABASE INITIALIZATION COMPLETE")
         print("="*60)
         print(f"🔐 Super Admin Email: {COMPANY_ADMIN_EMAIL}")
         print(f"🔐 Super Admin Password: Roamsmart123@$")
+        
+        # List all tables
+        inspector = inspect(db.engine)
+        tables = inspector.get_table_names()
+        print(f"\n📋 Database Tables ({len(tables)}):")
+        for table in sorted(tables):
+            print(f"   - {table}")
         print("="*60 + "\n")
-
 # ========== PROFILE PICTURE UPLOAD ==========
 
 import traceback
