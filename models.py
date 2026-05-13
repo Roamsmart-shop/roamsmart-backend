@@ -177,15 +177,13 @@ class PendingTransaction(db.Model):
     __tablename__ = 'pending_transactions'
     
     id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    user_id = db.Column(db.Integer, nullable=False)
     reference = db.Column(db.String(100), unique=True, nullable=False)
     amount = db.Column(db.Numeric(10, 2), nullable=False)
     payment_method = db.Column(db.String(50), default='paystack')
     status = db.Column(db.String(50), default='pending')
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     completed_at = db.Column(db.DateTime, nullable=True)
-    
-    user = db.relationship('User', backref='pending_transactions')
 
 class DataBundle(db.Model):
     __tablename__ = 'data_bundles'
