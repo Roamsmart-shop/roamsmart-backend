@@ -1139,6 +1139,64 @@ def init_db():
         # Create all tables from all models
         db.create_all()
         
+        # ========== ADD NEW COLUMNS TO ORDERS TABLE (MIGRATION) ==========
+        from sqlalchemy import text
+        try:
+            with db.engine.connect() as conn:
+                # Get existing columns
+                inspector = db.inspect(db.engine)
+                existing_columns = [col['name'] for col in inspector.get_columns('orders')]
+                
+                print("\n📋 Checking Orders table columns...")
+                
+                # Add cost column
+                if 'cost' not in existing_columns:
+                    conn.execute(text('ALTER TABLE orders ADD COLUMN cost FLOAT DEFAULT 0.0'))
+                    print("✅ Added 'cost' column to orders table")
+                else:
+                    print("⏭️ Column 'cost' already exists")
+                
+                # Add profit column
+                if 'profit' not in existing_columns:
+                    conn.execute(text('ALTER TABLE orders ADD COLUMN profit FLOAT DEFAULT 0.0'))
+                    print("✅ Added 'profit' column to orders table")
+                else:
+                    print("⏭️ Column 'profit' already exists")
+                
+                # Add provider column
+                if 'provider' not in existing_columns:
+                    conn.execute(text("ALTER TABLE orders ADD COLUMN provider VARCHAR(50)"))
+                    print("✅ Added 'provider' column to orders table")
+                else:
+                    print("⏭️ Column 'provider' already exists")
+                
+                # Add provider_order_id column
+                if 'provider_order_id' not in existing_columns:
+                    conn.execute(text("ALTER TABLE orders ADD COLUMN provider_order_id VARCHAR(100)"))
+                    print("✅ Added 'provider_order_id' column to orders table")
+                else:
+                    print("⏭️ Column 'provider_order_id' already exists")
+                
+                # Add provider_reference column
+                if 'provider_reference' not in existing_columns:
+                    conn.execute(text("ALTER TABLE orders ADD COLUMN provider_reference VARCHAR(100)"))
+                    print("✅ Added 'provider_reference' column to orders table")
+                else:
+                    print("⏭️ Column 'provider_reference' already exists")
+                
+                # Add provider_cost column
+                if 'provider_cost' not in existing_columns:
+                    conn.execute(text('ALTER TABLE orders ADD COLUMN provider_cost FLOAT DEFAULT 0.0'))
+                    print("✅ Added 'provider_cost' column to orders table")
+                else:
+                    print("⏭️ Column 'provider_cost' already exists")
+                
+                conn.commit()
+                print("✅ Orders table migration completed")
+        except Exception as e:
+            print(f"⚠️ Migration note: {e}")
+        # ========== END OF MIGRATION ==========
+        
         # Create ONLY ONE Super Admin (no support admin, no demo users/agents)
         if not User.query.filter_by(email=COMPANY_ADMIN_EMAIL).first():
             admin = User(
@@ -5781,28 +5839,7 @@ def agent_sell():
         db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
     
-@app.route('/api/admin/migrate', methods=['POST'])
-@token_required
-@admin_required
-def run_migration():
-    """Run database migration (admin only)"""
-    try:
-        from sqlalchemy import text
-        
-        with db.engine.connect() as conn:
-            # Add columns if they don't exist
-            conn.execute(text('ALTER TABLE orders ADD COLUMN IF NOT EXISTS cost FLOAT DEFAULT 0.0'))
-            conn.execute(text('ALTER TABLE orders ADD COLUMN IF NOT EXISTS profit FLOAT DEFAULT 0.0'))
-            conn.execute(text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS provider VARCHAR(50)"))
-            conn.execute(text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS provider_order_id VARCHAR(100)"))
-            conn.execute(text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS provider_reference VARCHAR(100)"))
-            conn.execute(text('ALTER TABLE orders ADD COLUMN IF NOT EXISTS provider_cost FLOAT DEFAULT 0.0'))
-            conn.commit()
-        
-        return jsonify({'success': True, 'message': 'Migration completed successfully'})
-        
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
+
 
 @app.route('/api/agent/earnings', methods=['GET'])
 @token_required
