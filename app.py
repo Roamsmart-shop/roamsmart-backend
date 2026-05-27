@@ -2833,6 +2833,29 @@ def verify_reset_token():
 # ========== TEMPORARY STORAGE (Replace with Redis in production) ==========
 temp_storage = {}
 
+@app.route('/api/wallet/pending-topups', methods=['GET', 'OPTIONS'])
+@token_required
+def get_pending_topups():
+    """Get pending topups for the current user"""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    
+    user_id = g.user_id
+    
+    # Query pending manual payments for this user
+    cursor = db.execute('''
+        SELECT id, amount, reference, proof_url, status, created_at
+        FROM manual_payments
+        WHERE user_id = ? AND status = 'pending'
+        ORDER BY created_at DESC
+    ''', (user_id,))
+    
+    pending_topups = cursor.fetchall()
+    
+    return jsonify({
+        'success': True,
+        'data': [dict(row) for row in pending_topups]
+    })
 
 @app.route('/api/auth/verify-code', methods=['POST'])
 @limiter.limit("10 per minute")
@@ -3524,28 +3547,7 @@ class DigimallService:
             phone = '233' + phone
         return phone
 
-@app.route('/api/webhooks/digimall/low-balance', methods=['POST'])
-def digimall_low_balance_webhook():
-    """Handle Digimall low balance notifications"""
-    try:
-        data = request.get_json()
-        print(f"[Digimall Low Balance Alert] {data}")
-        
-        # Send notification to admin
-        balance = data.get('balance', 0)
-        threshold = data.get('threshold', 50)
-        
-        # Send email to admin
-        send_admin_alert(
-            subject=f"⚠️ Digimall Wallet Balance Low: GHS {balance}",
-            message=f"Your Digimall wallet balance has dropped below GHS {threshold}. Current balance: GHS {balance}. Please top up to continue processing orders."
-        )
-        
-        return jsonify({'success': True}), 200
-        
-    except Exception as e:
-        print(f"[Digimall Low Balance Error] {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
+
 
 @app.route('/api/referral/balance', methods=['GET'])
 @token_required
@@ -4352,21 +4354,25 @@ def digimall_webhook():
         data = request.get_json()
         print(f"[Digimall Webhook] Received: {data}")
         
-        order_id = data.get('orderId')
-        reference = data.get('reference')
-        status = data.get('status')
-        recipient = data.get('recipient')
-        volume = data.get('volume')
+        event = data.get('event')
         
-        if order_id:
-            order = Order.query.filter_by(provider_order_id=order_id).first()
-            if order:
-                old_status = order.status
-                order.status = 'completed' if status == 'delivered' else status
-                if status == 'delivered':
-                    order.completed_at = datetime.utcnow()
-                db.session.commit()
-                print(f"[Digimall] Updated order {order_id}: {old_status} -> {status}")
+        if event == 'order.status.updated':
+            order_id = data.get('orderId')
+            reference = data.get('reference')
+            status = data.get('status')
+            recipient = data.get('recipient')
+            volume = data.get('volume')
+            
+            # Update order status in your database
+            if order_id:
+                order = Order.query.filter_by(provider_order_id=order_id).first()
+                if order:
+                    old_status = order.status
+                    order.status = 'completed' if status == 'delivered' else status
+                    if status == 'delivered':
+                        order.completed_at = datetime.utcnow()
+                    db.session.commit()
+                    print(f"[Digimall] Updated order {order_id}: {old_status} -> {status}")
         
         return jsonify({'success': True}), 200
         
@@ -4386,9 +4392,9 @@ def admin_get_digimall_balance():
         if not DIGIMALL_API_KEY:
             return jsonify({'success': False, 'error': 'Digimall API key not configured'}), 500
         
-        # Try to get balance from Digimall
+        # Call Digimall balance endpoint
         response = requests.get(
-            f"{DIGIMALL_BASE_URL}/wallet/balance",
+            f"{DIGIMALL_BASE_URL}/balance",
             headers={'x-api-key': DIGIMALL_API_KEY},
             timeout=10
         )
@@ -4400,28 +4406,67 @@ def admin_get_digimall_balance():
                 'data': {
                     'balance': data.get('balance', 0),
                     'currency': data.get('currency', 'GHS'),
-                    'threshold': data.get('threshold', 50)
+                    'name': data.get('name', 'Roamsmart'),
+                    'timestamp': data.get('timestamp')
                 }
             })
         else:
-            # If balance endpoint not available, track in your database
-            from models import DigimallBalance
-            balance_record = DigimallBalance.query.first()
-            balance = balance_record.balance if balance_record else 0
-            
             return jsonify({
-                'success': True,
-                'data': {
-                    'balance': float(balance),
-                    'currency': 'GHS',
-                    'is_estimate': True
-                }
-            })
+                'success': False, 
+                'error': f'Failed to fetch balance: {response.text}'
+            }), response.status_code
             
     except Exception as e:
         print(f"Error fetching Digimall balance: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
-
+    
+@app.route('/api/webhooks/digimall/low-balance', methods=['POST'])
+def digimall_low_balance_webhook():
+    """Handle Digimall low balance webhook notifications"""
+    try:
+        data = request.get_json()
+        print(f"[Digimall Low Balance Webhook] Received: {data}")
+        
+        event = data.get('event')
+        
+        if event == 'balance.low':
+            balance = data.get('balance')
+            threshold = data.get('threshold')
+            currency = data.get('currency', 'GHS')
+            message = data.get('message')
+            
+            print(f"⚠️ LOW BALANCE ALERT: {currency} {balance} (threshold: {currency} {threshold})")
+            
+            # Send email notification to admin
+            send_admin_alert(
+                subject=f"⚠️ Digimall Wallet Low Balance Alert",
+                message=f"""
+                <div style="font-family: Arial, sans-serif;">
+                    <h2 style="color: #ff9800;">⚠️ Low Balance Alert</h2>
+                    <p>Your Digimall wallet balance has dropped below the configured threshold.</p>
+                    <div style="background: #f8f9fa; padding: 15px; border-radius: 8px; margin: 15px 0;">
+                        <p><strong>💰 Current Balance:</strong> {currency} {balance}</p>
+                        <p><strong>⚙️ Threshold:</strong> {currency} {threshold}</p>
+                        <p><strong>📝 Message:</strong> {message}</p>
+                    </div>
+                    <p>Please top up your Digimall wallet to continue processing orders.</p>
+                    <a href="https://www.digi-mall.app/dashboard" style="background: #8B0000; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">
+                        Top Up Now
+                    </a>
+                </div>
+                """
+            )
+            
+            # Optional: Pause order processing if balance is too low
+            if balance < 10:
+                print("⚠️ CRITICAL: Balance below GHS 10. Consider pausing orders.")
+                # You could set a flag in your database to pause automated orders
+        
+        return jsonify({'success': True}), 200
+        
+    except Exception as e:
+        print(f"[Digimall Low Balance Webhook Error] {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/wallet/transactions', methods=['GET'])
 @token_required
@@ -5727,7 +5772,7 @@ def get_agent_dashboard():
 @token_required
 @agent_required
 def agent_sell():
-    """Sell data to customer (agent only) - Digimall handles delivery"""
+    """Sell data to customer - No profit calculation shown"""
     try:
         data = request.get_json()
         
@@ -5736,17 +5781,7 @@ def agent_sell():
         phone = data.get('phone')
         customer_name = data.get('customer_name')
         quantity = data.get('quantity', 1)
-        selling_price = data.get('selling_price')  # Customer paid amount
-        
-        print(f"\n{'='*60}")
-        print(f"AGENT SELL DEBUG")
-        print(f"{'='*60}")
-        print(f"Agent: {g.current_user.username} (ID: {g.current_user.id})")
-        print(f"Network: {network}")
-        print(f"Size: {size_gb}GB")
-        print(f"Phone: {phone}")
-        print(f"Customer: {customer_name}")
-        print(f"Selling Price: ₵{selling_price}")
+        selling_price = data.get('selling_price')
         
         if not all([network, size_gb, phone]):
             return jsonify({'success': False, 'error': 'Missing required fields'}), 400
@@ -5759,18 +5794,18 @@ def agent_sell():
         
         total_cost = agent_cost * quantity
         
-        # If selling price not provided, use agent cost + 30% markup
+        # If selling price not provided, use agent cost + markup
         if not selling_price:
-            selling_price = total_cost * 1.3
+            markup = db.session.query(StoreSettings.markup).filter_by(agent_id=g.current_user.id).scalar() or 15
+            selling_price = total_cost * (1 + markup / 100)
         
         total_revenue = selling_price * quantity
-        profit = total_revenue - total_cost
         
         # Check agent's wallet balance
         if g.current_user.wallet_balance < total_cost:
             return jsonify({
                 'success': False, 
-                'error': f'Insufficient wallet balance. Need GHS {total_cost:.2f}. Your balance: GHS {g.current_user.wallet_balance:.2f}'
+                'error': f'Insufficient wallet balance. Need GHS {total_cost:.2f}'
             }), 400
         
         # Generate order ID
@@ -5780,7 +5815,7 @@ def agent_sell():
         balance_before = g.current_user.wallet_balance
         g.current_user.wallet_balance -= total_cost
         
-        # Create order with all fields
+        # Create order (profit still stored internally but not shown to agent)
         order = Order(
             user_id=g.current_user.id,
             agent_id=g.current_user.id,
@@ -5790,9 +5825,9 @@ def agent_sell():
             size_gb=size_gb,
             phone_number=phone,
             customer_name=customer_name,
-            amount=total_revenue,  # Customer paid amount
-            cost=total_cost,  # Agent's wholesale cost
-            profit=profit,  # Profit made
+            amount=total_revenue,
+            cost=total_cost,
+            profit=total_revenue - total_cost,  # Stored but not returned
             quantity=quantity,
             status='completed',
             payment_method='wallet',
@@ -5808,7 +5843,7 @@ def agent_sell():
             amount=total_revenue,
             balance_before=balance_before,
             balance_after=g.current_user.wallet_balance,
-            description=f'Sale: {quantity}x {size_gb}GB {network} to {phone} (Profit: GHS {profit:.2f})',
+            description=f'Sale: {quantity}x {size_gb}GB {network} to {phone}',
             reference=order_id,
             status='completed'
         )
@@ -5817,7 +5852,7 @@ def agent_sell():
         # Update agent's stats
         g.current_user.total_sales = (g.current_user.total_sales or 0) + total_revenue
         
-        # Add to store clients (customer tracking)
+        # Add to store clients
         if customer_name or phone:
             try:
                 from models import StoreClient
@@ -5841,16 +5876,13 @@ def agent_sell():
         
         db.session.commit()
         
-        # Send data delivery via Digimall
+        # Send data delivery
         digimall_result = None
         try:
-            digimall = DigimallService()
             digimall = DigimallService()
             digimall_result = digimall.deliver_data(network, phone, size_gb)
             
             if digimall_result and digimall_result.get('success'):
-                print(f"[Digimall] Delivery initiated: {digimall_result.get('orderId')}")
-                # Update order with provider info
                 order.provider = 'digimall'
                 order.provider_order_id = digimall_result.get('orderId')
                 order.provider_reference = digimall_result.get('reference')
@@ -5859,15 +5891,16 @@ def agent_sell():
         except Exception as e:
             print(f"Digimall delivery error: {e}")
         
+        # Return response WITHOUT profit
         return jsonify({
             'success': True,
             'message': f'Sold {quantity}x {size_gb}GB {network.upper()} to {phone}',
             'data': {
                 'order_id': order_id,
                 'amount': total_revenue,
-                'cost': total_cost,
-                'profit': profit,
                 'balance': float(g.current_user.wallet_balance),
+                # REMOVED: 'cost'
+                # REMOVED: 'profit'
                 'digimall_delivery': digimall_result.get('success') if digimall_result else False
             }
         })
@@ -5878,23 +5911,25 @@ def agent_sell():
         traceback.print_exc()
         db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
-    
 
 
 @app.route('/api/agent/earnings', methods=['GET'])
 @token_required
 @agent_required
 def get_agent_earnings():
-    """Get agent earnings breakdown"""
+    """Get agent earnings - SIMPLIFIED, only show wallet balance"""
     try:
-        # Calculate earnings from sales
-        total_sales = db.session.query(db.func.sum(Order.amount)).filter_by(
-            user_id=g.current_user.id, status='completed'
+        agent = g.current_user
+        
+        # Get total sales revenue (what customers paid)
+        total_sales = db.session.query(db.func.sum(Order.amount)).filter(
+            Order.agent_id == agent.id,
+            Order.status == 'completed'
         ).scalar() or 0
         
-        # Get withdrawals
+        # Get withdrawals (amounts agent has withdrawn)
         withdrawals = Transaction.query.filter_by(
-            user_id=g.current_user.id, 
+            user_id=agent.id, 
             type='withdrawal',
             status='completed'
         ).all()
@@ -5902,32 +5937,28 @@ def get_agent_earnings():
         
         # Get pending withdrawals
         pending_withdrawals = Transaction.query.filter_by(
-            user_id=g.current_user.id,
+            user_id=agent.id,
             type='withdrawal',
             status='pending'
         ).all()
         pending = sum(w.amount for w in pending_withdrawals)
         
-        # Calculate monthly earnings
-        current_month = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        monthly_earnings = db.session.query(db.func.sum(Order.amount)).filter(
-            Order.user_id == g.current_user.id,
-            Order.status == 'completed',
-            Order.completed_at >= current_month
-        ).scalar() or 0
+        # Available balance (wallet)
+        available = float(agent.wallet_balance)
         
         return jsonify({
             'success': True,
             'data': {
-                'available': float(g.current_user.wallet_balance),
-                'total_earned': float(total_sales),
-                'pending': float(pending),
+                'available': available,  # Wallet balance only
+                'total_sales': float(total_sales),
+                'pending_withdrawals': float(pending),
                 'withdrawn': float(withdrawn),
-                'this_month': float(monthly_earnings),
-                'commission_rate': g.current_user.commission_rate or 15,
+                # REMOVED: 'total_earned'
+                # REMOVED: 'this_month'
+                # REMOVED: 'commission_rate'
                 'next_tier': {
-                    'name': 'Silver' if g.current_user.agent_tier == 'Bronze' else 'Gold',
-                    'required_sales': 5000 if g.current_user.agent_tier == 'Bronze' else 10000,
+                    'name': 'Silver' if (agent.agent_tier or 'Bronze') == 'Bronze' else 'Gold',
+                    'required_sales': 5000 if (agent.agent_tier or 'Bronze') == 'Bronze' else 10000,
                     'current_sales': float(total_sales)
                 }
             }
@@ -5936,6 +5967,148 @@ def get_agent_earnings():
     except Exception as e:
         print(f"Get agent earnings error: {e}")
         return jsonify({'success': False, 'error': 'Failed to fetch earnings'}), 500
+
+@app.route('/api/agent/stats', methods=['GET'])
+@token_required
+@agent_required
+def get_agent_stats():
+    """Get agent statistics - NO COMMISSION, NO PROFIT, only actual sales data from database"""
+    try:
+        agent = g.current_user
+        
+        print(f"\n=== AGENT STATS DEBUG (No Commission, No Profit) ===")
+        print(f"Agent ID: {agent.id}")
+        print(f"Agent Username: {agent.username}")
+        
+        # Get total sales from orders where agent_id matches
+        total_sales = db.session.query(db.func.sum(Order.amount)).filter(
+            Order.agent_id == agent.id,
+            Order.status == 'completed'
+        ).scalar() or 0
+        
+        print(f"Total sales: ₵{total_sales}")
+        
+        # Get total orders count
+        total_orders = Order.query.filter_by(
+            agent_id=agent.id,
+            status='completed'
+        ).count()
+        
+        print(f"Total orders: {total_orders}")
+        
+        # Get today's sales
+        today = datetime.utcnow().date()
+        today_start = datetime.combine(today, datetime.min.time())
+        today_end = datetime.combine(today, datetime.max.time())
+        
+        today_sales = db.session.query(db.func.sum(Order.amount)).filter(
+            Order.agent_id == agent.id,
+            Order.status == 'completed',
+            Order.created_at >= today_start,
+            Order.created_at <= today_end
+        ).scalar() or 0
+        
+        print(f"Today's sales: ₵{today_sales}")
+        
+        # Get this week's sales
+        week_start = today - timedelta(days=today.weekday())
+        week_start_dt = datetime.combine(week_start, datetime.min.time())
+        
+        week_sales = db.session.query(db.func.sum(Order.amount)).filter(
+            Order.agent_id == agent.id,
+            Order.status == 'completed',
+            Order.created_at >= week_start_dt
+        ).scalar() or 0
+        
+        # Get this month's sales
+        month_start = today.replace(day=1)
+        month_start_dt = datetime.combine(month_start, datetime.min.time())
+        
+        month_sales = db.session.query(db.func.sum(Order.amount)).filter(
+            Order.agent_id == agent.id,
+            Order.status == 'completed',
+            Order.created_at >= month_start_dt
+        ).scalar() or 0
+        
+        # Get customer count (unique phone numbers)
+        customer_count = db.session.query(Order.phone_number).filter(
+            Order.agent_id == agent.id,
+            Order.status == 'completed'
+        ).distinct().count()
+        
+        print(f"Customers: {customer_count}")
+        
+        # REMOVED: profit calculations
+        # REMOVED: commission calculations
+        # REMOVED: any earnings/savings calculations
+        
+        # Get agent tier based on sales volume (just for display)
+        agent_tier = 'Bronze'
+        next_tier_sales = 500
+        if total_sales >= 10000:
+            agent_tier = 'Platinum'
+            next_tier_sales = 10000
+        elif total_sales >= 2000:
+            agent_tier = 'Gold'
+            next_tier_sales = 2000
+        elif total_sales >= 500:
+            agent_tier = 'Silver'
+            next_tier_sales = 500
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'wallet_balance': float(agent.wallet_balance),
+                'total_sales': float(total_sales),
+                'total_orders': total_orders,
+                # REMOVED: 'total_profit'
+                # REMOVED: 'agent_savings'
+                # REMOVED: 'total_commission'
+                # REMOVED: 'pending_commission'
+                'today_sales': float(today_sales),
+                # REMOVED: 'today_profit'
+                'this_week_sales': float(week_sales),
+                # REMOVED: 'this_week_profit'
+                'this_month_sales': float(month_sales),
+                # REMOVED: 'this_month_profit'
+                'total_customers': customer_count,
+                'agent_tier': agent_tier,
+                'next_tier_sales': next_tier_sales,
+                # REMOVED: 'commission_rate'
+                'rank': 0,
+                'username': agent.username,
+                'phone': agent.phone or ''
+            }
+        })
+        
+    except Exception as e:
+        print(f"Get agent stats error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+# Helper function to get agent's wholesale price (admin configured)
+def get_agent_price(network, size_gb):
+    """Get wholesale price configured by admin"""
+    from models import Price
+    
+    price_entry = Price.query.filter_by(
+        network=network,
+        size_gb=size_gb,
+        is_active=True
+    ).first()
+    
+    if price_entry:
+        return float(price_entry.wholesale_price)
+    
+    # Fallback to default prices if not in database
+    default_prices = {
+        'mtn': {1: 5.50, 2: 10.00, 5: 22.00, 10: 42.00, 20: 80.00},
+        'telecel': {1: 5.00, 2: 9.00, 5: 20.00, 10: 38.00, 20: 75.00},
+        'airteltigo': {1: 5.00, 2: 9.00, 5: 20.00, 10: 38.00, 20: 75.00}
+    }
+    
+    return default_prices.get(network, {}).get(size_gb, 0)
 
 
 @app.route('/api/agent/withdraw', methods=['POST'])
@@ -12760,140 +12933,6 @@ def get_agent_inventory():
         print(f"Get agent inventory error: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
-
-
-@app.route('/api/admin/inventory/master', methods=['GET'])
-@token_required
-@admin_required
-def get_master_inventory():
-    """Get master inventory (Super Admin view)"""
-    try:
-        inventory_service = InventoryService()
-        inventory = inventory_service.get_master_inventory()
-        summary = inventory_service.get_inventory_summary()
-        
-        return jsonify({
-            'success': True,
-            'data': inventory,
-            'summary': summary
-        })
-        
-    except Exception as e:
-        print(f"Get master inventory error: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-@app.route('/api/agent/stats', methods=['GET'])
-@token_required
-@agent_required
-def get_agent_stats():
-    """Get agent statistics"""
-    try:
-        agent = g.current_user
-        
-        print(f"\n=== AGENT STATS DEBUG ===")
-        print(f"Agent ID: {agent.id}")
-        print(f"Agent Username: {agent.username}")
-        
-        # Get total sales from orders where agent_id matches
-        total_sales = db.session.query(db.func.sum(Order.amount)).filter(
-            Order.agent_id == agent.id,
-            Order.status == 'completed'
-        ).scalar() or 0
-        
-        print(f"Total sales: ₵{total_sales}")
-        
-        # Get total orders count
-        total_orders = Order.query.filter_by(
-            agent_id=agent.id,
-            status='completed'
-        ).count()
-        
-        print(f"Total orders: {total_orders}")
-        
-        # Get today's sales
-        today = datetime.utcnow().date()
-        today_start = datetime.combine(today, datetime.min.time())
-        today_end = datetime.combine(today, datetime.max.time())
-        
-        today_sales = db.session.query(db.func.sum(Order.amount)).filter(
-            Order.agent_id == agent.id,
-            Order.status == 'completed',
-            Order.created_at >= today_start,
-            Order.created_at <= today_end
-        ).scalar() or 0
-        
-        print(f"Today's sales: ₵{today_sales}")
-        
-        # Get this week's sales
-        week_start = today - timedelta(days=today.weekday())
-        week_start_dt = datetime.combine(week_start, datetime.min.time())
-        
-        week_sales = db.session.query(db.func.sum(Order.amount)).filter(
-            Order.agent_id == agent.id,
-            Order.status == 'completed',
-            Order.created_at >= week_start_dt
-        ).scalar() or 0
-        
-        # Get this month's sales
-        month_start = today.replace(day=1)
-        month_start_dt = datetime.combine(month_start, datetime.min.time())
-        
-        month_sales = db.session.query(db.func.sum(Order.amount)).filter(
-            Order.agent_id == agent.id,
-            Order.status == 'completed',
-            Order.created_at >= month_start_dt
-        ).scalar() or 0
-        
-        # Get customer count (unique phone numbers)
-        customer_count = db.session.query(Order.phone_number).filter(
-            Order.agent_id == agent.id,
-            Order.status == 'completed'
-        ).distinct().count()
-        
-        print(f"Customers: {customer_count}")
-        
-        # Calculate total commission (15% of sales)
-        total_commission = float(total_sales) * 0.15
-        
-        # Get agent tier based on sales
-        agent_tier = 'Bronze'
-        next_tier_sales = 500
-        if total_sales >= 10000:
-            agent_tier = 'Platinum'
-            next_tier_sales = 10000
-        elif total_sales >= 2000:
-            agent_tier = 'Gold'
-            next_tier_sales = 2000
-        elif total_sales >= 500:
-            agent_tier = 'Silver'
-            next_tier_sales = 500
-        
-        return jsonify({
-            'success': True,
-            'data': {
-                'wallet_balance': float(agent.wallet_balance),
-                'total_sales': float(total_sales),
-                'total_orders': total_orders,
-                'agent_savings': float(total_sales * 0.05),
-                'total_commission': total_commission,
-                'pending_commission': 0,
-                'today_sales': float(today_sales),
-                'this_week_sales': float(week_sales),
-                'this_month_sales': float(month_sales),
-                'total_customers': customer_count,
-                'agent_tier': agent_tier,
-                'next_tier_sales': next_tier_sales,
-                'commission_rate': 15,
-                'rank': 0,
-                'username': agent.username
-            }
-        })
-        
-    except Exception as e:
-        print(f"Get agent stats error: {e}")
-        import traceback
-        traceback.print_exc()
-        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 @app.route('/api/admin/inventory/transactions', methods=['GET'])
