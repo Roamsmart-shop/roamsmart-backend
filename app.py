@@ -101,6 +101,7 @@ def get_allowed_origins():
         'http://127.0.0.1:5000',
         'https://roamsmart.shop',
         'https://www.roamsmart.shop',
+        
         'https://api.roamsmart.shop',
         'https://roamsmart-frontend.vercel.app',
         'https://roamsmart-frontend-cgggs8bm4-roamsmart-shops-projects.vercel.app',
@@ -2315,7 +2316,59 @@ def get_prices():
             'error': 'Failed to load prices',
             'message': 'Please contact admin to configure prices'
         }), 500
-    
+
+@app.route('/api/admin/total-sales', methods=['GET'])
+@token_required
+@admin_required
+def admin_total_sales():
+    """Get total sales for admin dashboard"""
+    try:
+        # Calculate total sales from your orders
+        total_sales = db.session.query(func.sum(Order.amount)).filter(Order.status == 'completed').scalar() or 0
+        
+        # Optional: Get today's sales
+        today = datetime.utcnow().date()
+        today_sales = db.session.query(func.sum(Order.amount)).filter(
+            Order.status == 'completed',
+            func.date(Order.completed_at) == today
+        ).scalar() or 0
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'total_sales': float(total_sales),
+                'today_sales': float(today_sales),
+                'currency': 'GHS'
+            }
+        })
+    except Exception as e:
+        print(f"Error getting total sales: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/wallet/pending-topups', methods=['GET'])
+@token_required
+def get_pending_topups():
+    """Get pending topups for the current user"""
+    try:
+        pending = PendingTransaction.query.filter_by(
+            user_id=g.current_user.id, 
+            status='pending'
+        ).all()
+        
+        return jsonify({
+            'success': True,
+            'data': [{
+                'id': p.id,
+                'reference': p.reference,
+                'amount': float(p.amount),
+                'payment_method': p.payment_method,
+                'created_at': p.created_at.isoformat()
+            } for p in pending]
+        })
+    except Exception as e:
+        print(f"Error getting pending topups: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 @app.route('/api/prices/sizes', methods=['GET'])
 @token_required
 def get_available_sizes():
