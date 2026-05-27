@@ -2345,11 +2345,20 @@ def admin_total_sales():
         print(f"Error getting total sales: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
-@app.route('/api/wallet/pending-topups', methods=['GET'])
+@app.route('/api/wallet/pending-topups', methods=['GET', 'OPTIONS'])
 @token_required
 def get_pending_topups():
     """Get pending topups for the current user"""
+    # Handle OPTIONS preflight request
+    if request.method == 'OPTIONS':
+        response = jsonify({'success': True})
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+        response.headers.add('Access-Control-Allow-Methods', 'GET, OPTIONS')
+        return response
+    
     try:
+        # Query pending transactions from the database
         pending = PendingTransaction.query.filter_by(
             user_id=g.current_user.id, 
             status='pending'
@@ -2885,30 +2894,6 @@ def verify_reset_token():
 
 # ========== TEMPORARY STORAGE (Replace with Redis in production) ==========
 temp_storage = {}
-
-@app.route('/api/wallet/pending-topups', methods=['GET', 'OPTIONS'])
-@token_required
-def get_pending_topups():
-    """Get pending topups for the current user"""
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-    
-    user_id = g.user_id
-    
-    # Query pending manual payments for this user
-    cursor = db.execute('''
-        SELECT id, amount, reference, proof_url, status, created_at
-        FROM manual_payments
-        WHERE user_id = ? AND status = 'pending'
-        ORDER BY created_at DESC
-    ''', (user_id,))
-    
-    pending_topups = cursor.fetchall()
-    
-    return jsonify({
-        'success': True,
-        'data': [dict(row) for row in pending_topups]
-    })
 
 @app.route('/api/auth/verify-code', methods=['POST'])
 @limiter.limit("10 per minute")
