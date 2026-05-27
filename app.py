@@ -1143,56 +1143,91 @@ def init_db():
         from sqlalchemy import text
         try:
             with db.engine.connect() as conn:
-                # Get existing columns
+                # Get existing columns for both tables
                 inspector = db.inspect(db.engine)
-                existing_columns = [col['name'] for col in inspector.get_columns('orders')]
+                orders_columns = [col['name'] for col in inspector.get_columns('orders')]
+                users_columns = [col['name'] for col in inspector.get_columns('users')]
                 
+                # ===== ORDERS TABLE MIGRATION =====
                 print("\n📋 Checking Orders table columns...")
                 
-                # Add cost column
-                if 'cost' not in existing_columns:
+                if 'cost' not in orders_columns:
                     conn.execute(text('ALTER TABLE orders ADD COLUMN cost FLOAT DEFAULT 0.0'))
                     print("✅ Added 'cost' column to orders table")
                 else:
                     print("⏭️ Column 'cost' already exists")
                 
-                # Add profit column
-                if 'profit' not in existing_columns:
+                if 'profit' not in orders_columns:
                     conn.execute(text('ALTER TABLE orders ADD COLUMN profit FLOAT DEFAULT 0.0'))
                     print("✅ Added 'profit' column to orders table")
                 else:
                     print("⏭️ Column 'profit' already exists")
                 
-                # Add provider column
-                if 'provider' not in existing_columns:
+                if 'provider' not in orders_columns:
                     conn.execute(text("ALTER TABLE orders ADD COLUMN provider VARCHAR(50)"))
                     print("✅ Added 'provider' column to orders table")
                 else:
                     print("⏭️ Column 'provider' already exists")
                 
-                # Add provider_order_id column
-                if 'provider_order_id' not in existing_columns:
+                if 'provider_order_id' not in orders_columns:
                     conn.execute(text("ALTER TABLE orders ADD COLUMN provider_order_id VARCHAR(100)"))
                     print("✅ Added 'provider_order_id' column to orders table")
                 else:
                     print("⏭️ Column 'provider_order_id' already exists")
                 
-                # Add provider_reference column
-                if 'provider_reference' not in existing_columns:
+                if 'provider_reference' not in orders_columns:
                     conn.execute(text("ALTER TABLE orders ADD COLUMN provider_reference VARCHAR(100)"))
                     print("✅ Added 'provider_reference' column to orders table")
                 else:
                     print("⏭️ Column 'provider_reference' already exists")
                 
-                # Add provider_cost column
-                if 'provider_cost' not in existing_columns:
+                if 'provider_cost' not in orders_columns:
                     conn.execute(text('ALTER TABLE orders ADD COLUMN provider_cost FLOAT DEFAULT 0.0'))
                     print("✅ Added 'provider_cost' column to orders table")
                 else:
                     print("⏭️ Column 'provider_cost' already exists")
                 
+                # ===== USERS TABLE MIGRATION =====
+                print("\n📋 Checking Users table columns...")
+                
+                if 'total_sales' not in users_columns:
+                    conn.execute(text('ALTER TABLE users ADD COLUMN total_sales FLOAT DEFAULT 0.0'))
+                    print("✅ Added 'total_sales' column to users table")
+                else:
+                    print("⏭️ Column 'total_sales' already exists")
+                
+                if 'total_commission' not in users_columns:
+                    conn.execute(text('ALTER TABLE users ADD COLUMN total_commission FLOAT DEFAULT 0.0'))
+                    print("✅ Added 'total_commission' column to users table")
+                else:
+                    print("⏭️ Column 'total_commission' already exists")
+                
+                if 'today_sales' not in users_columns:
+                    conn.execute(text('ALTER TABLE users ADD COLUMN today_sales FLOAT DEFAULT 0.0'))
+                    print("✅ Added 'today_sales' column to users table")
+                else:
+                    print("⏭️ Column 'today_sales' already exists")
+                
+                if 'this_week_sales' not in users_columns:
+                    conn.execute(text('ALTER TABLE users ADD COLUMN this_week_sales FLOAT DEFAULT 0.0'))
+                    print("✅ Added 'this_week_sales' column to users table")
+                else:
+                    print("⏭️ Column 'this_week_sales' already exists")
+                
+                if 'this_month_sales' not in users_columns:
+                    conn.execute(text('ALTER TABLE users ADD COLUMN this_month_sales FLOAT DEFAULT 0.0'))
+                    print("✅ Added 'this_month_sales' column to users table")
+                else:
+                    print("⏭️ Column 'this_month_sales' already exists")
+                
+                if 'total_customers' not in users_columns:
+                    conn.execute(text('ALTER TABLE users ADD COLUMN total_customers INTEGER DEFAULT 0'))
+                    print("✅ Added 'total_customers' column to users table")
+                else:
+                    print("⏭️ Column 'total_customers' already exists")
+                
                 conn.commit()
-                print("✅ Orders table migration completed")
+                print("✅ Database migration completed")
         except Exception as e:
             print(f"⚠️ Migration note: {e}")
         # ========== END OF MIGRATION ==========
