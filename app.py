@@ -5781,6 +5781,29 @@ def agent_sell():
         db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
     
+@app.route('/api/admin/migrate', methods=['POST'])
+@token_required
+@admin_required
+def run_migration():
+    """Run database migration (admin only)"""
+    try:
+        from sqlalchemy import text
+        
+        with db.engine.connect() as conn:
+            # Add columns if they don't exist
+            conn.execute(text('ALTER TABLE orders ADD COLUMN IF NOT EXISTS cost FLOAT DEFAULT 0.0'))
+            conn.execute(text('ALTER TABLE orders ADD COLUMN IF NOT EXISTS profit FLOAT DEFAULT 0.0'))
+            conn.execute(text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS provider VARCHAR(50)"))
+            conn.execute(text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS provider_order_id VARCHAR(100)"))
+            conn.execute(text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS provider_reference VARCHAR(100)"))
+            conn.execute(text('ALTER TABLE orders ADD COLUMN IF NOT EXISTS provider_cost FLOAT DEFAULT 0.0'))
+            conn.commit()
+        
+        return jsonify({'success': True, 'message': 'Migration completed successfully'})
+        
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 @app.route('/api/agent/earnings', methods=['GET'])
 @token_required
 @agent_required
