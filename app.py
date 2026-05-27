@@ -2668,9 +2668,11 @@ def forgot_password():
         user.reset_token_expiry = datetime.utcnow() + timedelta(hours=24)
         db.session.commit()
         
-        # Create reset link
-        frontend_url = os.environ.get('FRONTEND_URL', 'http://localhost:3000')
+        # Use production frontend URL only
+        frontend_url = 'https://www.roamsmart.shop'
         reset_link = f"{frontend_url}/reset-password?token={reset_token}"
+        
+        print(f"[PASSWORD] Reset link generated: {reset_link}")
         
         # Create HTML email body
         email_body = f"""
@@ -2753,6 +2755,9 @@ def reset_password():
         user.reset_token_expiry = None
         db.session.commit()
         
+        # Use production frontend URL only
+        frontend_url = 'https://www.roamsmart.shop'
+        
         # Send confirmation email
         confirmation_body = f"""
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
@@ -2765,7 +2770,7 @@ def reset_password():
                 <p>Your Roamsmart account password has been successfully changed.</p>
                 <p>If you did not make this change, please contact our support team immediately.</p>
                 <div style="text-align: center; margin: 30px 0;">
-                    <a href="{os.environ.get('FRONTEND_URL', 'http://localhost:3000')}/login" style="background: #28a745; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block;">
+                    <a href="{frontend_url}/login" style="background: #28a745; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block;">
                         Login to Your Account
                     </a>
                 </div>
