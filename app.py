@@ -4427,15 +4427,24 @@ def admin_get_digimall_balance():
         DIGIMALL_API_KEY = os.environ.get('DIGIMALL_API_KEY')
         DIGIMALL_BASE_URL = os.environ.get('DIGIMALL_BASE_URL', 'https://www.digi-mall.app/api/v1')
         
+        # Debug logging - will show in Railway logs
+        print(f"[Digimall] API_KEY exists: {bool(DIGIMALL_API_KEY)}")
+        print(f"[Digimall] API_KEY first 10 chars: {DIGIMALL_API_KEY[:10] if DIGIMALL_API_KEY else 'None'}")
+        print(f"[Digimall] BASE_URL: {DIGIMALL_BASE_URL}")
+        
         if not DIGIMALL_API_KEY:
             return jsonify({'success': False, 'error': 'Digimall API key not configured'}), 500
         
         # Call Digimall balance endpoint
-        response = requests.get(
-            f"{DIGIMALL_BASE_URL}/balance",
-            headers={'x-api-key': DIGIMALL_API_KEY},
-            timeout=10
-        )
+        headers = {'x-api-key': DIGIMALL_API_KEY}
+        url = f"{DIGIMALL_BASE_URL}/balance"
+        
+        print(f"[Digimall] Requesting: {url}")
+        
+        response = requests.get(url, headers=headers, timeout=10)
+        
+        print(f"[Digimall] Response status: {response.status_code}")
+        print(f"[Digimall] Response body: {response.text[:200]}")
         
         if response.status_code == 200:
             data = response.json()
@@ -4456,6 +4465,8 @@ def admin_get_digimall_balance():
             
     except Exception as e:
         print(f"Error fetching Digimall balance: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
     
 @app.route('/api/webhooks/digimall/low-balance', methods=['POST'])
