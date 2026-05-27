@@ -54,6 +54,12 @@ class User(db.Model):
     # KYC
     kyc_verified = db.Column(db.Boolean, default=False)
     total_sales = db.Column(db.Float, default=0.0)
+    total_commission = db.Column(db.Float, default=0.0)
+    today_sales = db.Column(db.Float, default=0.0)
+    this_week_sales = db.Column(db.Float, default=0.0)
+    this_month_sales = db.Column(db.Float, default=0.0)
+    total_customers = db.Column(db.Integer, default=0)
+    total_sales = db.Column(db.Float, default=0.0)
     # Timestamps
     last_login = db.Column(db.DateTime, default=datetime.utcnow)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
