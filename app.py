@@ -3300,16 +3300,15 @@ class DigimallService:
     def __init__(self):
         self.api_key = os.environ.get('DIGIMALL_API_KEY')
         self.base_url = os.environ.get('DIGIMALL_BASE_URL', 'https://www.digi-mall.app/api/v1')
-        self.webhook_url = os.environ.get('DIGIMALL_WEBHOOK_URL', f"{os.environ.get('BASE_URL', 'https://roamsmart-backend-production.up.railway.app')}/api/webhooks/digimall")
+        self.webhook_url = os.environ.get('DIGIMALL_WEBHOOK_URL', 'https://roamsmart-backend-production.up.railway.app/api/webhooks/digimall')
         
     def get_offer_slug(self, network, volume):
-        """Get the correct offer slug for network and volume - for delivery only"""
+        """Get the correct offer slug for network and volume"""
         offers = self.get_offers()
         
         if not offers.get('success'):
             return None
         
-        # Map network to ISP name
         isp_map = {
             'mtn': 'MTN',
             'airteltigo': 'AirtelTigo',
@@ -3318,17 +3317,22 @@ class DigimallService:
         
         isp_name = isp_map.get(network.lower(), network.capitalize())
         
-        # Find matching offer
         for offer in offers.get('offers', []):
             if offer.get('isp') == isp_name and offer.get('type') == 'Data':
                 if volume in offer.get('volumes', []):
                     return offer.get('offerSlug')
         
-        # If no exact match, return the first data offer for that network
         for offer in offers.get('offers', []):
             if offer.get('isp') == isp_name and offer.get('type') == 'Data':
                 return offer.get('offerSlug')
         
+        # Fallback slugs
+        if network.lower() == 'mtn':
+            return 'mtn_master_bundle'
+        elif network.lower() == 'airteltigo':
+            return 'airteltigo_ishare'
+        elif network.lower() == 'telecel':
+            return 'telecel'
         return None
     
     def get_offers(self):
@@ -3336,7 +3340,8 @@ class DigimallService:
         try:
             response = requests.get(
                 f"{self.base_url}/offers",
-                headers={'x-api-key': self.api_key}
+                headers={'x-api-key': self.api_key},
+                timeout=10
             )
             if response.status_code == 200:
                 return response.json()
@@ -3348,22 +3353,14 @@ class DigimallService:
     def deliver_data(self, network, phone_number, volume):
         """
         Deliver data bundle to customer (delivery only, no pricing)
-        
-        Args:
-            network: 'mtn', 'airteltigo', or 'telecel'
-            phone_number: Customer's phone number
-            volume: Data volume in GB
         """
         try:
-            # Format phone number
             phone = self._format_phone(phone_number)
             
-            # Get the correct offer slug
             offer_slug = self.get_offer_slug(network, volume)
             if not offer_slug:
                 return {'success': False, 'error': f'No offer found for {network} {volume}GB'}
             
-            # Map network to endpoint
             endpoint_map = {
                 'mtn': 'mtn',
                 'airteltigo': 'at',
@@ -3371,7 +3368,6 @@ class DigimallService:
             }
             endpoint = endpoint_map.get(network.lower(), network.lower())
             
-            # Prepare delivery payload
             payload = {
                 "type": "single",
                 "volume": volume,
@@ -3393,7 +3389,6 @@ class DigimallService:
                 timeout=30
             )
             
-            # 201 means Created successfully
             if response.status_code in [200, 201]:
                 result = response.json()
                 print(f"[Digimall] Delivery initiated: {result.get('orderId')} - Status: {result.get('status')}")
@@ -3411,7 +3406,8 @@ class DigimallService:
         try:
             response = requests.get(
                 f"{self.base_url}/order/status/{order_id}",
-                headers={'x-api-key': self.api_key}
+                headers={'x-api-key': self.api_key},
+                timeout=10
             )
             
             if response.status_code == 200:
@@ -3423,12 +3419,9 @@ class DigimallService:
     def _format_phone(self, phone):
         """Format phone number to Digimall format"""
         phone = str(phone).strip()
-        # Remove any leading +
         phone = phone.lstrip('+')
-        # Remove leading 0 if present
         if phone.startswith('0'):
             phone = '233' + phone[1:]
-        # If doesn't start with 233, add it
         if not phone.startswith('233'):
             phone = '233' + phone
         return phone
@@ -5636,7 +5629,7 @@ def get_agent_dashboard():
 @token_required
 @agent_required
 def agent_sell():
-    """Sell data to customer (agent only)"""
+    """Sell data to customer (agent only) - Digimall handles delivery"""
     try:
         data = request.get_json()
         
@@ -5645,112 +5638,149 @@ def agent_sell():
         phone = data.get('phone')
         customer_name = data.get('customer_name')
         quantity = data.get('quantity', 1)
-        price_override = data.get('price')
+        selling_price = data.get('selling_price')  # Customer paid amount
+        
+        print(f"\n{'='*60}")
+        print(f"AGENT SELL DEBUG")
+        print(f"{'='*60}")
+        print(f"Agent: {g.current_user.username} (ID: {g.current_user.id})")
+        print(f"Network: {network}")
+        print(f"Size: {size_gb}GB")
+        print(f"Phone: {phone}")
+        print(f"Customer: {customer_name}")
+        print(f"Selling Price: ₵{selling_price}")
         
         if not all([network, size_gb, phone]):
             return jsonify({'success': False, 'error': 'Missing required fields'}), 400
         
-        # Get bundle
-        bundle = DataBundle.query.filter_by(network=network, size_gb=size_gb, is_active=True).first()
-        if not bundle:
-            return jsonify({'success': False, 'error': 'Bundle not available'}), 400
+        # Get agent's wholesale price from database
+        agent_cost = get_agent_price(network, size_gb)
         
-        # Calculate price
-        unit_price = price_override if price_override else bundle.agent_price
-        total_price = unit_price * quantity
+        if agent_cost == 0:
+            return jsonify({'success': False, 'error': f'Price not configured for {network} {size_gb}GB'}), 400
         
-        # Check balance
-        if g.current_user.wallet_balance < total_price:
-            return jsonify({'success': False, 'error': f'Insufficient wallet balance. Need GHS {total_price:.2f}'}), 400
+        total_cost = agent_cost * quantity
         
-        # Deduct from agent wallet
+        # If selling price not provided, use agent cost + 30% markup
+        if not selling_price:
+            selling_price = total_cost * 1.3
+        
+        total_revenue = selling_price * quantity
+        profit = total_revenue - total_cost
+        
+        # Check agent's wallet balance
+        if g.current_user.wallet_balance < total_cost:
+            return jsonify({
+                'success': False, 
+                'error': f'Insufficient wallet balance. Need GHS {total_cost:.2f}. Your balance: GHS {g.current_user.wallet_balance:.2f}'
+            }), 400
+        
+        # Generate order ID
+        order_id = f"ORD-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{g.current_user.id}"
+        
+        # Deduct from agent's wallet
         balance_before = g.current_user.wallet_balance
-        g.current_user.wallet_balance -= total_price
+        g.current_user.wallet_balance -= total_cost
         
-        # Create order
+        # Create order with all fields
         order = Order(
             user_id=g.current_user.id,
+            agent_id=g.current_user.id,
+            order_id=order_id,
             type='data',
             network=network,
             size_gb=size_gb,
             phone_number=phone,
-            amount=total_price,
+            customer_name=customer_name,
+            amount=total_revenue,  # Customer paid amount
+            cost=total_cost,  # Agent's wholesale cost
+            profit=profit,  # Profit made
             quantity=quantity,
             status='completed',
             payment_method='wallet',
-            customer_name=customer_name,
-            completed_at=datetime.utcnow()
+            completed_at=datetime.utcnow(),
+            created_at=datetime.utcnow()
         )
         db.session.add(order)
         
-        # Create transaction
+        # Create transaction record
         transaction = Transaction(
             user_id=g.current_user.id,
             type='sale',
-            amount=total_price,
+            amount=total_revenue,
             balance_before=balance_before,
             balance_after=g.current_user.wallet_balance,
-            description=f'Sold {quantity}x {size_gb}GB {network} to {phone}',
-            reference=order.order_id,
+            description=f'Sale: {quantity}x {size_gb}GB {network} to {phone} (Profit: GHS {profit:.2f})',
+            reference=order_id,
             status='completed'
         )
         db.session.add(transaction)
         
-        # Add to store clients
-        if customer_name:
-            client = StoreClient.query.filter_by(phone=phone, agent_id=g.current_user.id).first()
-            if client:
-                client.total_spent = (client.total_spent or 0) + total_price
-                client.order_count = (client.order_count or 0) + 1
-                client.last_purchase = datetime.utcnow()
-            else:
-                client = StoreClient(
-                    agent_id=g.current_user.id,
-                    name=customer_name,
-                    phone=phone,
-                    total_spent=total_price,
-                    order_count=1,
-                    last_purchase=datetime.utcnow()
-                )
-                db.session.add(client)
+        # Update agent's stats
+        g.current_user.total_sales = (g.current_user.total_sales or 0) + total_revenue
+        
+        # Add to store clients (customer tracking)
+        if customer_name or phone:
+            try:
+                from models import StoreClient
+                client = StoreClient.query.filter_by(phone=phone, agent_id=g.current_user.id).first()
+                if client:
+                    client.total_spent = (client.total_spent or 0) + total_revenue
+                    client.order_count = (client.order_count or 0) + 1
+                    client.last_purchase = datetime.utcnow()
+                else:
+                    client = StoreClient(
+                        agent_id=g.current_user.id,
+                        name=customer_name or 'Customer',
+                        phone=phone,
+                        total_spent=total_revenue,
+                        order_count=1,
+                        last_purchase=datetime.utcnow()
+                    )
+                    db.session.add(client)
+            except Exception as e:
+                print(f"StoreClient error: {e}")
         
         db.session.commit()
         
-        # Send data delivery to network provider ONLY (NO customer SMS)
-        send_data_delivery_to_provider(phone, f"✅ {COMPANY_NAME}: {quantity}x {size_gb}GB {network} data sent! Thank you for your purchase.")
-        
-        # Send email receipt to agent
-        send_email(
-            g.current_user.email,
-            f"Sale Receipt - {order.order_id}",
-            f"""
-            <h3>Sale Completed - {COMPANY_NAME}</h3>
-            <p>You sold {quantity}x {size_gb}GB {network} data to {customer_name or phone}</p>
-            <p>Amount: GHS {total_price:.2f}</p>
-            <p>Order ID: {order.order_id}</p>
-            """
-        )
-        
-        # Calculate commission
-        commission = (unit_price - bundle.wholesale_price) * quantity
+        # Send data delivery via Digimall
+        digimall_result = None
+        try:
+            digimall = DigimallService()
+            digimall = DigimallService()
+            digimall_result = digimall.deliver_data(network, phone, size_gb)
+            
+            if digimall_result and digimall_result.get('success'):
+                print(f"[Digimall] Delivery initiated: {digimall_result.get('orderId')}")
+                # Update order with provider info
+                order.provider = 'digimall'
+                order.provider_order_id = digimall_result.get('orderId')
+                order.provider_reference = digimall_result.get('reference')
+                order.provider_cost = digimall_result.get('totalAmount', 0)
+                db.session.commit()
+        except Exception as e:
+            print(f"Digimall delivery error: {e}")
         
         return jsonify({
             'success': True,
-            'message': f'Sold {quantity}x {size_gb}GB {network} to {phone}',
+            'message': f'Sold {quantity}x {size_gb}GB {network.upper()} to {phone}',
             'data': {
-                'order_id': order.order_id,
-                'amount': total_price,
-                'commission': float(commission),
-                'balance': float(g.current_user.wallet_balance)
+                'order_id': order_id,
+                'amount': total_revenue,
+                'cost': total_cost,
+                'profit': profit,
+                'balance': float(g.current_user.wallet_balance),
+                'digimall_delivery': digimall_result.get('success') if digimall_result else False
             }
         })
         
     except Exception as e:
         print(f"Agent sell error: {e}")
+        import traceback
+        traceback.print_exc()
         db.session.rollback()
-        return jsonify({'success': False, 'error': 'Failed to process sale'}), 500
-
-
+        return jsonify({'success': False, 'error': str(e)}), 500
+    
 @app.route('/api/agent/earnings', methods=['GET'])
 @token_required
 @agent_required

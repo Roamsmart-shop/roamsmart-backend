@@ -53,7 +53,7 @@ class User(db.Model):
     
     # KYC
     kyc_verified = db.Column(db.Boolean, default=False)
-    
+    total_sales = db.Column(db.Float, default=0.0)
     # Timestamps
     last_login = db.Column(db.DateTime, default=datetime.utcnow)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
@@ -228,10 +228,20 @@ class Order(db.Model):
     phone_number = db.Column(db.String(20), nullable=True)
     customer_name = db.Column(db.String(100), nullable=True)
     
-    # Payment
-    amount = db.Column(db.Float, nullable=False)
+    # Payment and Costs
+    amount = db.Column(db.Float, nullable=False)  # Customer paid amount
+    cost = db.Column(db.Float, default=0.0)  # Agent's wholesale cost
+    profit = db.Column(db.Float, default=0.0)  # Profit made (amount - cost)
     payment_method = db.Column(db.String(20), default='wallet')
     payment_reference = db.Column(db.String(100), nullable=True)
+    
+    # Delivery Provider
+    provider = db.Column(db.String(50), nullable=True)  # 'digimall', 'africastalking', etc.
+    provider_order_id = db.Column(db.String(100), nullable=True)  # Order ID from provider
+    provider_reference = db.Column(db.String(100), nullable=True)  # Reference from provider
+    provider_cost = db.Column(db.Float, default=0.0)  # Cost charged by provider
+    
+    # Status
     status = db.Column(db.String(20), default='pending')
     
     # Timestamps
@@ -255,7 +265,11 @@ class Order(db.Model):
             'phone': self.phone_number,
             'customer_name': self.customer_name,
             'amount': self.amount,
+            'cost': self.cost,
+            'profit': self.profit,
             'payment_method': self.payment_method,
+            'provider': self.provider,
+            'provider_order_id': self.provider_order_id,
             'status': self.status,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'date': self.created_at.strftime('%Y-%m-%d %H:%M:%S') if self.created_at else None
