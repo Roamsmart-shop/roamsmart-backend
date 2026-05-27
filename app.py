@@ -3219,238 +3219,7 @@ def check_email_verification():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
-@app.route('/api/order', methods=['POST'])
-@token_required
-def create_order():
-    """Create new order - Uses Africa's Talking Mobile Data API"""
-    import uuid
-    import requests
-    import os
-    from datetime import datetime
-    
-    try:
-        data = request.get_json()
-        
-        print(f"\n{'='*60}")
-        print(f"ORDER REQUEST DEBUG")
-        print(f"{'='*60}")
-        print(f"User: {g.current_user.username} (ID: {g.current_user.id})")
-        print(f"Wallet Balance: ₵{g.current_user.wallet_balance}")
-        print(f"Is Agent: {g.current_user.is_agent}")
-        print(f"Request Data: {data}")
-        
-        network = data.get('network')
-        size_gb = data.get('size_gb')
-        phone = data.get('phone')
-        payment_method = data.get('payment_method', 'wallet')
-        quantity = data.get('quantity', 1)
-        
-        # Check required fields
-        missing = []
-        if not network:
-            missing.append('network')
-        if not size_gb:
-            missing.append('size_gb')
-        if not phone:
-            missing.append('phone')
-            
-        if missing:
-            return jsonify({'success': False, 'error': f'Missing required fields: {", ".join(missing)}'}), 400
-        
-        # Get prices from database
-        is_agent = g.current_user.is_agent and getattr(g.current_user, 'agent_approved', False)
-        
-        if is_agent:
-            unit_price = get_agent_price(network, size_gb)
-        else:
-            unit_price = get_user_price(network, size_gb)
-        
-        if unit_price == 0:
-            return jsonify({
-                'success': False, 
-                'error': f'Price not configured for {network} {size_gb}GB. Please contact admin.'
-            }), 400
-        
-        total_price = unit_price * quantity
-        
-        # Check wallet balance
-        if payment_method == 'wallet':
-            if g.current_user.wallet_balance < total_price:
-                return jsonify({
-                    'success': False, 
-                    'error': f'Insufficient wallet balance. Need GHS {total_price:.2f}. Your balance: GHS {g.current_user.wallet_balance:.2f}'
-                }), 400
-        
-        # Generate order ID
-        order_id = f"ORD-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{g.current_user.id}"
-        
-        # Create order
-        order = Order(
-            user_id=g.current_user.id,
-            order_id=order_id,
-            type='data',
-            network=network,
-            size_gb=size_gb,
-            phone_number=phone,
-            amount=total_price,
-            quantity=quantity,
-            status='pending' if payment_method == 'manual' else 'processing',
-            payment_method=payment_method,
-            created_at=datetime.utcnow()
-        )
-        db.session.add(order)
-        db.session.flush()
-        
-        if payment_method == 'wallet':
-            # Africa's Talking Mobile Data API endpoint
-            AT_DATA_URL = "https://bundles.africastalking.com/mobile/data/request"
-            
-            api_key = os.environ.get('AFRICASTALKING_API_KEY')
-            username = os.environ.get('AFRICASTALKING_USERNAME', 'Roamsmart')
-            
-            if not api_key:
-                return jsonify({'success': False, 'error': 'Africa\'s Talking API key not configured'}), 500
-            
-            # Format phone number
-            formatted_phone = phone
-            if formatted_phone.startswith('0'):
-                formatted_phone = '233' + formatted_phone[1:]
-            if not formatted_phone.startswith('+'):
-                formatted_phone = '+' + formatted_phone
-            
-            # Bundle mapping for MTN (simplified)
-            # Find the correct bundle for 1GB on MTN
-            # The closest available bundle on MTN is 826.72 MB (0.81 GB) for GHS 9.90
-            # or for larger amounts, you'd use multiple bundles
-            
-            # For 1GB request on MTN, use the 826.72 MB bundle
-            actual_mb = 826.72
-            actual_gb = 0.81
-            bundle_price = 9.90
-            
-            # Deduct from wallet
-            balance_before = g.current_user.wallet_balance
-            g.current_user.wallet_balance -= total_price
-            
-            # Create transaction record
-            transaction = Transaction(
-                user_id=g.current_user.id,
-                type='purchase',
-                amount=total_price,
-                balance_before=balance_before,
-                balance_after=g.current_user.wallet_balance,
-                description=f'Purchase: {quantity}x {network} {size_gb}GB to {phone}',
-                reference=order_id,
-                status='completed'
-            )
-            db.session.add(transaction)
-            
-            # Prepare Mobile Data API payload
-            payload = {
-                "username": username,
-                "productName": "Mobile Data",
-                "recipients": [
-                    {
-                        "phoneNumber": formatted_phone,
-                        "quantity": actual_mb,
-                        "unit": "MB",
-                        "validity": "NonExpiry",
-                        "metadata": {
-                            "source": "Roamsmart",
-                            "order_id": order_id,
-                            "customer": g.current_user.username
-                        }
-                    }
-                ]
-            }
-            
-            headers = {
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-                "apiKey": api_key,
-                "Idempotency-Key": str(uuid.uuid4())  # Now uuid is defined
-            }
-            
-            print(f"[DATA] Sending to Africa's Talking Mobile Data API...")
-            print(f"[DATA] URL: {AT_DATA_URL}")
-            print(f"[DATA] Phone: {formatted_phone}")
-            print(f"[DATA] Bundle: {actual_mb}MB ({actual_gb}GB)")
-            print(f"[DATA] Payload: {payload}")
-            
-            response = requests.post(AT_DATA_URL, json=payload, headers=headers, timeout=30)
-            
-            print(f"[DATA] Response Status: {response.status_code}")
-            print(f"[DATA] Response: {response.text}")
-            
-            if response.status_code in [200, 201, 202]:
-                result = response.json()
-                if 'entries' in result and result['entries']:
-                    entry = result['entries'][0]
-                    if entry.get('status') == 'Success':
-                        order.status = 'completed'
-                        order.completed_at = datetime.utcnow()
-                        order.actual_bundle_mb = actual_mb
-                        order.actual_bundle_gb = actual_gb
-                        db.session.commit()
-                        
-                        return jsonify({
-                            'success': True,
-                            'data': {
-                                'order_id': order_id,
-                                'balance': float(g.current_user.wallet_balance),
-                                'amount': float(total_price),
-                                'actual_data_gb': actual_gb
-                            },
-                            'message': f'✅ {actual_gb}GB {network.upper()} data sent to {phone}'
-                        })
-                    else:
-                        raise Exception(entry.get('errorMessage', 'Delivery failed'))
-                else:
-                    raise Exception('Invalid response from Africa\'s Talking')
-            else:
-                raise Exception(f'Africa\'s Talking error: {response.text}')
-            
-        elif payment_method == 'manual':
-            reference = f"MAN-{uuid.uuid4().hex[:8].upper()}"
-            order.payment_reference = reference
-            
-            manual_payment = ManualPayment(
-                user_id=g.current_user.id,
-                order_id=order.id,
-                amount=total_price,
-                reference=reference,
-                status='pending_verification'
-            )
-            db.session.add(manual_payment)
-            db.session.commit()
-            
-            return jsonify({
-                'success': True,
-                'data': {
-                    'order_id': order_id,
-                    'reference': reference,
-                    'amount': total_price
-                },
-                'payment_instructions': {
-                    'mobile_money_number': COMPANY_PHONE,
-                    'recipient': COMPANY_NAME,
-                    'reference': reference,
-                    'amount': total_price
-                },
-                'message': f'Order created! Send GHS {total_price:.2f} to {COMPANY_PHONE} with reference: {reference}'
-            })
-        
-    except Exception as e:
-        print(f"Create order error: {e}")
-        import traceback
-        traceback.print_exc()
-        db.session.rollback()
-        
-        # Refund if deducted
-        if 'balance_before' in locals():
-            g.current_user.wallet_balance = balance_before
-        
-        return jsonify({'success': False, 'error': str(e)}), 500
+
     
 def send_order_confirmation_email(user, order_id, network, size_gb, phone, amount, quantity=1):
     """Send order confirmation email to user (NO SMS)"""
@@ -3527,7 +3296,165 @@ def send_order_confirmation_email(user, order_id, network, size_gb, phone, amoun
         print(f"Send order confirmation email error: {e}")
 
 
+class DigimallService:
+    def __init__(self):
+        self.api_key = os.environ.get('DIGIMALL_API_KEY')
+        self.base_url = os.environ.get('DIGIMALL_BASE_URL', 'https://www.digi-mall.app/api/v1')
+        self.webhook_url = os.environ.get('DIGIMALL_WEBHOOK_URL', f"{os.environ.get('BASE_URL', 'https://roamsmart-backend-production.up.railway.app')}/api/webhooks/digimall")
+        
+    def get_offer_slug(self, network, volume):
+        """Get the correct offer slug for network and volume - for delivery only"""
+        offers = self.get_offers()
+        
+        if not offers.get('success'):
+            return None
+        
+        # Map network to ISP name
+        isp_map = {
+            'mtn': 'MTN',
+            'airteltigo': 'AirtelTigo',
+            'telecel': 'Telecel'
+        }
+        
+        isp_name = isp_map.get(network.lower(), network.capitalize())
+        
+        # Find matching offer
+        for offer in offers.get('offers', []):
+            if offer.get('isp') == isp_name and offer.get('type') == 'Data':
+                if volume in offer.get('volumes', []):
+                    return offer.get('offerSlug')
+        
+        # If no exact match, return the first data offer for that network
+        for offer in offers.get('offers', []):
+            if offer.get('isp') == isp_name and offer.get('type') == 'Data':
+                return offer.get('offerSlug')
+        
+        return None
+    
+    def get_offers(self):
+        """Get all available offers"""
+        try:
+            response = requests.get(
+                f"{self.base_url}/offers",
+                headers={'x-api-key': self.api_key}
+            )
+            if response.status_code == 200:
+                return response.json()
+            return {'success': False, 'error': f'HTTP {response.status_code}'}
+        except Exception as e:
+            print(f"[Digimall] Error fetching offers: {e}")
+            return {'success': False, 'error': str(e)}
+    
+    def deliver_data(self, network, phone_number, volume):
+        """
+        Deliver data bundle to customer (delivery only, no pricing)
+        
+        Args:
+            network: 'mtn', 'airteltigo', or 'telecel'
+            phone_number: Customer's phone number
+            volume: Data volume in GB
+        """
+        try:
+            # Format phone number
+            phone = self._format_phone(phone_number)
+            
+            # Get the correct offer slug
+            offer_slug = self.get_offer_slug(network, volume)
+            if not offer_slug:
+                return {'success': False, 'error': f'No offer found for {network} {volume}GB'}
+            
+            # Map network to endpoint
+            endpoint_map = {
+                'mtn': 'mtn',
+                'airteltigo': 'at',
+                'telecel': 'telecel'
+            }
+            endpoint = endpoint_map.get(network.lower(), network.lower())
+            
+            # Prepare delivery payload
+            payload = {
+                "type": "single",
+                "volume": volume,
+                "phone": phone,
+                "offerSlug": offer_slug,
+                "webhookUrl": self.webhook_url
+            }
+            
+            print(f"[Digimall] Delivering {volume}GB {network} data to {phone}")
+            print(f"[Digimall] Offer Slug: {offer_slug}")
+            
+            response = requests.post(
+                f"{self.base_url}/order/{endpoint}",
+                json=payload,
+                headers={
+                    'x-api-key': self.api_key,
+                    'Content-Type': 'application/json'
+                },
+                timeout=30
+            )
+            
+            # 201 means Created successfully
+            if response.status_code in [200, 201]:
+                result = response.json()
+                print(f"[Digimall] Delivery initiated: {result.get('orderId')} - Status: {result.get('status')}")
+                return result
+            else:
+                print(f"[Digimall] Delivery error: {response.status_code} - {response.text}")
+                return {'success': False, 'error': f'Delivery failed: {response.text}'}
+                
+        except Exception as e:
+            print(f"[Digimall] Error: {e}")
+            return {'success': False, 'error': str(e)}
+    
+    def check_delivery_status(self, order_id):
+        """Check delivery status of an order"""
+        try:
+            response = requests.get(
+                f"{self.base_url}/order/status/{order_id}",
+                headers={'x-api-key': self.api_key}
+            )
+            
+            if response.status_code == 200:
+                return response.json()
+            return {'success': False, 'error': f'HTTP {response.status_code}'}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    def _format_phone(self, phone):
+        """Format phone number to Digimall format"""
+        phone = str(phone).strip()
+        # Remove any leading +
+        phone = phone.lstrip('+')
+        # Remove leading 0 if present
+        if phone.startswith('0'):
+            phone = '233' + phone[1:]
+        # If doesn't start with 233, add it
+        if not phone.startswith('233'):
+            phone = '233' + phone
+        return phone
 
+@app.route('/api/webhooks/digimall/low-balance', methods=['POST'])
+def digimall_low_balance_webhook():
+    """Handle Digimall low balance notifications"""
+    try:
+        data = request.get_json()
+        print(f"[Digimall Low Balance Alert] {data}")
+        
+        # Send notification to admin
+        balance = data.get('balance', 0)
+        threshold = data.get('threshold', 50)
+        
+        # Send email to admin
+        send_admin_alert(
+            subject=f"⚠️ Digimall Wallet Balance Low: GHS {balance}",
+            message=f"Your Digimall wallet balance has dropped below GHS {threshold}. Current balance: GHS {balance}. Please top up to continue processing orders."
+        )
+        
+        return jsonify({'success': True}), 200
+        
+    except Exception as e:
+        print(f"[Digimall Low Balance Error] {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/referral/balance', methods=['GET'])
 @token_required
@@ -3951,20 +3878,209 @@ def get_agent_waec_vouchers():
         print(f"Get agent WAEC vouchers error: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
+@app.route('/api/order', methods=['POST'])
+@token_required
+def create_order():
+    """Create new order - Admin sets price, Digimall handles delivery"""
+    
+    try:
+        data = request.get_json()
+        
+        print(f"\n{'='*60}")
+        print(f"ORDER REQUEST DEBUG")
+        print(f"{'='*60}")
+        print(f"User: {g.current_user.username} (ID: {g.current_user.id})")
+        print(f"Wallet Balance: ₵{g.current_user.wallet_balance}")
+        print(f"Is Agent: {g.current_user.is_agent}")
+        print(f"Request Data: {data}")
+        
+        network = data.get('network')
+        size_gb = data.get('size_gb')
+        phone = data.get('phone')
+        payment_method = data.get('payment_method', 'wallet')
+        quantity = data.get('quantity', 1)
+        
+        # Check required fields
+        missing = []
+        if not network:
+            missing.append('network')
+        if not size_gb:
+            missing.append('size_gb')
+        if not phone:
+            missing.append('phone')
+            
+        if missing:
+            return jsonify({'success': False, 'error': f'Missing required fields: {", ".join(missing)}'}), 400
+        
+        # Get MANUAL prices from database (admin sets these)
+        is_agent = g.current_user.is_agent and getattr(g.current_user, 'agent_approved', False)
+        
+        if is_agent:
+            unit_price = get_agent_price(network, size_gb)
+        else:
+            unit_price = get_user_price(network, size_gb)
+        
+        if unit_price == 0:
+            return jsonify({
+                'success': False, 
+                'error': f'Price not configured for {network} {size_gb}GB. Please contact admin.'
+            }), 400
+        
+        total_price = unit_price * quantity
+        
+        # Check wallet balance
+        if payment_method == 'wallet':
+            if g.current_user.wallet_balance < total_price:
+                return jsonify({
+                    'success': False, 
+                    'error': f'Insufficient wallet balance. Need GHS {total_price:.2f}. Your balance: GHS {g.current_user.wallet_balance:.2f}'
+                }), 400
+        
+        # Generate order ID
+        order_id = f"ORD-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{g.current_user.id}"
+        
+        # Create order
+        order = Order(
+            user_id=g.current_user.id,
+            order_id=order_id,
+            type='data',
+            network=network,
+            size_gb=size_gb,
+            phone_number=phone,
+            amount=total_price,
+            quantity=quantity,
+            status='pending' if payment_method == 'manual' else 'processing',
+            payment_method=payment_method,
+            created_at=datetime.utcnow()
+        )
+        db.session.add(order)
+        db.session.flush()
+        
+        if payment_method == 'wallet':
+            # Initialize Digimall service for delivery only
+            digimall = DigimallService()
+            
+            # Deduct from wallet (admin's retail price)
+            balance_before = g.current_user.wallet_balance
+            g.current_user.wallet_balance -= total_price
+            
+            # Create transaction record
+            transaction = Transaction(
+                user_id=g.current_user.id,
+                type='purchase',
+                amount=total_price,
+                balance_before=balance_before,
+                balance_after=g.current_user.wallet_balance,
+                description=f'Purchase: {quantity}x {network} {size_gb}GB to {phone}',
+                reference=order_id,
+                status='pending'
+            )
+            db.session.add(transaction)
+            db.session.commit()
+            
+            # Call Digimall for delivery (no pricing involved)
+            digimall_response = digimall.deliver_data(network, phone, size_gb)
+            
+            if digimall_response.get('success'):
+                order.status = 'completed'
+                order.completed_at = datetime.utcnow()
+                order.provider = 'digimall'
+                order.provider_order_id = digimall_response.get('orderId')
+                order.provider_reference = digimall_response.get('reference')
+                order.provider_cost = digimall_response.get('totalAmount', 0)
+                
+                transaction.status = 'completed'
+                db.session.commit()
+                
+                profit = total_price - (digimall_response.get('totalAmount', 0) * quantity)
+                
+                return jsonify({
+                    'success': True,
+                    'data': {
+                        'order_id': order_id,
+                        'balance': float(g.current_user.wallet_balance),
+                        'amount': float(total_price),
+                        'provider_order_id': digimall_response.get('orderId'),
+                        'provider_status': digimall_response.get('status'),
+                        'profit': float(profit)
+                    },
+                    'message': f'✅ {size_gb}GB {network.upper()} data ordered. Processing delivery...'
+                })
+            else:
+                # Refund on delivery failure
+                g.current_user.wallet_balance += total_price
+                order.status = 'failed'
+                order.error_message = digimall_response.get('error', 'Digimall delivery failed')
+                transaction.status = 'failed'
+                db.session.commit()
+                
+                return jsonify({
+                    'success': False,
+                    'error': f'Delivery failed: {digimall_response.get("error")}. Amount refunded.'
+                }), 500
+            
+        elif payment_method == 'manual':
+            reference = f"MAN-{uuid.uuid4().hex[:8].upper()}"
+            order.payment_reference = reference
+            
+            manual_payment = ManualPayment(
+                user_id=g.current_user.id,
+                order_id=order.id,
+                amount=total_price,
+                reference=reference,
+                status='pending_verification'
+            )
+            db.session.add(manual_payment)
+            db.session.commit()
+            
+            return jsonify({
+                'success': True,
+                'data': {
+                    'order_id': order_id,
+                    'reference': reference,
+                    'amount': total_price
+                },
+                'payment_instructions': {
+                    'mobile_money_number': COMPANY_PHONE,
+                    'recipient': COMPANY_NAME,
+                    'reference': reference,
+                    'amount': total_price
+                },
+                'message': f'Order created! Send GHS {total_price:.2f} to {COMPANY_PHONE} with reference: {reference}'
+            })
+        
+    except Exception as e:
+        print(f"Create order error: {e}")
+        import traceback
+        traceback.print_exc()
+        db.session.rollback()
+        
+        if 'balance_before' in locals() and 'total_price' in locals():
+            if 'g' in locals() and hasattr(g, 'current_user'):
+                g.current_user.wallet_balance = balance_before
+        
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 @app.route('/api/order/bulk', methods=['POST'])
 @token_required
 @agent_required
-def bulk_order():
-    """Create bulk order (agent only)"""
+def bulk_agent_order():
+    """Create bulk order (agent only) - Manual pricing, Digimall delivery"""
+    
     data = request.get_json()
     orders = data.get('orders', [])
     
     if not orders:
         return jsonify({'success': False, 'error': 'No orders provided'}), 400
     
+    digimall = DigimallService()
+    
     success_count = 0
     failed_orders = []
+    successful_orders = []
     
+    # First, validate all orders and check wallet balance
     for order_data in orders:
         try:
             network = order_data.get('network')
@@ -3977,36 +4093,152 @@ def bulk_order():
                 failed_orders.append({'phone': phone, 'error': 'Bundle not found'})
                 continue
             
-            total_price = bundle.agent_price * quantity
+            total_price = float(bundle.agent_price) * quantity
             
             if g.current_user.wallet_balance < total_price:
                 failed_orders.append({'phone': phone, 'error': 'Insufficient balance'})
                 continue
             
-            # Deduct from wallet
-            g.current_user.wallet_balance -= total_price
-            
-            # Create order
-            order = Order(
-                user_id=g.current_user.id,
-                type='data',
-                network=network,
-                size_gb=size_gb,
-                phone_number=phone,
-                amount=total_price,
-                quantity=quantity,
-                status='completed',
-                payment_method='wallet',
-                completed_at=datetime.utcnow()
-            )
-            db.session.add(order)
-            success_count += 1
-            
-            # Send data delivery to network provider ONLY
-            send_data_delivery_to_provider(phone, f"✅ {COMPANY_NAME}: {quantity}x {size_gb}GB {network} data sent!")
+            successful_orders.append({
+                'network': network,
+                'size_gb': size_gb,
+                'phone': phone,
+                'quantity': quantity,
+                'total_price': total_price,
+                'bundle': bundle
+            })
             
         except Exception as e:
             failed_orders.append({'phone': order_data.get('phone'), 'error': str(e)})
+    
+    if not successful_orders:
+        db.session.commit()
+        return jsonify({
+            'success': True,
+            'total_orders': len(orders),
+            'success_count': 0,
+            'failed_count': len(failed_orders),
+            'failed_orders': failed_orders
+        })
+    
+    # Group by network for bulk processing
+    orders_by_network = {}
+    for order in successful_orders:
+        network = order['network'].lower()
+        if network not in orders_by_network:
+            orders_by_network[network] = []
+        orders_by_network[network].append(order)
+    
+    for network, network_orders in orders_by_network.items():
+        items = []
+        for order in network_orders:
+            phone = order['phone']
+            if phone.startswith('0'):
+                phone = '233' + phone[1:]
+            if phone.startswith('+'):
+                phone = phone[1:]
+            
+            items.append({
+                "volume": order['size_gb'],
+                "recipient": phone
+            })
+        
+        sample_order = network_orders[0]
+        offer_slug = digimall.get_offer_slug(network, sample_order['size_gb'])
+        
+        if not offer_slug:
+            for order in network_orders:
+                failed_orders.append({'phone': order['phone'], 'error': f'No offer found for {network}'})
+            continue
+        
+        endpoint_map = {
+            'mtn': 'mtn',
+            'airteltigo': 'at',
+            'telecel': 'telecel'
+        }
+        endpoint = endpoint_map.get(network, network)
+        
+        payload = {
+            "type": "bulk",
+            "items": items,
+            "offerSlug": offer_slug,
+            "webhookUrl": digimall.webhook_url
+        }
+        
+        print(f"[Digimall] Processing bulk order for {network}")
+        print(f"[Digimall] Items: {len(items)}")
+        
+        try:
+            response = requests.post(
+                f"{digimall.base_url}/order/{endpoint}",
+                json=payload,
+                headers={
+                    'x-api-key': digimall.api_key,
+                    'Content-Type': 'application/json'
+                },
+                timeout=60
+            )
+            
+            if response.status_code in [200, 201]:
+                result = response.json()
+                
+                if result.get('success'):
+                    for i, order in enumerate(network_orders):
+                        try:
+                            g.current_user.wallet_balance -= order['total_price']
+                            
+                            db_order = Order(
+                                user_id=g.current_user.id,
+                                order_id=f"ORD-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{g.current_user.id}-{i}",
+                                type='data',
+                                network=order['network'],
+                                size_gb=order['size_gb'],
+                                phone_number=order['phone'],
+                                amount=order['total_price'],
+                                quantity=order['quantity'],
+                                status='completed',
+                                payment_method='wallet',
+                                provider='digimall',
+                                provider_order_id=result.get('orderId'),
+                                provider_reference=result.get('reference'),
+                                provider_cost=result.get('totalAmount', 0) / len(network_orders) if result.get('totalAmount') else 0,
+                                completed_at=datetime.utcnow()
+                            )
+                            db.session.add(db_order)
+                            
+                            transaction = Transaction(
+                                user_id=g.current_user.id,
+                                type='purchase',
+                                amount=order['total_price'],
+                                balance_before=g.current_user.wallet_balance + order['total_price'],
+                                balance_after=g.current_user.wallet_balance,
+                                description=f'Bulk purchase: {order["quantity"]}x {order["network"]} {order["size_gb"]}GB to {order["phone"]}',
+                                reference=db_order.order_id,
+                                status='completed'
+                            )
+                            db.session.add(transaction)
+                            
+                            success_count += 1
+                            
+                        except Exception as e:
+                            g.current_user.wallet_balance += order['total_price']
+                            failed_orders.append({'phone': order['phone'], 'error': str(e)})
+                    
+                    db.session.commit()
+                    
+                else:
+                    error_msg = result.get('error', 'Digimall delivery failed')
+                    for order in network_orders:
+                        failed_orders.append({'phone': order['phone'], 'error': error_msg})
+            else:
+                error_msg = f'Digimall API error: {response.status_code}'
+                for order in network_orders:
+                    failed_orders.append({'phone': order['phone'], 'error': error_msg})
+                    
+        except Exception as e:
+            error_msg = f'Delivery error: {str(e)}'
+            for order in network_orders:
+                failed_orders.append({'phone': order['phone'], 'error': error_msg})
     
     db.session.commit()
     
@@ -4015,8 +4247,89 @@ def bulk_order():
         'total_orders': len(orders),
         'success_count': success_count,
         'failed_count': len(failed_orders),
-        'failed_orders': failed_orders
+        'failed_orders': failed_orders[:50],
+        'message': f'Successfully processed {success_count} out of {len(orders)} orders via Digimall'
     })
+
+
+
+
+@app.route('/api/webhooks/digimall', methods=['POST'])
+def digimall_webhook():
+    """Handle Digimall order status webhooks"""
+    try:
+        data = request.get_json()
+        print(f"[Digimall Webhook] Received: {data}")
+        
+        order_id = data.get('orderId')
+        reference = data.get('reference')
+        status = data.get('status')
+        recipient = data.get('recipient')
+        volume = data.get('volume')
+        
+        if order_id:
+            order = Order.query.filter_by(provider_order_id=order_id).first()
+            if order:
+                old_status = order.status
+                order.status = 'completed' if status == 'delivered' else status
+                if status == 'delivered':
+                    order.completed_at = datetime.utcnow()
+                db.session.commit()
+                print(f"[Digimall] Updated order {order_id}: {old_status} -> {status}")
+        
+        return jsonify({'success': True}), 200
+        
+    except Exception as e:
+        print(f"[Digimall Webhook Error] {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+    
+@app.route('/api/admin/digimall-balance', methods=['GET'])
+@token_required
+@admin_required
+def admin_get_digimall_balance():
+    """Get Digimall wallet balance"""
+    try:
+        DIGIMALL_API_KEY = os.environ.get('DIGIMALL_API_KEY')
+        DIGIMALL_BASE_URL = os.environ.get('DIGIMALL_BASE_URL', 'https://www.digi-mall.app/api/v1')
+        
+        if not DIGIMALL_API_KEY:
+            return jsonify({'success': False, 'error': 'Digimall API key not configured'}), 500
+        
+        # Try to get balance from Digimall
+        response = requests.get(
+            f"{DIGIMALL_BASE_URL}/wallet/balance",
+            headers={'x-api-key': DIGIMALL_API_KEY},
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            return jsonify({
+                'success': True,
+                'data': {
+                    'balance': data.get('balance', 0),
+                    'currency': data.get('currency', 'GHS'),
+                    'threshold': data.get('threshold', 50)
+                }
+            })
+        else:
+            # If balance endpoint not available, track in your database
+            from models import DigimallBalance
+            balance_record = DigimallBalance.query.first()
+            balance = balance_record.balance if balance_record else 0
+            
+            return jsonify({
+                'success': True,
+                'data': {
+                    'balance': float(balance),
+                    'currency': 'GHS',
+                    'is_estimate': True
+                }
+            })
+            
+    except Exception as e:
+        print(f"Error fetching Digimall balance: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 @app.route('/api/wallet/transactions', methods=['GET'])
@@ -6328,212 +6641,7 @@ def check_paystack_payment(reference):
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
-# Updated order creation with data delivery to network providers
-@app.route('/api/order', methods=['POST'])
-@token_required
-def create_agent_order():
-    """Create new order with data delivery to network providers"""
-    data = request.get_json()
-    
-    network = data.get('network')
-    size_gb = data.get('size_gb')
-    phone = data.get('phone')
-    payment_method = data.get('payment_method', 'wallet')
-    quantity = data.get('quantity', 1)
-    
-    if not all([network, size_gb, phone]):
-        return jsonify({'success': False, 'error': 'Missing required fields'}), 400
-    
-    # Get bundle price
-    bundle = DataBundle.query.filter_by(network=network, size_gb=size_gb, is_active=True).first()
-    if not bundle:
-        return jsonify({'success': False, 'error': 'Bundle not available'}), 400
-    
-    is_agent = g.current_user.is_agent and g.current_user.agent_approved
-    unit_price = bundle.agent_price if is_agent else bundle.retail_price
-    total_price = unit_price * quantity
-    
-    # Check wallet balance for wallet payment
-    if payment_method == 'wallet' and g.current_user.wallet_balance < total_price:
-        return jsonify({'success': False, 'error': f'Insufficient wallet balance. Need GHS {total_price:.2f}'}), 400
-    
-    # Create order
-    order = Order(
-        user_id=g.current_user.id,
-        type='data',
-        network=network,
-        size_gb=size_gb,
-        phone_number=phone,
-        amount=total_price,
-        quantity=quantity,
-        status='pending' if payment_method == 'manual' else 'completed',
-        payment_method=payment_method,
-        created_at=datetime.utcnow()
-    )
-    
-    if payment_method == 'wallet':
-        # Deduct from wallet
-        balance_before = g.current_user.wallet_balance
-        g.current_user.wallet_balance -= total_price
-        
-        transaction = Transaction(
-            user_id=g.current_user.id,
-            type='purchase',
-            amount=total_price,
-            balance_before=balance_before,
-            balance_after=g.current_user.wallet_balance,
-            description=f'Purchase: {quantity}x {network} {size_gb}GB to {phone}',
-            reference=order.order_id
-        )
-        db.session.add(transaction)
-        order.status = 'completed'
-        order.completed_at = datetime.utcnow()
-        
-        # Send data delivery notification to network provider ONLY (NO customer SMS)
-        delivery_message = f"✅ {COMPANY_NAME}: {quantity}x {size_gb}GB {network} data sent! Order ID: {order.order_id}"
-        send_data_delivery_to_provider(phone, delivery_message)
-        
-        # Send email confirmation to user (Email ONLY)
-        email_html = f"""
-        <!DOCTYPE html>
-        <html>
-        <body style="font-family: Arial, sans-serif;">
-            <h2 style="color: #8B0000;">Order Confirmation - {COMPANY_NAME}</h2>
-            <p>Dear {g.current_user.username},</p>
-            <p>Your order has been completed successfully!</p>
-            <p><strong>Order ID:</strong> {order.order_id}</p>
-            <p><strong>Package:</strong> {quantity}x {size_gb}GB {network.upper()} Data</p>
-            <p><strong>Phone Number:</strong> {phone}</p>
-            <p><strong>Amount:</strong> GHS {total_price:.2f}</p>
-            <p><strong>Status:</strong> Delivered ✓</p>
-            <a href="{COMPANY_WEBSITE}/orders" style="background: #8B0000; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">View Orders</a>
-            <hr>
-            <p style="color: #666;">Need help? Contact support on WhatsApp: {COMPANY_PHONE}</p>
-        </body>
-        </html>
-        """
-        
-        send_email(g.current_user.email, f"Order Confirmation - {order.order_id}", email_html)
-        
-        # Send webhook
-        send_webhook('order.completed', {
-            'order_id': order.order_id,
-            'amount': total_price,
-            'customer': phone
-        })
-        
-    elif payment_method == 'manual':
-        reference = f"MAN-{uuid.uuid4().hex[:8].upper()}"
-        order.payment_reference = reference
-        
-        manual_payment = ManualPayment(
-            user_id=g.current_user.id,
-            order_id=order.id,
-            amount=total_price,
-            reference=reference,
-            status='pending'
-        )
-        db.session.add(manual_payment)
-    
-    db.session.add(order)
-    db.session.commit()
-    
-    # Log activity
-    log_activity(g.current_user.id, 'create_order', f'Created order {order.order_id} for {total_price}')
-    
-    if payment_method == 'manual':
-        return jsonify({
-            'success': True,
-            'data': {
-                'order_id': order.order_id,
-                'reference': reference,
-                'amount': total_price
-            },
-            'payment_instructions': {
-                'mobile_money_number': COMPANY_PHONE,
-                'recipient': COMPANY_NAME,
-                'reference': reference,
-                'amount': total_price
-            },
-            'message': f'Order created! Send GHS {total_price:.2f} to {COMPANY_PHONE} with reference: {reference}'
-        })
-    
-    return jsonify({
-        'success': True,
-        'data': {
-            'order_id': order.order_id,
-            'balance': g.current_user.wallet_balance
-        },
-        'message': f'{quantity}x {size_gb}GB {network} data sent to {phone}'
-    })
 
-
-@app.route('/api/order/bulk', methods=['POST'])
-@token_required
-@agent_required
-def bulk_agent_order():
-    """Create bulk order (agent only)"""
-    data = request.get_json()
-    orders = data.get('orders', [])
-    
-    if not orders:
-        return jsonify({'success': False, 'error': 'No orders provided'}), 400
-    
-    success_count = 0
-    failed_orders = []
-    
-    for order_data in orders:
-        try:
-            network = order_data.get('network')
-            size_gb = order_data.get('size_gb')
-            phone = order_data.get('phone')
-            quantity = order_data.get('quantity', 1)
-            
-            bundle = DataBundle.query.filter_by(network=network, size_gb=size_gb, is_active=True).first()
-            if not bundle:
-                failed_orders.append({'phone': phone, 'error': 'Bundle not found'})
-                continue
-            
-            total_price = bundle.agent_price * quantity
-            
-            if g.current_user.wallet_balance < total_price:
-                failed_orders.append({'phone': phone, 'error': 'Insufficient balance'})
-                continue
-            
-            # Deduct from wallet
-            g.current_user.wallet_balance -= total_price
-            
-            # Create order
-            order = Order(
-                user_id=g.current_user.id,
-                type='data',
-                network=network,
-                size_gb=size_gb,
-                phone_number=phone,
-                amount=total_price,
-                quantity=quantity,
-                status='completed',
-                payment_method='wallet',
-                completed_at=datetime.utcnow()
-            )
-            db.session.add(order)
-            success_count += 1
-            
-            # Send data delivery to network provider ONLY (NO customer SMS)
-            send_data_delivery_to_provider(phone, f"✅ {COMPANY_NAME}: {quantity}x {size_gb}GB {network} data sent!")
-            
-        except Exception as e:
-            failed_orders.append({'phone': order_data.get('phone'), 'error': str(e)})
-    
-    db.session.commit()
-    
-    return jsonify({
-        'success': True,
-        'total_orders': len(orders),
-        'success_count': success_count,
-        'failed_count': len(failed_orders),
-        'failed_orders': failed_orders
-    })
 
 
 @app.route('/api/wallet/transactions', methods=['GET'])
