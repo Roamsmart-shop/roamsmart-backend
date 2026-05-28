@@ -3272,6 +3272,8 @@ def forgot_password():
 def reset_password():
     """Reset password using token"""
     try:
+        import bcrypt  # Add this import
+        
         data = request.get_json()
         token = data.get('token')
         new_password = data.get('new_password')
@@ -3292,9 +3294,13 @@ def reset_password():
         if user.reset_token_expiry and user.reset_token_expiry < datetime.utcnow():
             return jsonify({'success': False, 'error': 'Reset token has expired. Please request a new one.'}), 400
         
-        # Hash and update password
-        from werkzeug.security import generate_password_hash
-        user.password_hash = generate_password_hash(new_password)
+        # ========== FIX: Use bcrypt (same as User model) ==========
+        # Hash the new password with bcrypt
+        salt = bcrypt.gensalt()
+        hashed_password = bcrypt.hashpw(new_password.encode('utf-8'), salt).decode('utf-8')
+        user.password_hash = hashed_password
+        
+        # Clear reset token
         user.reset_token = None
         user.reset_token_expiry = None
         db.session.commit()
