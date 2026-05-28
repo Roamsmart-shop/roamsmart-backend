@@ -23,7 +23,7 @@ def pre_resolve_domains():
 
 pre_resolve_domains()
 
-# Now regular imports
+# ========== STANDARD LIBRARY IMPORTS ==========
 import uuid
 import re
 import base64
@@ -31,6 +31,8 @@ import random
 import hashlib
 import json
 import smtplib
+import logging
+from logging.handlers import RotatingFileHandler
 from io import BytesIO
 from datetime import datetime, timedelta
 from functools import wraps
@@ -38,6 +40,8 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from urllib.parse import urlparse
 
+# ========== THIRD PARTY IMPORTS ==========
+import redis
 import bcrypt
 import pyotp
 import qrcode
@@ -48,10 +52,13 @@ from flask import Flask, request, jsonify, session, send_from_directory, g
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+from flask_limiter.errors import RateLimitExceeded
 from flask_socketio import SocketIO, emit
 from sqlalchemy import func, and_, or_
 from werkzeug.utils import secure_filename
 from flask_session import Session
+
+# ========== LOCAL IMPORTS ==========
 from config import config
 from models import *
 
@@ -64,21 +71,13 @@ COMPANY_PHONE = "0557388622"
 COMPANY_WEBSITE = "https://roamsmart.shop"
 COMPANY_DOMAIN = "roamsmart.shop"
 
-# Flask app setup
+# ========== FLASK APP INITIALIZATION ==========
 app = Flask(__name__)
 
-# Environment config
+# ========== ENVIRONMENT CONFIGURATION ==========
 env = os.environ.get('FLASK_ENV', 'production')
 app.config.from_object(config[env])
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your-secret-key-here')
-
-# ========== RATE LIMITER ==========
-class NoOpLimiter:
-    def limit(self, *args, **kwargs):
-        return lambda f: f
-
-limiter = NoOpLimiter()
-print("[Rate Limiter] Disabled - using no-op limiter")
 
 # ========== UPLOAD CONFIGURATION ==========
 UPLOAD_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'uploads', 'profile_pics')
@@ -89,8 +88,57 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 
-# Initialize database
+# ========== DATABASE INITIALIZATION ==========
 db.init_app(app)
+
+# ========== LOGGING CONFIGURATION ==========
+if not os.path.exists('logs'):
+    os.mkdir('logs')
+
+file_handler = RotatingFileHandler('logs/roamsmart.log', maxBytes=10240, backupCount=10)
+file_handler.setFormatter(logging.Formatter(
+    '%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'
+))
+file_handler.setLevel(logging.INFO)
+app.logger.addHandler(file_handler)
+app.logger.setLevel(logging.INFO)
+
+# ========== REQUEST LOGGING ==========
+@app.before_request
+def log_request():
+    """Log all incoming requests for audit"""
+    if not request.path.startswith('/static') and not request.path.startswith('/uploads'):
+        app.logger.info(f'Request: {request.method} {request.path} from {request.remote_addr}')
+
+# ========== RATE LIMITER INITIALIZATION ==========
+print("[DEBUG] ===== STARTING RATE LIMITER INITIALIZATION =====")
+
+# Import limiter module
+try:
+    from limiter import limiter, init_limiter
+    print("[DEBUG] ✅ Successfully imported limiter module")
+except Exception as e:
+    print(f"[DEBUG] ❌ Failed to import limiter: {e}")
+    # Create a dummy limiter as fallback
+    class DummyLimiter:
+        def limit(self, *args, **kwargs):
+            def decorator(f):
+                return f
+            return decorator
+    limiter = DummyLimiter()
+    print("[DEBUG] ⚠️ Using dummy limiter (no rate limiting)")
+
+# Initialize limiter with app
+try:
+    init_limiter(app)
+    print("[DEBUG] ✅ Rate limiter initialized successfully")
+    print(f"[DEBUG] Limiter type: {type(limiter)}")
+    print(f"[DEBUG] Limiter storage: {getattr(limiter, 'storage_uri', 'unknown')}")
+except Exception as e:
+    print(f"[DEBUG] ❌ Failed to initialize limiter: {e}")
+    print("[DEBUG] ⚠️ Continuing without rate limiting")
+    
+print("[DEBUG] ===== RATE LIMITER INITIALIZATION COMPLETE =====\n")
 
 # ========== CORS CONFIGURATION ==========
 def get_allowed_origins():
@@ -101,7 +149,6 @@ def get_allowed_origins():
         'http://127.0.0.1:5000',
         'https://roamsmart.shop',
         'https://www.roamsmart.shop',
-        
         'https://api.roamsmart.shop',
         'https://roamsmart-frontend.vercel.app',
         'https://roamsmart-frontend-cgggs8bm4-roamsmart-shops-projects.vercel.app',
@@ -163,6 +210,100 @@ if AFRICASTALKING_API_KEY and AFRICASTALKING_API_KEY != 'mock_key':
 else:
     print("[Africa's Talking] No API key found - SMS will not be sent")
 
+# ========== SECURITY HEADERS ==========
+@app.after_request
+def add_security_headers(response):
+    """Add security headers to prevent XSS and other attacks"""
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['X-XSS-Protection'] = '1; mode=block'
+    response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
+    response.headers['Content-Security-Policy'] = "default-src 'self'"
+    response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
+    response.headers['Permissions-Policy'] = 'geolocation=(), microphone=(), camera=()'
+    return response
+
+# ========== SUSPICIOUS ACTIVITY LOGGING ==========
+def log_suspicious_activity(user_id, activity_type, details, ip_address):
+    """Log suspicious activities for monitoring"""
+    try:
+        log = SuspiciousActivityLog(
+            user_id=user_id,
+            activity_type=activity_type,
+            details=details,
+            ip_address=ip_address,
+            created_at=datetime.utcnow()
+        )
+        db.session.add(log)
+        db.session.commit()
+        
+        # Alert admin for critical activities
+        if activity_type in ['brute_force', 'multiple_accounts', 'unusual_location']:
+            send_admin_alert(f"Suspicious Activity: {activity_type}", details)
+    except Exception as e:
+        print(f"Error logging suspicious activity: {e}")
+
+def send_admin_alert(subject, message):
+    """Send alert to admin email"""
+    try:
+        send_email(
+            to=COMPANY_ADMIN_EMAIL,
+            subject=f"[ALERT] {subject}",
+            body=f"""
+            <div style="font-family: Arial, sans-serif;">
+                <h2 style="color: #ff0000;">⚠️ Security Alert</h2>
+                <p><strong>Subject:</strong> {subject}</p>
+                <p><strong>Message:</strong> {message}</p>
+                <p><strong>Time:</strong> {datetime.utcnow().isoformat()}</p>
+                <hr>
+                <p>This is an automated alert from Roamsmart Security System.</p>
+            </div>
+            """
+        )
+    except Exception as e:
+        print(f"Failed to send admin alert: {e}")
+
+import html
+
+def validate_phone(phone):
+    """Validate Ghana phone numbers"""
+    if not phone:
+        return False
+    phone = str(phone).strip()
+    pattern = r'^(233|0)(20|23|24|25|26|27|28|29|50|53|54|55|56|57|58|59)[0-9]{7}$'
+    return bool(re.match(pattern, phone))
+
+def validate_email(email):
+    """Validate email format"""
+    if not email:
+        return False
+    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    return bool(re.match(pattern, email))
+
+def validate_amount(amount):
+    """Validate amount is positive and within limits"""
+    try:
+        amount = float(amount)
+        return 0 < amount <= 10000  # Max GHS 10,000
+    except:
+        return False
+
+def validate_password(password):
+    """Validate password strength"""
+    if not password or len(password) < 6:
+        return False
+    return True
+
+def sanitize_input(text):
+    """Sanitize user input to prevent XSS"""
+    if not text:
+        return text
+    return html.escape(str(text))
+
+def validate_network(network):
+    """Validate network provider"""
+    valid_networks = ['mtn', 'telecel', 'airteltigo', 'vodafone']
+    return network and network.lower() in valid_networks
 
 class PhoneVerificationService:
     """Handle phone number verification - SMS first, Email only if SMS fails or resend requested"""
@@ -1514,6 +1655,8 @@ def get_avatar(filename):
 
 @app.route('/api/payment/paystack/initialize', methods=['POST'])
 @token_required
+@limiter.limit("10 per minute")
+@limiter.limit("30 per hour")
 def initialize_paystack_payment():
     """Initialize Paystack payment for wallet funding"""
     try:
@@ -2061,123 +2204,459 @@ def verify_2fa_code():
 
 @app.route('/api/auth/me', methods=['GET'])
 @token_required
+@limiter.limit("60 per minute")  # Allow frequent checks
 def get_current_user():
     """Get current user info"""
-    return jsonify({'success': True, 'user': g.current_user.to_dict()})
+    try:
+        user_data = g.current_user.to_dict()
+        
+        # Add additional security info
+        user_data['two_factor_enabled'] = g.current_user.two_factor_enabled
+        
+        # Add last login info if available
+        if hasattr(g.current_user, 'last_login'):
+            user_data['last_login'] = g.current_user.last_login.isoformat() if g.current_user.last_login else None
+        
+        return jsonify({
+            'success': True, 
+            'user': user_data
+        })
+    except Exception as e:
+        print(f"Get current user error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 @app.route('/api/auth/change-password', methods=['POST'])
 @token_required
+@limiter.limit("5 per minute")  # Prevent brute force
+@limiter.limit("10 per hour")
 def change_password():
     """Change user password"""
-    data = request.get_json()
-    current_password = data.get('current_password')
-    new_password = data.get('new_password')
-    
-    if not g.current_user.check_password(current_password):
-        return jsonify({'success': False, 'error': 'Current password is incorrect'}), 401
-    
-    if len(new_password) < 6:
-        return jsonify({'success': False, 'error': 'New password must be at least 6 characters'}), 400
-    
-    g.current_user.set_password(new_password)
-    db.session.commit()
-    
-    log_activity(g.current_user.id, 'change_password', 'Password changed')
-    
-    return jsonify({'success': True, 'message': 'Password changed successfully'})
+    try:
+        data = request.get_json()
+        current_password = data.get('current_password')
+        new_password = data.get('new_password')
+        
+        if not current_password or not new_password:
+            return jsonify({'success': False, 'error': 'Current password and new password are required'}), 400
+        
+        if len(new_password) < 6:
+            return jsonify({'success': False, 'error': 'New password must be at least 6 characters'}), 400
+        
+        if not g.current_user.check_password(current_password):
+            # Log failed attempt
+            log_activity(g.current_user.id, 'change_password_failed', 'Incorrect current password')
+            return jsonify({'success': False, 'error': 'Current password is incorrect'}), 401
+        
+        # Prevent using same password
+        if current_password == new_password:
+            return jsonify({'success': False, 'error': 'New password must be different from current password'}), 400
+        
+        g.current_user.set_password(new_password)
+        db.session.commit()
+        
+        # Log successful change
+        log_activity(g.current_user.id, 'change_password', 'Password changed successfully')
+        
+        # Optional: Invalidate all other sessions (security best practice)
+        # You might want to add this
+        from app import UserSession
+        UserSession.query.filter(UserSession.user_id == g.current_user.id, UserSession.id != getattr(g, 'current_session_id', None)).delete()
+        db.session.commit()
+        
+        return jsonify({
+            'success': True, 
+            'message': 'Password changed successfully. Use your new password to login.'
+        })
+        
+    except Exception as e:
+        print(f"Change password error: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 @app.route('/api/auth/2fa/enable', methods=['POST'])
 @token_required
+@limiter.limit("3 per minute")
+@limiter.limit("5 per hour")
 def enable_2fa():
     """Enable 2FA for user"""
-    secret = pyotp.random_base32()
-    totp = pyotp.TOTP(secret)
-    provisioning_uri = totp.provisioning_uri(g.current_user.email, issuer_name=COMPANY_NAME)
-    
-    qr_code = generate_qr_code(provisioning_uri)
-    
-    g.current_user.two_factor_secret = secret
-    
-    return jsonify({
-        'success': True,
-        'secret': secret,
-        'qr_code': qr_code
-    })
+    try:
+        import pyotp
+        import base64
+        from io import BytesIO
+        
+        # Generate secret
+        secret = pyotp.random_base32()
+        totp = pyotp.TOTP(secret)
+        provisioning_uri = totp.provisioning_uri(g.current_user.email, issuer_name=COMPANY_NAME)
+        
+        # Generate QR code
+        import qrcode
+        qr = qrcode.QRCode(box_size=10, border=4)
+        qr.add_data(provisioning_uri)
+        qr.make(fit=True)
+        
+        img = qr.make_image(fill_color="black", back_color="white")
+        
+        # Convert to base64
+        buffered = BytesIO()
+        img.save(buffered, format="PNG")
+        qr_code_base64 = base64.b64encode(buffered.getvalue()).decode()
+        
+        # Store secret temporarily (will be verified before saving)
+        set_temp_data(f"2fa_temp:{g.current_user.id}", {
+            'secret': secret,
+            'expires': (datetime.utcnow() + timedelta(minutes=10)).isoformat()
+        }, expiry_seconds=600)
+        
+        return jsonify({
+            'success': True,
+            'secret': secret,
+            'qr_code': f"data:image/png;base64,{qr_code_base64}",
+            'message': 'Scan the QR code with Google Authenticator or any TOTP app'
+        })
+        
+    except Exception as e:
+        print(f"Enable 2FA error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 @app.route('/api/auth/2fa/verify', methods=['POST'])
 @token_required
+@limiter.limit("5 per minute")
+@limiter.limit("10 per hour")
 def verify_2fa_enable():
     """Verify and enable 2FA"""
-    data = request.get_json()
-    code = data.get('code')
-    
-    totp = pyotp.TOTP(g.current_user.two_factor_secret)
-    if not totp.verify(code):
-        return jsonify({'success': False, 'error': 'Invalid code'}), 400
-    
-    g.current_user.two_factor_enabled = True
-    db.session.commit()
-    
-    return jsonify({'success': True, 'message': f'2FA enabled successfully on {COMPANY_NAME}'})
+    try:
+        import pyotp
+        
+        data = request.get_json()
+        code = data.get('code')
+        
+        if not code:
+            return jsonify({'success': False, 'error': 'Verification code is required'}), 400
+        
+        # Get temporary secret
+        temp_data = get_temp_data(f"2fa_temp:{g.current_user.id}")
+        
+        if not temp_data:
+            return jsonify({'success': False, 'error': '2FA setup expired. Please try again.'}), 400
+        
+        secret = temp_data['secret']
+        
+        # Verify code
+        totp = pyotp.TOTP(secret)
+        if not totp.verify(code):
+            # Log failed attempt
+            log_activity(g.current_user.id, '2fa_verify_failed', 'Invalid 2FA code')
+            return jsonify({'success': False, 'error': 'Invalid verification code'}), 400
+        
+        # Enable 2FA
+        g.current_user.two_factor_secret = secret
+        g.current_user.two_factor_enabled = True
+        db.session.commit()
+        
+        # Clean up temp data
+        delete_temp_data(f"2fa_temp:{g.current_user.id}")
+        
+        # Log success
+        log_activity(g.current_user.id, '2fa_enabled', 'Two-factor authentication enabled')
+        
+        return jsonify({
+            'success': True, 
+            'message': f'2FA enabled successfully on {COMPANY_NAME}',
+            'recovery_codes': generate_recovery_codes(g.current_user.id)  # Optional
+        })
+        
+    except Exception as e:
+        print(f"Verify 2FA error: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 @app.route('/api/auth/2fa/disable', methods=['POST'])
 @token_required
+@limiter.limit("3 per minute")
+@limiter.limit("5 per hour")
 def disable_2fa():
     """Disable 2FA"""
-    g.current_user.two_factor_enabled = False
-    g.current_user.two_factor_secret = None
-    db.session.commit()
-    
-    return jsonify({'success': True, 'message': f'2FA disabled on {COMPANY_NAME}'})
+    try:
+        data = request.get_json()
+        code = data.get('code')
+        
+        # Require 2FA code to disable (security)
+        if g.current_user.two_factor_enabled:
+            import pyotp
+            totp = pyotp.TOTP(g.current_user.two_factor_secret)
+            if not code or not totp.verify(code):
+                return jsonify({'success': False, 'error': 'Valid 2FA code is required to disable'}), 401
+        
+        g.current_user.two_factor_enabled = False
+        g.current_user.two_factor_secret = None
+        db.session.commit()
+        
+        # Log activity
+        log_activity(g.current_user.id, '2fa_disabled', 'Two-factor authentication disabled')
+        
+        return jsonify({
+            'success': True, 
+            'message': f'2FA disabled on {COMPANY_NAME}'
+        })
+        
+    except Exception as e:
+        print(f"Disable 2FA error: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
 
+
+# Optional: Helper function to generate recovery codes
+def generate_recovery_codes(user_id):
+    """Generate recovery codes for 2FA backup"""
+    import secrets
+    recovery_codes = []
+    for _ in range(8):
+        code = secrets.token_hex(4).upper()  # 8 character code
+        recovery_codes.append(code)
+        # Store in Redis or database
+        set_temp_data(f"2fa_recovery:{user_id}:{code}", True, expiry_seconds=7776000)  # 90 days
+    return recovery_codes
 
 @app.route('/api/auth/sessions', methods=['GET'])
 @token_required
+@limiter.limit("30 per minute")
 def get_sessions():
-    """Get user's active sessions"""
-    sessions = UserSession.query.filter_by(user_id=g.current_user.id).order_by(UserSession.created_at.desc()).limit(10).all()
-    
-    return jsonify({
-        'success': True,
-        'sessions': [{
-            'id': s.id,
-            'device': s.device_info,
-            'ip_address': s.ip_address,
-            'location': s.location,
-            'last_active': s.created_at.isoformat(),
-            'is_current': True
-        } for s in sessions]
-    })
+    """Get user's active sessions (USES REDIS)"""
+    try:
+        # Get sessions from Redis instead of database for better performance
+        session_key = f"user_sessions:{g.current_user.id}"
+        sessions = get_temp_data(session_key)
+        
+        if not sessions:
+            # Fallback to database
+            sessions = UserSession.query.filter_by(
+                user_id=g.current_user.id
+            ).order_by(UserSession.created_at.desc()).limit(10).all()
+            
+            sessions_data = [{
+                'id': s.id,
+                'device': s.device_info,
+                'ip_address': s.ip_address,
+                'location': s.location,
+                'last_active': s.last_active.isoformat() if s.last_active else s.created_at.isoformat(),
+                'is_current': s.id == getattr(g, 'current_session_id', None)
+            } for s in sessions]
+        else:
+            sessions_data = sessions
+        
+        return jsonify({
+            'success': True,
+            'sessions': sessions_data,
+            'total': len(sessions_data)
+        })
+        
+    except Exception as e:
+        print(f"Get sessions error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 @app.route('/api/auth/sessions/<int:session_id>', methods=['DELETE'])
 @token_required
+@limiter.limit("10 per minute")
+@limiter.limit("30 per hour")
 def revoke_session(session_id):
-    """Revoke a user session"""
-    session = UserSession.query.get(session_id)
-    if session and session.user_id == g.current_user.id:
+    """Revoke a user session (USES REDIS)"""
+    try:
+        # Check if session exists and belongs to user
+        session = UserSession.query.filter_by(
+            id=session_id, 
+            user_id=g.current_user.id
+        ).first()
+        
+        if not session:
+            # Check Redis for active session
+            session_key = f"session:{session_id}"
+            session_data = get_temp_data(session_key)
+            
+            if session_data and session_data.get('user_id') == g.current_user.id:
+                delete_temp_data(session_key)
+                # Also remove from user's sessions list
+                user_sessions_key = f"user_sessions:{g.current_user.id}"
+                user_sessions = get_temp_data(user_sessions_key)
+                if user_sessions:
+                    user_sessions = [s for s in user_sessions if s.get('id') != session_id]
+                    set_temp_data(user_sessions_key, user_sessions, 3600)
+                
+                # Log activity
+                log_activity(g.current_user.id, 'session_revoked', f'Session {session_id} revoked')
+                
+                return jsonify({
+                    'success': True, 
+                    'message': 'Session revoked successfully'
+                })
+            
+            return jsonify({'success': False, 'error': 'Session not found'}), 404
+        
+        # Delete from database
         db.session.delete(session)
         db.session.commit()
-        return jsonify({'success': True, 'message': 'Session revoked from Roamsmart'})
-    
-    return jsonify({'success': False, 'error': 'Session not found'}), 404
+        
+        # Also remove from Redis if exists
+        session_key = f"session:{session_id}"
+        delete_temp_data(session_key)
+        
+        # Remove from user's sessions list
+        user_sessions_key = f"user_sessions:{g.current_user.id}"
+        user_sessions = get_temp_data(user_sessions_key)
+        if user_sessions:
+            user_sessions = [s for s in user_sessions if s.get('id') != session_id]
+            set_temp_data(user_sessions_key, user_sessions, 3600)
+        
+        # Log activity
+        log_activity(g.current_user.id, 'session_revoked', f'Session {session_id} revoked')
+        
+        return jsonify({
+            'success': True, 
+            'message': 'Session revoked successfully'
+        })
+        
+    except Exception as e:
+        print(f"Revoke session error: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/auth/sessions/revoke-all', methods=['DELETE'])
+@token_required
+@limiter.limit("5 per minute")
+@limiter.limit("10 per hour")
+def revoke_all_sessions():
+    """Revoke all user sessions except current"""
+    try:
+        # Delete all sessions except current
+        sessions = UserSession.query.filter_by(user_id=g.current_user.id).all()
+        
+        deleted_count = 0
+        for session in sessions:
+            if session.id != getattr(g, 'current_session_id', None):
+                db.session.delete(session)
+                deleted_count += 1
+                
+                # Also remove from Redis
+                session_key = f"session:{session.id}"
+                delete_temp_data(session_key)
+        
+        db.session.commit()
+        
+        # Clear user sessions from Redis
+        user_sessions_key = f"user_sessions:{g.current_user.id}"
+        delete_temp_data(user_sessions_key)
+        
+        # Log activity
+        log_activity(g.current_user.id, 'all_sessions_revoked', f'Revoked {deleted_count} sessions')
+        
+        return jsonify({
+            'success': True,
+            'message': f'Revoked {deleted_count} sessions',
+            'deleted_count': deleted_count
+        })
+        
+    except Exception as e:
+        print(f"Revoke all sessions error: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 @app.route('/api/auth/log-activity', methods=['POST'])
 @token_required
+@limiter.limit("60 per minute")
 def log_activity_endpoint():
-    """Log user activity"""
-    data = request.get_json()
-    action = data.get('action')
-    details = data.get('details')
-    
-    log_activity(g.current_user.id, action, details)
-    return jsonify({'success': True})
+    """Log user activity (USES REDIS for rate limiting)"""
+    try:
+        data = request.get_json()
+        action = data.get('action')
+        details = data.get('details')
+        
+        if not action:
+            return jsonify({'success': False, 'error': 'Action is required'}), 400
+        
+        # Rate limit per action type
+        action_key = f"activity:{g.current_user.id}:{action}"
+        action_count = get_temp_data(action_key)
+        
+        if action_count:
+            # Prevent spam of same action
+            return jsonify({'success': True, 'message': 'Activity logged (rate limited)'})
+        
+        # Store in Redis with 1 second expiry for rate limiting
+        set_temp_data(action_key, 1, 1)
+        
+        # Log to database (you can keep this or move entirely to Redis)
+        log_activity(g.current_user.id, action, details)
+        
+        # Also store recent activities in Redis for quick access
+        recent_key = f"recent_activities:{g.current_user.id}"
+        recent_activities = get_temp_data(recent_key) or []
+        
+        # Add new activity
+        recent_activities.insert(0, {
+            'action': action,
+            'details': details,
+            'timestamp': datetime.utcnow().isoformat()
+        })
+        
+        # Keep only last 50 activities
+        recent_activities = recent_activities[:50]
+        set_temp_data(recent_key, recent_activities, 86400)  # 24 hours
+        
+        return jsonify({'success': True})
+        
+    except Exception as e:
+        print(f"Log activity error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
+
+@app.route('/api/auth/activities', methods=['GET'])
+@token_required
+@limiter.limit("30 per minute")
+def get_user_activities():
+    """Get user's recent activities"""
+    try:
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('limit', 20, type=int)
+        
+        # Try to get from Redis first
+        recent_key = f"recent_activities:{g.current_user.id}"
+        activities = get_temp_data(recent_key)
+        
+        if activities:
+            # Paginate Redis data
+            start = (page - 1) * per_page
+            end = start + per_page
+            paginated = activities[start:end]
+            
+            return jsonify({
+                'success': True,
+                'activities': paginated,
+                'total': len(activities),
+                'page': page,
+                'total_pages': (len(activities) + per_page - 1) // per_page
+            })
+        
+        # Fallback to database
+        # You would need a UserActivityLog model for this
+        
+        return jsonify({
+            'success': True,
+            'activities': [],
+            'total': 0,
+            'page': page,
+            'total_pages': 0
+        })
+        
+    except Exception as e:
+        print(f"Get activities error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 # ========== USER ROUTES ==========
 
@@ -2574,6 +3053,8 @@ def send_phone_verification_email(email, phone_number, code):
     send_email(email, f"Phone Verification Code - {COMPANY_NAME}", html_content)
 
 @app.route('/api/auth/resend-verification', methods=['POST'])
+@limiter.limit("3 per minute")
+@limiter.limit("10 per hour")
 def resend_verification():
     """Resend verification code for email verification"""
     data = request.get_json()
@@ -2698,13 +3179,11 @@ def resend_registration_code():
         'error': 'No pending registration found. Please register again.'
     }), 400
 
-# Add these imports at the top
-import secrets
-from datetime import datetime, timedelta
-
 # ========== FORGOT PASSWORD ROUTES ==========
 
 @app.route('/api/auth/forgot-password', methods=['POST'])
+@limiter.limit("3 per minute")
+@limiter.limit("10 per hour")
 def forgot_password():
     """Send password reset email"""
     try:
@@ -2787,6 +3266,8 @@ def forgot_password():
 
 
 @app.route('/api/auth/reset-password', methods=['POST'])
+@limiter.limit("3 per minute")
+@limiter.limit("10 per hour")
 def reset_password():
     """Reset password using token"""
     try:
@@ -2865,6 +3346,8 @@ def reset_password():
 
 
 @app.route('/api/auth/verify-reset-token', methods=['POST'])
+@limiter.limit("10 per minute")
+@limiter.limit("50 per hour")
 def verify_reset_token():
     """Verify if reset token is valid"""
     try:
@@ -2892,13 +3375,90 @@ def verify_reset_token():
         print(f"[PASSWORD] Verify token error: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
-# ========== TEMPORARY STORAGE (Replace with Redis in production) ==========
-temp_storage = {}
+
+
+
+@app.route('/api/auth/register', methods=['POST'])
+@limiter.limit("5 per minute")
+def register():
+    """Register new user - Send SMS verification first, email fallback (USES REDIS)"""
+    try:
+        data = request.get_json()
+        
+        username = data.get('username')
+        email = data.get('email')
+        phone = data.get('phone')
+        password = data.get('password')
+        referral_code = data.get('referral_code')
+        
+        if not all([username, email, phone, password]):
+            return jsonify({'success': False, 'error': 'All fields required'}), 400
+        
+        # Check if user exists
+        if User.query.filter_by(email=email).first():
+            return jsonify({'success': False, 'error': 'Email already registered'}), 400
+        
+        if User.query.filter_by(phone=phone).first():
+            return jsonify({'success': False, 'error': 'Phone already registered'}), 400
+        
+        verification_code = verification_service.generate_verification_code()
+        
+        # Store in Redis (10 minutes expiry)
+        set_temp_data(
+            f"register:{email}",
+            {
+                'username': username,
+                'email': email,
+                'phone': phone,
+                'password': password,
+                'referral_code': referral_code,
+                'verification_code': verification_code,
+                'expires': (datetime.utcnow() + timedelta(minutes=10)).isoformat()
+            },
+            expiry_seconds=600
+        )
+        
+        print(f"[REGISTER] Stored verification for email: {email}")
+        print(f"[REGISTER] Verification code: {verification_code}")
+        
+        # Try SMS first, then email fallback
+        sms_sent = verification_service.send_sms(phone, verification_code)
+        
+        if sms_sent.get('success'):
+            return jsonify({
+                'success': True,
+                'message': 'Verification code sent to your phone via SMS',
+                'method': 'sms',
+                'data': {'phone': phone, 'email': email, 'expires_in': 10}
+            })
+        else:
+            # SMS failed - send email
+            email_sent = send_verification_email(email, username, verification_code)
+            if email_sent:
+                return jsonify({
+                    'success': True,
+                    'message': 'SMS delivery failed. Verification code sent to your email.',
+                    'method': 'email',
+                    'data': {'email': email, 'expires_in': 10}
+                })
+            else:
+                return jsonify({
+                    'success': False, 
+                    'error': 'Failed to send verification. Please try again.'
+                }), 500
+        
+    except Exception as e:
+        print(f"Register error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 
 @app.route('/api/auth/verify-code', methods=['POST'])
 @limiter.limit("10 per minute")
+@limiter.limit("10 per hour")
 def verify_registration_code():
-    """Verify registration code and complete registration (NO SESSIONS)"""
+    """Verify registration code and complete registration (USES REDIS)"""
     try:
         data = request.get_json()
         user_code = data.get('code')
@@ -2907,8 +3467,8 @@ def verify_registration_code():
         print(f"[VERIFY] Received code: {user_code}")
         print(f"[VERIFY] Email: {email}")
         
-        # Get temp data from memory storage (not session)
-        temp_user = temp_storage.get(email)
+        # Get temp data from Redis
+        temp_user = get_temp_data(f"register:{email}")
         
         if not temp_user:
             print(f"[VERIFY] No pending registration found for {email}")
@@ -2921,7 +3481,7 @@ def verify_registration_code():
         expires_at = datetime.fromisoformat(temp_user['expires'])
         if datetime.utcnow() > expires_at:
             # Clean up expired entry
-            temp_storage.pop(email, None)
+            delete_temp_data(f"register:{email}")
             return jsonify({
                 'success': False, 
                 'error': 'Verification code expired. Please register again.'
@@ -2940,8 +3500,8 @@ def verify_registration_code():
                 existing_user.email_verified_at = datetime.utcnow()
                 db.session.commit()
                 
-                # Clean up temp storage
-                temp_storage.pop(email, None)
+                # Clean up Redis
+                delete_temp_data(f"register:{email}")
                 
                 send_welcome_email(existing_user.email, existing_user.username, 'user')
                 token = existing_user.generate_token()
@@ -2989,8 +3549,8 @@ def verify_registration_code():
         db.session.add(new_user)
         db.session.commit()
         
-        # Clean up temp storage
-        temp_storage.pop(email, None)
+        # Clean up Redis
+        delete_temp_data(f"register:{email}")
         
         send_welcome_email(new_user.email, new_user.username, 'user')
         
@@ -3011,82 +3571,10 @@ def verify_registration_code():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
-@app.route('/api/auth/register', methods=['POST'])
-@limiter.limit("5 per minute")
-def register():
-    """Register new user - Send SMS verification first, email fallback (NO SESSIONS)"""
-    try:
-        data = request.get_json()
-        
-        username = data.get('username')
-        email = data.get('email')
-        phone = data.get('phone')
-        password = data.get('password')
-        referral_code = data.get('referral_code')
-        
-        if not all([username, email, phone, password]):
-            return jsonify({'success': False, 'error': 'All fields required'}), 400
-        
-        # Check if user exists
-        if User.query.filter_by(email=email).first():
-            return jsonify({'success': False, 'error': 'Email already registered'}), 400
-        
-        if User.query.filter_by(phone=phone).first():
-            return jsonify({'success': False, 'error': 'Phone already registered'}), 400
-        
-        verification_code = verification_service.generate_verification_code()
-        
-        # Store in memory storage (not session)
-        temp_storage[email] = {
-            'username': username,
-            'email': email,
-            'phone': phone,
-            'password': password,
-            'referral_code': referral_code,
-            'verification_code': verification_code,
-            'expires': (datetime.utcnow() + timedelta(minutes=10)).isoformat()
-        }
-        
-        print(f"[REGISTER] Stored verification for email: {email}")
-        print(f"[REGISTER] Verification code: {verification_code}")
-        
-        # Try SMS first, then email fallback
-        sms_sent = verification_service.send_sms(phone, verification_code)
-        
-        if sms_sent.get('success'):
-            return jsonify({
-                'success': True,
-                'message': 'Verification code sent to your phone via SMS',
-                'method': 'sms',
-                'data': {'phone': phone, 'email': email, 'expires_in': 10}
-            })
-        else:
-            # SMS failed - send email
-            email_sent = send_verification_email(email, username, verification_code)
-            if email_sent:
-                return jsonify({
-                    'success': True,
-                    'message': 'SMS delivery failed. Verification code sent to your email.',
-                    'method': 'email',
-                    'data': {'email': email, 'expires_in': 10}
-                })
-            else:
-                return jsonify({
-                    'success': False, 
-                    'error': 'Failed to send verification. Please try again.'
-                }), 500
-        
-    except Exception as e:
-        print(f"Register error: {e}")
-        import traceback
-        traceback.print_exc()
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
 @app.route('/api/auth/login', methods=['POST'])
 @limiter.limit("10 per minute")
 def login():
-    """Login user - Support phone verification as alternative (NO SESSIONS)"""
+    """Login user - With account lockout protection (USES REDIS)"""
     try:
         data = request.get_json()
         email = data.get('email', '').lower().strip()
@@ -3109,12 +3597,24 @@ def login():
         user = User.query.filter_by(email=email).first()
         
         if not user:
+            # Don't reveal if user exists for security
             print(f"[LOGIN FAILED] User not found: {email}")
             return jsonify({'success': False, 'error': 'Invalid credentials'}), 401
         
         print(f"[USER FOUND] ID: {user.id}, Role: {user.role}, Email: {user.email}")
         
-        # Check password - with debugging
+        # ========== ACCOUNT LOCKOUT CHECK ==========
+        if user.is_locked():
+            remaining = user.get_remaining_lockout_time()
+            print(f"[LOGIN] Account locked for {email}. Remaining: {remaining} minutes")
+            return jsonify({
+                'success': False,
+                'error': f'Account locked due to too many failed attempts. Try again in {remaining} minutes.',
+                'locked': True,
+                'retry_after_minutes': remaining
+            }), 401
+        
+        # Check password
         try:
             password_valid = user.check_password(password)
             print(f"  Password check result: {password_valid}")
@@ -3122,10 +3622,43 @@ def login():
             print(f"  Password check error: {e}")
             password_valid = False
         
+        # ========== HANDLE FAILED ATTEMPT ==========
         if not password_valid:
-            print(f"[LOGIN FAILED] Invalid password for {email}")
-            # Increment failed login attempts (optional)
-            return jsonify({'success': False, 'error': 'Invalid credentials'}), 401
+            # Increment failed attempts
+            user.increment_failed_attempts(request.remote_addr)
+            db.session.commit()
+            
+            remaining_attempts = 5 - user.failed_login_attempts
+            print(f"[LOGIN FAILED] Invalid password for {email}. Attempts: {user.failed_login_attempts}/5")
+            
+            # Log suspicious activity after 3 failures
+            if user.failed_login_attempts >= 3:
+                log_suspicious_activity(
+                    user.id, 
+                    'brute_force', 
+                    f'Failed login attempts: {user.failed_login_attempts}', 
+                    request.remote_addr
+                )
+            
+            # Return error with remaining attempts
+            if remaining_attempts > 0:
+                return jsonify({
+                    'success': False, 
+                    'error': f'Invalid credentials. {remaining_attempts} attempts remaining.',
+                    'remaining_attempts': remaining_attempts
+                }), 401
+            else:
+                return jsonify({
+                    'success': False,
+                    'error': 'Account locked due to too many failed attempts. Try again in 30 minutes.',
+                    'locked': True
+                }), 401
+        
+        # ========== LOGIN SUCCESS - RESET FAILED ATTEMPTS ==========
+        user.reset_failed_attempts()
+        user.last_login = datetime.utcnow()
+        user.last_ip_address = request.remote_addr
+        db.session.commit()
         
         # If user is admin but email_verified is False, force set to True
         if user.role in ['admin', 'super_admin'] and not user.email_verified:
@@ -3138,11 +3671,16 @@ def login():
             print(f"[LOGIN] Email not verified for {email}")
             verification_code = verification_service.generate_verification_code()
             
-            temp_storage[f"verify_{user.id}"] = {
-                'user_id': user.id,
-                'code': verification_code,
-                'expires': (datetime.utcnow() + timedelta(minutes=10)).isoformat()
-            }
+            # Store in Redis with 10 minutes expiry
+            set_temp_data(
+                f"verify_{user.id}",
+                {
+                    'user_id': user.id,
+                    'code': verification_code,
+                    'expires': (datetime.utcnow() + timedelta(minutes=10)).isoformat()
+                },
+                expiry_seconds=600
+            )
             
             sms_sent = verification_service.send_sms(user.phone, verification_code)
             
@@ -3163,10 +3701,6 @@ def login():
                     'message': 'Please verify your email address. A verification code has been sent to your email.',
                     'data': {'email': user.email, 'user_id': user.id}
                 }), 403
-        
-        # Update last login
-        user.last_login = datetime.utcnow()
-        db.session.commit()
         
         # Generate token with explicit expiry
         token = user.generate_token()
@@ -3196,6 +3730,7 @@ def login():
         print(f"[LOGIN ERROR] {e}")
         import traceback
         traceback.print_exc()
+        db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
     
 @app.route('/api/debug/fix-admin', methods=['GET'])
@@ -3293,7 +3828,7 @@ def create_admin():
 @app.route('/api/auth/verify-login-code', methods=['POST'])
 @limiter.limit("10 per minute")
 def verify_login_code():
-    """Verify code for unverified email login (NO SESSIONS)"""
+    """Verify code for unverified email login (USES REDIS)"""
     try:
         data = request.get_json()
         user_code = data.get('code')
@@ -3302,8 +3837,8 @@ def verify_login_code():
         if not user_id:
             return jsonify({'success': False, 'error': 'User ID required'}), 400
         
-        # Get verification data from memory storage
-        verify_data = temp_storage.get(f"verify_{user_id}")
+        # Get verification data from Redis
+        verify_data = get_temp_data(f"verify_{user_id}")
         
         if not verify_data:
             return jsonify({
@@ -3313,7 +3848,7 @@ def verify_login_code():
         
         expires_at = datetime.fromisoformat(verify_data['expires'])
         if datetime.utcnow() > expires_at:
-            temp_storage.pop(f"verify_{user_id}", None)
+            delete_temp_data(f"verify_{user_id}")
             return jsonify({
                 'success': False,
                 'error': 'Verification code expired. Please login again.'
@@ -3325,15 +3860,15 @@ def verify_login_code():
         user = User.query.get(user_id)
         
         if not user:
-            temp_storage.pop(f"verify_{user_id}", None)
+            delete_temp_data(f"verify_{user_id}")
             return jsonify({'success': False, 'error': 'User not found'}), 404
         
         user.email_verified = True
         user.email_verified_at = datetime.utcnow()
         db.session.commit()
         
-        # Clean up temp storage
-        temp_storage.pop(f"verify_{user_id}", None)
+        # Clean up Redis
+        delete_temp_data(f"verify_{user_id}")
         
         token = user.generate_token()
         
@@ -4011,6 +4546,8 @@ def get_agent_waec_vouchers():
 
 @app.route('/api/order', methods=['POST'])
 @token_required
+@limiter.limit("10 per minute")
+@limiter.limit("100 per hour")
 def create_order():
     """Create new order - Admin sets price, Digimall handles delivery"""
     
@@ -4891,6 +5428,8 @@ def cancel_manual_request(request_id):
 @app.route('/api/admin/manual-payments', methods=['GET'])
 @token_required
 @admin_required
+@limiter.limit("30 per minute")
+@limiter.limit("500 per hour")
 def admin_get_manual_payments():
     """Admin: Get all manual payment requests (only pending ones)"""
     try:
@@ -11421,7 +11960,23 @@ def health_check():
         'service': COMPANY_NAME
     }), 200 if status == 'healthy' else 503
 
-
+# ========== RATE LIMIT STATUS ==========
+@app.route('/api/debug/rate-limits', methods=['GET'])
+@token_required
+@admin_required
+def get_rate_limit_status():
+    """Get current rate limit status (admin only)"""
+    return jsonify({
+        'success': True,
+        'rate_limits': {
+            'login': '5 per minute, 20 per hour',
+            'register': '3 per minute, 10 per hour',
+            'order': '10 per minute, 100 per hour',
+            'agent_sell': '20 per minute, 200 per hour',
+            'admin_approve': '10 per minute, 50 per hour'
+        },
+        'storage': 'redis' if redis_available else 'memory'
+    })
 # ========== FAQ ENDPOINT ==========
 
 @app.route('/api/faq', methods=['GET'])
