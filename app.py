@@ -57,7 +57,7 @@ from flask_socketio import SocketIO, emit
 from sqlalchemy import func, and_, or_
 from werkzeug.utils import secure_filename
 from flask_session import Session
-
+import secrets
 # ========== LOCAL IMPORTS ==========
 from config import config
 from models import *
@@ -77,7 +77,7 @@ app = Flask(__name__)
 # ========== ENVIRONMENT CONFIGURATION ==========
 env = os.environ.get('FLASK_ENV', 'production')
 app.config.from_object(config[env])
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your-secret-key-here')
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', secrets.token_hex(16))
 
 # ========== UPLOAD CONFIGURATION ==========
 UPLOAD_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'uploads', 'profile_pics')
@@ -3186,6 +3186,7 @@ def resend_registration_code():
 @limiter.limit("10 per hour")
 def forgot_password():
     """Send password reset email"""
+    import secrets
     try:
         data = request.get_json()
         email = data.get('email')
