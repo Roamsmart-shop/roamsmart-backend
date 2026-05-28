@@ -2228,41 +2228,59 @@ def get_current_user():
 
 @app.route('/api/auth/change-password', methods=['POST'])
 @token_required
-@limiter.limit("5 per minute")  # Prevent brute force
+@limiter.limit("5 per minute")
 @limiter.limit("10 per hour")
 def change_password():
     """Change user password"""
+    print("\n" + "="*60)
+    print("[DEBUG] CHANGE PASSWORD ENDPOINT CALLED")
+    print("="*60)
+    
     try:
         data = request.get_json()
+        print(f"[DEBUG] Request data: {data}")
+        print(f"[DEBUG] User: {g.current_user.username} (ID: {g.current_user.id})")
+        
         current_password = data.get('current_password')
         new_password = data.get('new_password')
         
+        print(f"[DEBUG] Current password provided: {'Yes' if current_password else 'No'}")
+        print(f"[DEBUG] New password provided: {'Yes' if new_password else 'No'}")
+        
         if not current_password or not new_password:
+            print("[DEBUG] ERROR: Missing password fields")
             return jsonify({'success': False, 'error': 'Current password and new password are required'}), 400
         
         if len(new_password) < 6:
+            print("[DEBUG] ERROR: New password too short")
             return jsonify({'success': False, 'error': 'New password must be at least 6 characters'}), 400
         
-        if not g.current_user.check_password(current_password):
-            # Log failed attempt
+        # Check current password
+        print("[DEBUG] Checking current password...")
+        password_valid = g.current_user.check_password(current_password)
+        print(f"[DEBUG] Password valid: {password_valid}")
+        
+        if not password_valid:
+            print("[DEBUG] ERROR: Current password incorrect")
             log_activity(g.current_user.id, 'change_password_failed', 'Incorrect current password')
             return jsonify({'success': False, 'error': 'Current password is incorrect'}), 401
         
         # Prevent using same password
         if current_password == new_password:
+            print("[DEBUG] ERROR: New password same as current")
             return jsonify({'success': False, 'error': 'New password must be different from current password'}), 400
         
+        # Update password
+        print("[DEBUG] Setting new password...")
         g.current_user.set_password(new_password)
         db.session.commit()
+        print("[DEBUG] Password changed successfully")
         
         # Log successful change
         log_activity(g.current_user.id, 'change_password', 'Password changed successfully')
         
-        # Optional: Invalidate all other sessions (security best practice)
-        # You might want to add this
-        from app import UserSession
-        UserSession.query.filter(UserSession.user_id == g.current_user.id, UserSession.id != getattr(g, 'current_session_id', None)).delete()
-        db.session.commit()
+        print("[DEBUG] CHANGE PASSWORD SUCCESS")
+        print("="*60 + "\n")
         
         return jsonify({
             'success': True, 
@@ -2270,9 +2288,25 @@ def change_password():
         })
         
     except Exception as e:
-        print(f"Change password error: {e}")
+        print(f"[DEBUG] EXCEPTION: {e}")
+        import traceback
+        traceback.print_exc()
         db.session.rollback()
+        print("="*60 + "\n")
         return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/user/change-password', methods=['POST'])
+@token_required
+@limiter.limit("5 per minute")
+@limiter.limit("10 per hour")
+def change_password_user():
+    """Alias for change-password endpoint"""
+    print("\n" + "="*60)
+    print("[DEBUG] CHANGE PASSWORD (USER ALIAS) CALLED")
+    print(f"[DEBUG] Request path: {request.path}")
+    print("="*60)
+    return change_password()
 
 
 @app.route('/api/auth/2fa/enable', methods=['POST'])
@@ -2571,50 +2605,96 @@ def revoke_all_sessions():
 @token_required
 @limiter.limit("60 per minute")
 def log_activity_endpoint():
-    """Log user activity (USES REDIS for rate limiting)"""
+    """Log user activity"""
+    print("\n" + "="*60)
+    print("[DEBUG] LOG ACTIVITY ENDPOINT CALLED")
+    print("="*60)
+    
     try:
-        data = request.get_json()
+        data = request.get_json() or {}
+        print(f"[DEBUG] Request data: {data}")
+        print(f"[DEBUG] User: {g.current_user.username} (ID: {g.current_user.id})")
+        
         action = data.get('action')
         details = data.get('details')
         
         if not action:
-            return jsonify({'success': False, 'error': 'Action is required'}), 400
+            print("[DEBUG] No action provided - returning success")
+            return jsonify({'success': True, 'message': 'No action provided'})
+        
+        print(f"[DEBUG] Action: {action}")
+        print(f"[DEBUG] Details: {details}")
         
         # Rate limit per action type
-        action_key = f"activity:{g.current_user.id}:{action}"
-        action_count = get_temp_data(action_key)
+        try:
+            action_key = f"activity:{g.current_user.id}:{action}"
+            print(f"[DEBUG] Rate limit key: {action_key}")
+            action_count = get_temp_data(action_key)
+            
+            if action_count:
+                print("[DEBUG] Rate limited - skipping")
+                return jsonify({'success': True, 'message': 'Activity logged (rate limited)'})
+            
+            set_temp_data(action_key, 1, 1)
+            print("[DEBUG] Rate limit set")
+        except Exception as e:
+            print(f"[DEBUG] Rate limiting error: {e}")
         
-        if action_count:
-            # Prevent spam of same action
-            return jsonify({'success': True, 'message': 'Activity logged (rate limited)'})
+        # Log to database
+        try:
+            print("[DEBUG] Logging activity to database...")
+            log_activity(g.current_user.id, action, details)
+            print("[DEBUG] Database log successful")
+        except Exception as e:
+            print(f"[DEBUG] Database log error: {e}")
         
-        # Store in Redis with 1 second expiry for rate limiting
-        set_temp_data(action_key, 1, 1)
+        # Store recent activities in Redis
+        try:
+            print("[DEBUG] Storing in Redis...")
+            recent_key = f"recent_activities:{g.current_user.id}"
+            recent_activities = get_temp_data(recent_key) or []
+            
+            recent_activities.insert(0, {
+                'action': action,
+                'details': details,
+                'timestamp': datetime.utcnow().isoformat()
+            })
+            
+            recent_activities = recent_activities[:50]
+            set_temp_data(recent_key, recent_activities, 86400)
+            print("[DEBUG] Redis storage successful")
+        except Exception as e:
+            print(f"[DEBUG] Redis storage error: {e}")
         
-        # Log to database (you can keep this or move entirely to Redis)
-        log_activity(g.current_user.id, action, details)
-        
-        # Also store recent activities in Redis for quick access
-        recent_key = f"recent_activities:{g.current_user.id}"
-        recent_activities = get_temp_data(recent_key) or []
-        
-        # Add new activity
-        recent_activities.insert(0, {
-            'action': action,
-            'details': details,
-            'timestamp': datetime.utcnow().isoformat()
-        })
-        
-        # Keep only last 50 activities
-        recent_activities = recent_activities[:50]
-        set_temp_data(recent_key, recent_activities, 86400)  # 24 hours
-        
+        print("[DEBUG] LOG ACTIVITY SUCCESS")
+        print("="*60 + "\n")
         return jsonify({'success': True})
         
     except Exception as e:
-        print(f"Log activity error: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
-
+        print(f"[DEBUG] EXCEPTION: {e}")
+        import traceback
+        traceback.print_exc()
+        print("="*60 + "\n")
+        return jsonify({'success': True, 'message': 'Activity noted'})
+    
+def log_activity(user_id, action, details, ip_address=None):
+    """Log user activity to database"""
+    print(f"[DEBUG log_activity] Called for user {user_id}, action: {action}")
+    try:
+        from models import UserSession
+        activity = UserSession(
+            user_id=user_id,
+            action=action,
+            details=details,
+            ip_address=ip_address or request.remote_addr,
+            created_at=datetime.utcnow()
+        )
+        db.session.add(activity)
+        db.session.commit()
+        print(f"[DEBUG log_activity] Successfully logged activity for user {user_id}")
+    except Exception as e:
+        print(f"[DEBUG log_activity] Error: {e}")
+        # Don't raise, just print
 
 @app.route('/api/auth/activities', methods=['GET'])
 @token_required
