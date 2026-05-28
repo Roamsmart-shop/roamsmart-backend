@@ -34,6 +34,12 @@ class User(db.Model):
     is_suspended = db.Column(db.Boolean, default=False)
     is_active = db.Column(db.Boolean, default=True)
     
+    # ========== SECURITY FIELDS (ADD THESE) ==========
+    failed_login_attempts = db.Column(db.Integer, default=0)  # Track failed logins
+    locked_until = db.Column(db.DateTime, nullable=True)      # Account lockout time
+    last_ip_address = db.Column(db.String(45), nullable=True) # Last login IP
+    account_created_ip = db.Column(db.String(45), nullable=True) # Registration IP
+    
     # Wallet
     wallet_balance = db.Column(db.Float, default=0.0)
     
@@ -59,7 +65,7 @@ class User(db.Model):
     this_week_sales = db.Column(db.Float, default=0.0)
     this_month_sales = db.Column(db.Float, default=0.0)
     total_customers = db.Column(db.Integer, default=0)
-    total_sales = db.Column(db.Float, default=0.0)
+    
     # Timestamps
     last_login = db.Column(db.DateTime, default=datetime.utcnow)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
@@ -68,15 +74,12 @@ class User(db.Model):
     email_verification_sent_at = db.Column(db.DateTime, nullable=True)
     email_verified_at = db.Column(db.DateTime, nullable=True)
     referral_data_balance = db.Column(db.Float, default=0.0)
-    # Add to User model
-    redeemed_referral_data = db.Column(db.Float, default=0.0)  # Track total redeemed MB (max 50)
-    avatar_url = db.Column(db.String(500), nullable=True)
+    redeemed_referral_data = db.Column(db.Float, default=0.0)
     reset_token = db.Column(db.String(255), nullable=True)
     reset_token_expiry = db.Column(db.DateTime, nullable=True)
-    wholesale_price = db.Column(db.Numeric(10, 2), default=0)  # What agent paid
-    profit = db.Column(db.Numeric(10, 2), default=0)  # Profit made by agent
-    commission_amount = db.Column(db.Numeric(10, 2), default=0)  # Commission for referrer
-    commission_rate = db.Column(db.Numeric(5, 2), default=0)
+    wholesale_price = db.Column(db.Numeric(10, 2), default=0)
+    profit = db.Column(db.Numeric(10, 2), default=0)
+    commission_amount = db.Column(db.Numeric(10, 2), default=0)
     
     # Relationships
     transactions = db.relationship('Transaction', backref='user', lazy=True)
@@ -88,6 +91,37 @@ class User(db.Model):
     referrals_given = db.relationship('Referral', foreign_keys='Referral.referrer_id', backref='referrer', lazy=True)
     referrals_received = db.relationship('Referral', foreign_keys='Referral.referred_id', backref='referred', lazy=True)
     sessions = db.relationship('UserSession', backref='user', lazy=True)
+    
+    # ========== SECURITY METHODS ==========
+    def increment_failed_attempts(self, ip_address=None):
+        """Increment failed login attempts and lock account if needed"""
+        from datetime import datetime, timedelta
+        self.failed_login_attempts += 1
+        if self.failed_login_attempts >= 5:
+            self.locked_until = datetime.utcnow() + timedelta(minutes=30)
+        if ip_address:
+            self.last_ip_address = ip_address
+        db.session.commit()
+    
+    def reset_failed_attempts(self):
+        """Reset failed login attempts after successful login"""
+        self.failed_login_attempts = 0
+        self.locked_until = None
+        db.session.commit()
+    
+    def is_locked(self):
+        """Check if account is currently locked"""
+        from datetime import datetime
+        if self.locked_until and datetime.utcnow() < self.locked_until:
+            return True
+        return False
+    
+    def get_remaining_lockout_time(self):
+        """Get remaining lockout time in minutes"""
+        from datetime import datetime
+        if self.locked_until and datetime.utcnow() < self.locked_until:
+            return int((self.locked_until - datetime.utcnow()).seconds / 60)
+        return 0
     
     def set_password(self, password):
         """Set password hash"""
@@ -104,13 +138,15 @@ class User(db.Model):
             return False
     
     def generate_token(self):
-        """Generate JWT token"""
+        """Generate JWT token with 2-hour expiry (security improvement)"""
         try:
             payload = {
                 'user_id': self.id,
                 'email': self.email,
                 'role': self.role,
-                'exp': datetime.utcnow() + timedelta(days=7)
+                'exp': datetime.utcnow() + timedelta(hours=2),  # Changed from 7 days to 2 hours
+                'iat': datetime.utcnow(),
+                'jti': str(uuid.uuid4())  # Unique token ID for tracking
             }
             return jwt.encode(payload, current_app.config['SECRET_KEY'], algorithm='HS256')
         except Exception as e:
@@ -132,6 +168,7 @@ class User(db.Model):
             'full_name': self.full_name,
             'avatar': self.avatar_url,
             'kyc_verified': self.kyc_verified,
+            'two_factor_enabled': self.two_factor_enabled,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'last_login': self.last_login.isoformat() if self.last_login else None
         }
@@ -158,7 +195,9 @@ class User(db.Model):
         try:
             payload = jwt.decode(token, current_app.config['SECRET_KEY'], algorithms=['HS256'])
             return User.query.get(payload['user_id'])
-        except:
+        except jwt.ExpiredSignatureError:
+            return None
+        except jwt.InvalidTokenError:
             return None
     
     @staticmethod
@@ -177,7 +216,17 @@ class User(db.Model):
         except jwt.InvalidTokenError:
             return None
 
-
+class SuspiciousActivityLog(db.Model):
+    __tablename__ = 'suspicious_activity_logs'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    activity_type = db.Column(db.String(50), nullable=False)
+    details = db.Column(db.Text)
+    ip_address = db.Column(db.String(45))
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    user = db.relationship('User', foreign_keys=[user_id])
 
 class PendingTransaction(db.Model):
     __tablename__ = 'pending_transactions'
