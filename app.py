@@ -7798,6 +7798,116 @@ def verify_manual_admin_payment_user():
         db.session.rollback()
         return jsonify({'success': False, 'error': 'Failed to submit verification request'}), 500
 
+@app.route('/api/admin/orders/recent', methods=['GET'])
+@token_required
+@admin_required
+def get_admin_recent_orders():
+    """Get recent orders for admin dashboard"""
+    try:
+        # Get limit from query param (default 10)
+        limit = request.args.get('limit', 10, type=int)
+        
+        # Get recent orders
+        recent_orders = Order.query.filter_by(
+            status='completed'
+        ).order_by(Order.created_at.desc()).limit(limit).all()
+        
+        # Format the response
+        orders_data = []
+        for order in recent_orders:
+            # Get customer/agent info
+            user = User.query.get(order.user_id) if order.user_id else None
+            agent = User.query.get(order.agent_id) if order.agent_id else None
+            
+            orders_data.append({
+                'id': order.id,
+                'order_id': order.order_id,
+                'customer_name': order.customer_name or (user.username if user else 'Anonymous'),
+                'customer_phone': order.phone_number,
+                'amount': float(order.amount),
+                'status': order.status,
+                'created_at': order.created_at.isoformat() if order.created_at else None,
+                'network': order.network,
+                'size_gb': order.size_gb,
+                'quantity': order.quantity,
+                'agent_name': agent.username if agent else None,
+                'profit': float(order.profit) if order.profit else 0
+            })
+        
+        return jsonify({
+            'success': True,
+            'data': orders_data
+        })
+        
+    except Exception as e:
+        print(f"Get recent orders error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/admin/total-sales', methods=['GET'])
+@token_required
+@admin_required
+def get_admin_total_sales():
+    """Get total sales breakdown for admin dashboard"""
+    try:
+        from datetime import datetime, timedelta
+        
+        today = datetime.utcnow().date()
+        today_start = datetime.combine(today, datetime.min.time())
+        
+        # Today's sales
+        today_sales = db.session.query(db.func.sum(Order.amount)).filter(
+            Order.status == 'completed',
+            Order.created_at >= today_start
+        ).scalar() or 0
+        
+        # This week
+        week_start = today - timedelta(days=today.weekday())
+        week_start_dt = datetime.combine(week_start, datetime.min.time())
+        week_sales = db.session.query(db.func.sum(Order.amount)).filter(
+            Order.status == 'completed',
+            Order.created_at >= week_start_dt
+        ).scalar() or 0
+        
+        # This month
+        month_start = today.replace(day=1)
+        month_start_dt = datetime.combine(month_start, datetime.min.time())
+        month_sales = db.session.query(db.func.sum(Order.amount)).filter(
+            Order.status == 'completed',
+            Order.created_at >= month_start_dt
+        ).scalar() or 0
+        
+        # This year
+        year_start = today.replace(month=1, day=1)
+        year_start_dt = datetime.combine(year_start, datetime.min.time())
+        year_sales = db.session.query(db.func.sum(Order.amount)).filter(
+            Order.status == 'completed',
+            Order.created_at >= year_start_dt
+        ).scalar() or 0
+        
+        # All time
+        all_time = db.session.query(db.func.sum(Order.amount)).filter(
+            Order.status == 'completed'
+        ).scalar() or 0
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'currency': 'GHS',
+                'today_sales': float(today_sales),
+                'week_sales': float(week_sales),
+                'month_sales': float(month_sales),
+                'year_sales': float(year_sales),
+                'total_sales': float(all_time)
+            }
+        })
+        
+    except Exception as e:
+        print(f"Get total sales error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/wallet/manual/requests', methods=['GET'])
 @token_required
@@ -8504,40 +8614,119 @@ def get_agentadmin_customers():
 def get_amin_stats():
     """Get admin dashboard statistics"""
     try:
+        from datetime import datetime, timedelta
+        
+        today = datetime.utcnow().date()
+        today_start = datetime.combine(today, datetime.min.time())
+        
+        print(f"\n=== STATS CALCULATION ===")
+        print(f"Current UTC time: {datetime.utcnow()}")
+        print(f"Today's date: {today}")
+        print(f"Today start: {today_start}")
+        
+        # Get all completed orders for debugging
+        all_completed = Order.query.filter_by(status='completed').all()
+        print(f"Total completed orders in DB: {len(all_completed)}")
+        
+        for order in all_completed:
+            print(f"  Order: {order.order_id}, Amount: ₵{order.amount}, Created: {order.created_at}")
+        
+        # Today's sales
+        today_sales = db.session.query(db.func.sum(Order.amount)).filter(
+            Order.status == 'completed',
+            Order.created_at >= today_start
+        ).scalar() or 0
+        print(f"Today's sales query result: ₵{today_sales}")
+        
+        # Today's orders count
+        today_orders = Order.query.filter(
+            Order.status == 'completed',
+            Order.created_at >= today_start
+        ).count()
+        print(f"Today's orders count: {today_orders}")
+        
+        # This week sales
+        week_start = today - timedelta(days=today.weekday())
+        week_start_dt = datetime.combine(week_start, datetime.min.time())
+        week_sales = db.session.query(db.func.sum(Order.amount)).filter(
+            Order.status == 'completed',
+            Order.created_at >= week_start_dt
+        ).scalar() or 0
+        print(f"Week sales (from {week_start}): ₵{week_sales}")
+        
+        # This month sales
+        month_start = today.replace(day=1)
+        month_start_dt = datetime.combine(month_start, datetime.min.time())
+        month_sales = db.session.query(db.func.sum(Order.amount)).filter(
+            Order.status == 'completed',
+            Order.created_at >= month_start_dt
+        ).scalar() or 0
+        print(f"Month sales (from {month_start}): ₵{month_sales}")
+        
+        # This year sales
+        year_start = today.replace(month=1, day=1)
+        year_start_dt = datetime.combine(year_start, datetime.min.time())
+        year_sales = db.session.query(db.func.sum(Order.amount)).filter(
+            Order.status == 'completed',
+            Order.created_at >= year_start_dt
+        ).scalar() or 0
+        print(f"Year sales (from {year_start}): ₵{year_sales}")
+        
+        # All time sales
+        all_time_sales = db.session.query(db.func.sum(Order.amount)).filter(
+            Order.status == 'completed'
+        ).scalar() or 0
+        print(f"All time sales: ₵{all_time_sales}")
+        
+        # Other stats
         total_users = User.query.count()
         total_agents = User.query.filter_by(is_agent=True, agent_approved=True).count()
         pending_agents = AgentRequest.query.filter_by(status='pending').count()
         total_orders = Order.query.count()
-        total_revenue = db.session.query(db.func.sum(Order.amount)).filter_by(status='completed').scalar() or 0
         pending_manual = ManualPayment.query.filter_by(status='pending_verification').count()
         pending_withdrawals = Transaction.query.filter_by(type='withdrawal', status='pending').count()
         
-        # Get recent orders with user info
+        # Get recent orders
         recent_orders = Order.query.order_by(Order.created_at.desc()).limit(10).all()
         
         return jsonify({
             'success': True,
             'data': {
+                # Sales data
+                'today_sales': float(today_sales),
+                'today_orders': today_orders,
+                'week_sales': float(week_sales),
+                'month_sales': float(month_sales),
+                'year_sales': float(year_sales),
+                'total_revenue': float(all_time_sales),
+                
+                # User stats
                 'total_users': total_users,
                 'total_agents': total_agents,
                 'pending_agents': pending_agents,
                 'total_orders': total_orders,
-                'total_revenue': float(total_revenue),
+                
+                # Payment stats
                 'pending_manual': pending_manual,
                 'pending_withdrawals': pending_withdrawals,
+                
+                # Recent orders
                 'recent_orders': [{
                     'order_id': o.order_id,
                     'user': User.query.get(o.user_id).username if o.user_id else 'N/A',
                     'amount': float(o.amount),
                     'status': o.status,
-                    'date': o.created_at.strftime('%Y-%m-%d')
+                    'date': o.created_at.strftime('%Y-%m-%d') if o.created_at else 'Unknown'
                 } for o in recent_orders]
             }
         })
+        
     except Exception as e:
         print(f"Get admin stats error: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': 'Failed to fetch Roamsmart stats'}), 500
-
+    
 
 @app.route('/api/admin/users', methods=['GET'])
 @token_required
