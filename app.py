@@ -6247,10 +6247,9 @@ def admin_update_role(admin_id):
 @app.route('/api/agent/apply', methods=['POST'])
 @token_required
 def apply_agent():
-    """Apply to become an agent"""
+    """Apply to become an agent - FREE now (no payment required)"""
     try:
         data = request.get_json() or request.form
-        payment_method = data.get('payment_method', 'mobile_money')
         
         # Check if already agent
         if g.current_user.is_agent and g.current_user.agent_approved:
@@ -6265,163 +6264,155 @@ def apply_agent():
         if existing:
             return jsonify({'success': False, 'error': 'You already have a pending application'}), 400
         
-        # Agent registration fee
-        amount = 100.00  # GHS 100 registration fee
+        # ========== FREE REGISTRATION - NO PAYMENT REQUIRED ==========
+        # Auto-approve since it's free
+        g.current_user.is_agent = True
+        g.current_user.agent_approved = True
+        g.current_user.agent_tier = 'Bronze'
+        g.current_user.commission_rate = 10
+        db.session.commit()
         
+        # Create agent request record for tracking (already approved)
+        reference = f"AGENT-{uuid.uuid4().hex[:8].upper()}"
         agent_request = AgentRequest(
             user_id=g.current_user.id,
-            amount=amount,
-            payment_method=payment_method,
-            status='pending',
+            amount=0,  # FREE
+            payment_method='free',
+            status='approved',
+            payment_reference=reference,
             created_at=datetime.utcnow()
         )
+        db.session.add(agent_request)
+        db.session.commit()
         
-        if payment_method == 'mobile_money':
-            reference = f"AGENT-{uuid.uuid4().hex[:8].upper()}"
-            agent_request.payment_reference = reference
-            agent_request.payment_details = {
-                'mobile_money_number': COMPANY_PHONE,
-                'recipient': COMPANY_NAME,
-                'reference': reference,
-                'amount': amount
+        # ========== SEND CONFIRMATION TO USER (Email) ==========
+        user_email_html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+                body {{ font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.6; }}
+                .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+                .header {{ background: linear-gradient(135deg, #8B0000, #D2691E); color: white; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }}
+                .content {{ padding: 30px; background: #f9f9f9; border-radius: 0 0 10px 10px; }}
+                .feature-box {{ background: white; padding: 15px; border-radius: 8px; margin: 15px 0; border-left: 4px solid #28a745; }}
+                .button {{ display: inline-block; background: #8B0000; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; }}
+                .footer {{ text-align: center; padding: 20px; color: #666; font-size: 12px; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h2>🎉 Welcome to the Roamsmart Agent Program!</h2>
+                    <p>You're now an official Roamsmart Agent</p>
+                </div>
+                <div class="content">
+                    <p>Dear <strong>{g.current_user.username}</strong>,</p>
+                    <p>Congratulations! Your application to become a Roamsmart Agent has been <strong style="color: #28a745;">APPROVED</strong> - and it was completely FREE!</p>
+                    
+                    <div class="feature-box">
+                        <h3>✨ What you get as a Roamsmart Agent:</h3>
+                        <ul>
+                            <li>💰 <strong>Up to 25% commission</strong> on every data sale</li>
+                            <li>🏪 <strong>Your own branded store page</strong> to sell to customers</li>
+                            <li>📊 <strong>Access to wholesale prices</strong> on all networks</li>
+                            <li>💸 <strong>Instant withdrawals</strong> of your earnings</li>
+                            <li>📱 <strong>Sell via WhatsApp</strong> - share product links directly</li>
+                            <li>🎓 <strong>Agent training and 24/7 support</strong></li>
+                        </ul>
+                    </div>
+                    
+                    <div style="text-align: center; margin: 30px 0;">
+                        <a href="{COMPANY_WEBSITE}/agent" class="button">🚀 Start Selling Now</a>
+                    </div>
+                    
+                    <div class="feature-box">
+                        <h3>📋 Quick Start Guide:</h3>
+                        <ol>
+                            <li>Log into your Roamsmart agent dashboard</li>
+                            <li>Set up your store with your branding</li>
+                            <li>Share your store link with customers</li>
+                            <li>Start earning commission on every sale!</li>
+                        </ol>
+                    </div>
+                    
+                    <p>Need help? Contact our support team:</p>
+                    <p>📞 Call/WhatsApp: <strong>{COMPANY_PHONE}</strong><br>
+                    📧 Email: <strong>{COMPANY_EMAIL}</strong></p>
+                </div>
+                <div class="footer">
+                    <p>© 2025 {COMPANY_NAME}. All rights reserved.</p>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        
+        send_email(g.current_user.email, f"🎉 Welcome to Roamsmart Agent Program! - {COMPANY_NAME}", user_email_html)
+        
+        # ========== SEND NOTIFICATION TO ADMIN ==========
+        admin_email = COMPANY_ADMIN_EMAIL
+        
+        admin_email_html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+                body {{ font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.6; }}
+                .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+                .header {{ background: linear-gradient(135deg, #8B0000, #D2691E); color: white; padding: 30px; text-align: center; }}
+                .content {{ padding: 30px; background: #f9f9f9; }}
+                .info-box {{ background: white; padding: 15px; border-radius: 8px; margin: 15px 0; border-left: 4px solid #28a745; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h2>🆕 New Agent Registration - {COMPANY_NAME}</h2>
+                    <p>FREE Registration</p>
+                </div>
+                <div class="content">
+                    <p>Hello Admin,</p>
+                    <p>A new user has successfully registered as a Roamsmart Agent (Free Registration).</p>
+                    
+                    <div class="info-box">
+                        <h3>Agent Details:</h3>
+                        <ul>
+                            <li><strong>Name:</strong> {g.current_user.username}</li>
+                            <li><strong>Email:</strong> {g.current_user.email}</li>
+                            <li><strong>Phone:</strong> {g.current_user.phone}</li>
+                            <li><strong>Agent Tier:</strong> Bronze</li>
+                            <li><strong>Commission Rate:</strong> 10%</li>
+                            <li><strong>Registered:</strong> {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}</li>
+                        </ul>
+                    </div>
+                </div>
+                <div class="footer">
+                    <p>© 2025 {COMPANY_NAME}. All rights reserved.</p>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        
+        send_email(admin_email, f"New Free Agent Registration - {COMPANY_NAME}", admin_email_html)
+        
+        return jsonify({
+            'success': True,
+            'message': '🎉 Congratulations! You are now a Roamsmart Agent! Start selling and earning commission.',
+            'data': {
+                'agent_tier': 'Bronze',
+                'commission_rate': 10,
+                'is_agent': True
             }
-            
-            db.session.add(agent_request)
-            db.session.commit()
-            
-            # ========== SEND CONFIRMATION TO USER (Email ONLY) ==========
-            user_email_html = f"""
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <style>
-                    body {{ font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.6; }}
-                    .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
-                    .header {{ background: linear-gradient(135deg, #8B0000, #D2691E); color: white; padding: 30px; text-align: center; }}
-                    .content {{ padding: 30px; background: #f9f9f9; }}
-                    .button {{ display: inline-block; background: #8B0000; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; }}
-                    .footer {{ text-align: center; padding: 20px; color: #666; font-size: 12px; }}
-                </style>
-            </head>
-            <body>
-                <div class="container">
-                    <div class="header">
-                        <h2>Agent Application Received - {COMPANY_NAME}</h2>
-                    </div>
-                    <div class="content">
-                        <p>Dear <strong>{g.current_user.username}</strong>,</p>
-                        <p>Your agent application has been submitted successfully!</p>
-                        
-                        <h3>Application Details:</h3>
-                        <ul>
-                            <li><strong>Application ID:</strong> {reference}</li>
-                            <li><strong>Registration Fee:</strong> GHS {amount:.2f}</li>
-                            <li><strong>Status:</strong> Pending Payment</li>
-                        </ul>
-                        
-                        <h3>Payment Instructions:</h3>
-                        <ul>
-                            <li>Send <strong>GHS {amount:.2f}</strong> to <strong>{COMPANY_PHONE}</strong></li>
-                            <li>Use reference: <strong>{reference}</strong></li>
-                            <li>After payment, upload proof in your dashboard</li>
-                        </ul>
-                        
-                        <p>Once payment is verified, your agent account will be activated and you'll receive a confirmation email.</p>
-                        
-                        <div style="text-align: center; margin: 30px 0;">
-                            <a href="{COMPANY_WEBSITE}/dashboard" class="button">Go to Dashboard</a>
-                        </div>
-                        
-                        <p>Need help? Contact us: <strong>{COMPANY_PHONE}</strong></p>
-                    </div>
-                    <div class="footer">
-                        <p>© 2025 {COMPANY_NAME}. All rights reserved.</p>
-                    </div>
-                </div>
-            </body>
-            </html>
-            """
-            
-            send_email(g.current_user.email, f"Agent Application Submitted - {COMPANY_NAME}", user_email_html)
-            
-            # ========== SEND NOTIFICATION TO ADMIN (Email ONLY) ==========
-            admin_email = COMPANY_ADMIN_EMAIL
-            admin_name = "Roamsmart Admin"
-            
-            admin_email_html = f"""
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <style>
-                    body {{ font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.6; }}
-                    .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
-                    .header {{ background: linear-gradient(135deg, #8B0000, #D2691E); color: white; padding: 30px; text-align: center; }}
-                    .content {{ padding: 30px; background: #f9f9f9; }}
-                    .info-box {{ background: white; padding: 15px; border-radius: 8px; margin: 15px 0; border-left: 4px solid #8B0000; }}
-                    .button {{ display: inline-block; background: #8B0000; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; }}
-                </style>
-            </head>
-            <body>
-                <div class="container">
-                    <div class="header">
-                        <h2>🆕 New Agent Application - {COMPANY_NAME}</h2>
-                    </div>
-                    <div class="content">
-                        <p>Hello <strong>{admin_name}</strong>,</p>
-                        <p>A new agent application has been submitted and requires your attention.</p>
-                        
-                        <div class="info-box">
-                            <h3>Applicant Details:</h3>
-                            <ul>
-                                <li><strong>Name:</strong> {g.current_user.username}</li>
-                                <li><strong>Email:</strong> {g.current_user.email}</li>
-                                <li><strong>Phone:</strong> {g.current_user.phone}</li>
-                                <li><strong>Joined:</strong> {g.current_user.created_at.strftime('%Y-%m-%d') if g.current_user.created_at else 'N/A'}</li>
-                            </ul>
-                        </div>
-                        
-                        <div class="info-box">
-                            <h3>Application Details:</h3>
-                            <ul>
-                                <li><strong>Reference:</strong> {reference}</li>
-                                <li><strong>Amount:</strong> GHS {amount:.2f}</li>
-                                <li><strong>Payment Method:</strong> Mobile Money</li>
-                                <li><strong>Submitted:</strong> {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}</li>
-                            </ul>
-                        </div>
-                        
-                        <div style="text-align: center; margin: 30px 0;">
-                            <a href="{COMPANY_WEBSITE}/admin/agent-requests" class="button">Review Application</a>
-                        </div>
-                    </div>
-                    <div class="footer">
-                        <p>© 2025 {COMPANY_NAME}. All rights reserved.</p>
-                    </div>
-                </div>
-            </body>
-            </html>
-            """
-            
-            send_email(admin_email, f"New Agent Application - {COMPANY_NAME}", admin_email_html)
-            
-            return jsonify({
-                'success': True,
-                'message': 'Application submitted! Please make payment to complete registration.',
-                'data': {
-                    'request_id': agent_request.id,
-                    'reference': reference,
-                    'amount': amount,
-                    'instructions': agent_request.payment_details
-                }
-            })
-        
-        return jsonify({'success': False, 'error': 'Invalid payment method'}), 400
+        })
         
     except Exception as e:
         print(f"Apply agent error: {e}")
+        import traceback
+        traceback.print_exc()
         db.session.rollback()
-        return jsonify({'success': False, 'error': 'Failed to submit application'}), 500
-
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/agent/dashboard', methods=['GET'])
 @token_required
