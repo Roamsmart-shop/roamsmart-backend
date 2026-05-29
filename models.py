@@ -276,12 +276,17 @@ class Order(db.Model):
     agent_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     
     # Order Details
-    type = db.Column(db.String(20), default='data')
+    type = db.Column(db.String(20), default='data')  # 'data', 'bill_payment', 'waec'
     network = db.Column(db.String(20), nullable=True)
     size_gb = db.Column(db.Float, nullable=True)
     quantity = db.Column(db.Integer, default=1)
     phone_number = db.Column(db.String(20), nullable=True)
     customer_name = db.Column(db.String(100), nullable=True)
+    
+    # ========== BILL PAYMENT FIELDS (ADD THESE) ==========
+    biller_code = db.Column(db.String(20), nullable=True)  # ECG, GWCL, DSTV, etc.
+    biller_name = db.Column(db.String(100), nullable=True)
+    account_number = db.Column(db.String(50), nullable=True)
     
     # Payment and Costs
     amount = db.Column(db.Float, nullable=False)  # Customer paid amount
@@ -291,7 +296,7 @@ class Order(db.Model):
     payment_reference = db.Column(db.String(100), nullable=True)
     
     # Delivery Provider
-    provider = db.Column(db.String(50), nullable=True)  # 'digimall', 'africastalking', etc.
+    provider = db.Column(db.String(50), nullable=True)  # 'digimall', 'africastalking', 'hubtel', etc.
     provider_order_id = db.Column(db.String(100), nullable=True)  # Order ID from provider
     provider_reference = db.Column(db.String(100), nullable=True)  # Reference from provider
     provider_cost = db.Column(db.Float, default=0.0)  # Cost charged by provider
@@ -319,6 +324,9 @@ class Order(db.Model):
             'quantity': self.quantity,
             'phone': self.phone_number,
             'customer_name': self.customer_name,
+            'biller_code': self.biller_code,
+            'biller_name': self.biller_name,
+            'account_number': self.account_number,
             'amount': self.amount,
             'cost': self.cost,
             'profit': self.profit,
@@ -329,6 +337,26 @@ class Order(db.Model):
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'date': self.created_at.strftime('%Y-%m-%d %H:%M:%S') if self.created_at else None
         }
+
+class RecurringBill(db.Model):
+    __tablename__ = 'recurring_bills'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    biller_code = db.Column(db.String(20), nullable=False)
+    biller_name = db.Column(db.String(100), nullable=False)
+    account_number = db.Column(db.String(50), nullable=False)
+    customer_name = db.Column(db.String(100), nullable=True)
+    frequency = db.Column(db.String(20), default='monthly')
+    auto_pay = db.Column(db.Boolean, default=True)
+    max_amount = db.Column(db.Float, default=0)
+    enabled = db.Column(db.Boolean, default=True)  
+    next_due_date = db.Column(db.DateTime, nullable=True)
+    last_paid_date = db.Column(db.DateTime, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    user = db.relationship('User', backref='recurring_bills')
 
 class DeliveryLog(db.Model):
     __tablename__ = 'delivery_logs'

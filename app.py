@@ -2953,18 +2953,11 @@ def admin_total_sales():
         print(f"Error getting total sales: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
-@app.route('/api/wallet/pending-topups', methods=['GET', 'OPTIONS'])
+
+@app.route('/api/wallet/pending-topups', methods=['GET'])
 @token_required
 def get_pending_topups():
     """Get pending topups for the current user"""
-    # Handle OPTIONS preflight request
-    if request.method == 'OPTIONS':
-        response = jsonify({'success': True})
-        response.headers.add('Access-Control-Allow-Origin', '*')
-        response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization')
-        response.headers.add('Access-Control-Allow-Methods', 'GET, OPTIONS')
-        return response
-    
     try:
         # Query pending transactions from the database
         pending = PendingTransaction.query.filter_by(
@@ -4125,6 +4118,552 @@ def send_order_confirmation_email(user, order_id, network, size_gb, phone, amoun
     except Exception as e:
         print(f"Send order confirmation email error: {e}")
 
+
+# ========== HUBTEL BILL PAYMENT SERVICE ==========
+class HubtelService:
+    def __init__(self):
+        self.client_id = os.environ.get('HUBTEL_CLIENT_ID')
+        self.client_secret = os.environ.get('HUBTEL_CLIENT_SECRET')
+        self.base_url = os.environ.get('HUBTEL_BASE_URL', 'https://api.hubtel.com/v1')
+        
+        if not self.client_id or not self.client_secret:
+            print("[Hubtel] Warning: API credentials not configured")
+        
+        # Generate Basic Auth token
+        auth_string = f"{self.client_id}:{self.client_secret}"
+        self.auth_token = base64.b64encode(auth_string.encode()).decode()
+        
+        self.headers = {
+            'Authorization': f'Basic {self.auth_token}',
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+        }
+    
+    def validate_bill_account(self, biller_code, account_number):
+        """Validate customer account for bill payment"""
+        try:
+            response = requests.post(
+                f"{self.base_url}/bill/validate",
+                json={
+                    'billerCode': biller_code,
+                    'accountNumber': account_number
+                },
+                headers=self.headers,
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                return {
+                    'success': True,
+                    'customer_name': data.get('customerName'),
+                    'customer_phone': data.get('customerPhone'),
+                    'customer_email': data.get('customerEmail'),
+                    'biller_name': data.get('billerName'),
+                    'amount_due': data.get('amountDue', 0),
+                    'minimum_amount': data.get('minimumAmount', 0)
+                }
+            else:
+                return {
+                    'success': False,
+                    'error': f'Validation failed: {response.text}'
+                }
+        except requests.exceptions.Timeout:
+            return {'success': False, 'error': 'Hubtel API timeout'}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    def get_bill_amount(self, biller_code, account_number):
+        """Get bill amount due"""
+        try:
+            response = requests.post(
+                f"{self.base_url}/bill/inquiry",
+                json={
+                    'billerCode': biller_code,
+                    'accountNumber': account_number
+                },
+                headers=self.headers,
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                return {
+                    'success': True,
+                    'amount': data.get('amount', 0),
+                    'due_date': data.get('dueDate'),
+                    'reference': data.get('reference')
+                }
+            else:
+                return {
+                    'success': False,
+                    'error': f'Inquiry failed: {response.text}'
+                }
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    def pay_bill(self, biller_code, account_number, amount, customer_name, customer_phone, customer_email=None, reference=None):
+        """Process bill payment"""
+        try:
+            import uuid
+            if not reference:
+                reference = f"HUBTEL-{uuid.uuid4().hex[:12].upper()}"
+            
+            payload = {
+                'billerCode': biller_code,
+                'accountNumber': account_number,
+                'amount': amount,
+                'customerName': customer_name,
+                'customerPhone': customer_phone,
+                'reference': reference,
+                'callbackUrl': f"{os.environ.get('BASE_URL', 'https://roamsmart-backend-production.up.railway.app')}/api/webhooks/hubtel"
+            }
+            
+            if customer_email:
+                payload['customerEmail'] = customer_email
+            
+            response = requests.post(
+                f"{self.base_url}/bill/pay",
+                json=payload,
+                headers=self.headers,
+                timeout=30
+            )
+            
+            if response.status_code in [200, 201]:
+                data = response.json()
+                return {
+                    'success': True,
+                    'transaction_id': data.get('transactionId'),
+                    'reference': reference,
+                    'status': data.get('status', 'completed')
+                }
+            else:
+                return {
+                    'success': False,
+                    'error': f'Payment failed: {response.text}'
+                }
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    def check_transaction_status(self, transaction_id):
+        """Check transaction status"""
+        try:
+            response = requests.get(
+                f"{self.base_url}/bill/status/{transaction_id}",
+                headers=self.headers,
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                return {
+                    'success': True,
+                    'status': data.get('status'),
+                    'amount': data.get('amount'),
+                    'reference': data.get('reference')
+                }
+            else:
+                return {'success': False, 'error': f'Status check failed: {response.text}'}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+
+# ========== HUBTEL BILL PAYMENT ENDPOINTS ==========
+
+@app.route('/api/user/bills/history', methods=['GET'])
+@token_required
+def get_user_bill_history():
+    """Get user's bill payment history"""
+    try:
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('limit', 20, type=int)
+        
+        bills = Order.query.filter_by(
+            user_id=g.current_user.id,
+            type='bill_payment'
+        ).order_by(Order.created_at.desc()).paginate(
+            page=page, per_page=per_page, error_out=False
+        )
+        
+        return jsonify({
+            'success': True,
+            'data': [{
+                'id': b.id,
+                'order_id': b.order_id,
+                'biller_code': b.biller_code,
+                'biller_name': b.biller_name,
+                'account_number': b.account_number,
+                'amount': float(b.amount),
+                'status': b.status,
+                'reference': b.provider_reference,
+                'created_at': b.created_at.isoformat()
+            } for b in bills.items],
+            'total': bills.total,
+            'page': page,
+            'total_pages': bills.pages
+        })
+        
+    except Exception as e:
+        print(f"Error fetching bill history: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/bills/validate', methods=['POST'])
+@token_required
+def validate_bill_account():
+    """Validate bill account with Hubtel API"""
+    try:
+        data = request.get_json()
+        biller_code = data.get('biller_code')
+        account_number = data.get('account_number')
+        
+        if not biller_code or not account_number:
+            return jsonify({'success': False, 'error': 'Biller code and account number required'}), 400
+        
+        hubtel = HubtelService()
+        result = hubtel.validate_bill_account(biller_code, account_number)
+        
+        if result.get('success'):
+            return jsonify({
+                'success': True,
+                'data': {
+                    'customer_name': result.get('customer_name'),
+                    'customer_phone': result.get('customer_phone'),
+                    'customer_email': result.get('customer_email'),
+                    'biller_name': result.get('biller_name'),
+                    'amount_due': result.get('amount_due'),
+                    'minimum_amount': result.get('minimum_amount')
+                }
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'error': result.get('error', 'Account validation failed')
+            }), 400
+        
+    except Exception as e:
+        print(f"Bill validation error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/bills/inquiry', methods=['POST'])
+@token_required
+def bill_inquiry():
+    """Get bill amount due from Hubtel"""
+    try:
+        data = request.get_json()
+        biller_code = data.get('biller_code')
+        account_number = data.get('account_number')
+        
+        if not biller_code or not account_number:
+            return jsonify({'success': False, 'error': 'Biller code and account number required'}), 400
+        
+        hubtel = HubtelService()
+        result = hubtel.get_bill_amount(biller_code, account_number)
+        
+        if result.get('success'):
+            return jsonify({
+                'success': True,
+                'data': {
+                    'amount': result.get('amount'),
+                    'due_date': result.get('due_date'),
+                    'reference': result.get('reference')
+                }
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'error': result.get('error', 'Could not fetch bill amount')
+            }), 400
+        
+    except Exception as e:
+        print(f"Bill inquiry error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/bills/pay', methods=['POST'])
+@token_required
+def pay_bill():
+    """Process bill payment via Hubtel"""
+    try:
+        import uuid
+        data = request.get_json()
+        biller_code = data.get('biller_code')
+        account_number = data.get('account_number')
+        amount = data.get('amount')
+        customer_name = data.get('customer_name')
+        customer_phone = data.get('customer_phone')
+        customer_email = data.get('customer_email')
+        
+        if not all([biller_code, account_number, amount, customer_name, customer_phone]):
+            return jsonify({'success': False, 'error': 'Missing required fields'}), 400
+        
+        amount = float(amount)
+        
+        # Check wallet balance
+        if g.current_user.wallet_balance < amount:
+            return jsonify({
+                'success': False,
+                'error': f'Insufficient balance. Need GHS {amount:.2f}. Your balance: GHS {g.current_user.wallet_balance:.2f}'
+            }), 400
+        
+        # Call Hubtel to process payment
+        hubtel = HubtelService()
+        payment_result = hubtel.pay_bill(
+            biller_code=biller_code,
+            account_number=account_number,
+            amount=amount,
+            customer_name=customer_name,
+            customer_phone=customer_phone,
+            customer_email=customer_email
+        )
+        
+        if not payment_result.get('success'):
+            return jsonify({
+                'success': False,
+                'error': payment_result.get('error', 'Payment failed')
+            }), 400
+        
+        # Deduct from wallet
+        balance_before = g.current_user.wallet_balance
+        g.current_user.wallet_balance -= amount
+        
+        # Generate order ID
+        order_id = f"BILL-{uuid.uuid4().hex[:8].upper()}"
+        
+        # Map biller codes to names
+        biller_names = {
+            'ECG': 'ECG Electricity',
+            'GWCL': 'Ghana Water',
+            'DSTV': 'DSTV',
+            'GOTV': 'GoTV',
+            'STARTIMES': 'StarTimes'
+        }
+        
+        # Create order record
+        order = Order(
+            user_id=g.current_user.id,
+            order_id=order_id,
+            type='bill_payment',
+            biller_code=biller_code,
+            biller_name=biller_names.get(biller_code, biller_code),
+            account_number=account_number,
+            customer_name=customer_name,
+            phone_number=customer_phone,
+            amount=amount,
+            status='completed',
+            payment_method='wallet',
+            provider='hubtel',
+            provider_reference=payment_result.get('reference'),
+            provider_order_id=payment_result.get('transaction_id'),
+            completed_at=datetime.utcnow(),
+            created_at=datetime.utcnow()
+        )
+        db.session.add(order)
+        
+        # Create transaction record
+        transaction = Transaction(
+            user_id=g.current_user.id,
+            type='bill_payment',
+            amount=amount,
+            balance_before=balance_before,
+            balance_after=g.current_user.wallet_balance,
+            description=f'Bill payment: {biller_names.get(biller_code, biller_code)} - {account_number}',
+            reference=order_id,
+            status='completed'
+        )
+        db.session.add(transaction)
+        
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': f'✅ Bill payment of GHS {amount:.2f} successful!',
+            'data': {
+                'order_id': order_id,
+                'reference': payment_result.get('reference'),
+                'transaction_id': payment_result.get('transaction_id'),
+                'new_balance': g.current_user.wallet_balance
+            }
+        })
+        
+    except Exception as e:
+        print(f"Bill payment error: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/webhooks/hubtel', methods=['POST'])
+def hubtel_webhook():
+    """Handle Hubtel webhook notifications"""
+    try:
+        data = request.get_json()
+        print(f"[Hubtel Webhook] Received: {data}")
+        
+        transaction_id = data.get('transactionId')
+        status = data.get('status')
+        reference = data.get('reference')
+        
+        if reference:
+            order = Order.query.filter_by(provider_reference=reference).first()
+            if order:
+                order.status = 'completed' if status == 'success' else 'failed'
+                if status == 'success':
+                    order.completed_at = datetime.utcnow()
+                db.session.commit()
+                print(f"[Hubtel] Updated order {order.id} status to {status}")
+        
+        return jsonify({'success': True}), 200
+    except Exception as e:
+        print(f"[Hubtel Webhook Error] {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+# ========== RECURRING BILLS ENDPOINTS ==========
+
+@app.route('/api/user/bills/recurring', methods=['GET'])
+@token_required
+def get_user_recurring_bills():
+    """Get user's recurring bills"""
+    try:
+        
+        recurring_bills = RecurringBill.query.filter_by(
+            user_id=g.current_user.id,
+            enabled=True  
+        ).order_by(RecurringBill.created_at.desc()).all()
+        
+        return jsonify({
+            'success': True,
+            'data': [{
+                'id': r.id,
+                'biller_code': r.biller_code,
+                'biller_name': r.biller_name,
+                'account_number': r.account_number,
+                'customer_name': r.customer_name,
+                'frequency': r.frequency,
+                'max_amount': float(r.max_amount) if r.max_amount else 0,
+                'auto_pay': r.auto_pay,
+                'enabled': r.enabled,
+                'next_due_date': r.next_due_date.isoformat() if r.next_due_date else None,
+                'created_at': r.created_at.isoformat()
+            } for r in recurring_bills]
+        })
+        
+    except Exception as e:
+        print(f"Error fetching recurring bills: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/user/bills/recurring/add', methods=['POST'])
+@token_required
+def add_recurring_bill():
+    """Add a recurring bill"""
+    try:
+        data = request.get_json()
+        
+        biller_code = data.get('biller_code')
+        biller_name = data.get('biller_name')
+        account_number = data.get('account_number')
+        customer_name = data.get('customer_name')
+        frequency = data.get('frequency', 'monthly')
+        auto_pay = data.get('auto_pay', True)
+        max_amount = data.get('max_amount', 0)
+        
+        if not biller_code or not account_number:
+            return jsonify({'success': False, 'error': 'Biller code and account number required'}), 400
+        
+        # Calculate next due date based on frequency
+        from datetime import datetime, timedelta
+        frequency_days = {
+            'weekly': 7,
+            'biweekly': 14,
+            'monthly': 30,
+            'quarterly': 90
+        }
+        days = frequency_days.get(frequency, 30)
+        next_due_date = datetime.utcnow() + timedelta(days=days)
+        
+        recurring_bill = RecurringBill(
+            user_id=g.current_user.id,
+            biller_code=biller_code,
+            biller_name=biller_name,
+            account_number=account_number,
+            customer_name=customer_name,
+            frequency=frequency,
+            auto_pay=auto_pay,
+            max_amount=max_amount,
+            enabled=True,
+            next_due_date=next_due_date,
+            created_at=datetime.utcnow()
+        )
+        db.session.add(recurring_bill)
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': 'Recurring bill added successfully',
+            'data': {
+                'id': recurring_bill.id,
+                'next_due_date': next_due_date.isoformat()
+            }
+        })
+        
+    except Exception as e:
+        print(f"Error adding recurring bill: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/user/bills/recurring/remove/<int:bill_id>', methods=['DELETE'])
+@token_required
+def remove_recurring_bill(bill_id):
+    """Remove a recurring bill"""
+    try:
+        recurring_bill = RecurringBill.query.filter_by(
+            id=bill_id,
+            user_id=g.current_user.id
+        ).first()
+        
+        if not recurring_bill:
+            return jsonify({'success': False, 'error': 'Recurring bill not found'}), 404
+        
+        db.session.delete(recurring_bill)
+        db.session.commit()
+        
+        return jsonify({'success': True, 'message': 'Recurring bill removed'})
+        
+    except Exception as e:
+        print(f"Error removing recurring bill: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/user/bills/recurring/toggle/<int:bill_id>', methods=['PUT'])
+@token_required
+def toggle_recurring_bill(bill_id):
+    """Enable/disable a recurring bill"""
+    try:
+        data = request.get_json()
+        enabled = data.get('enabled', False)
+        
+        recurring_bill = RecurringBill.query.filter_by(
+            id=bill_id,
+            user_id=g.current_user.id
+        ).first()
+        
+        if not recurring_bill:
+            return jsonify({'success': False, 'error': 'Recurring bill not found'}), 404
+        
+        recurring_bill.enabled = enabled
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': f'Recurring bill {"enabled" if enabled else "disabled"}'
+        })
+        
+    except Exception as e:
+        print(f"Error toggling recurring bill: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 class DigimallService:
     def __init__(self):
@@ -17405,132 +17944,7 @@ def claim_referral_bonus(referral_id):
         db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
 
-@app.route('/api/bills/billers', methods=['GET'])
-@token_required
-def get_billers():
-    """Get list of available billers"""
-    try:
-        billers = []
-        for code, biller in BillPaymentService.BILLERS.items():
-            billers.append({
-                'code': code,
-                'name': biller['name'],
-                'category': biller['category'],
-                'icon': biller['icon'],
-                'fields': biller['fields']
-            })
-        
-        return jsonify({'success': True, 'data': billers, 'platform': COMPANY_NAME})
-        
-    except Exception as e:
-        print(f"Get billers error: {e}")
-        return jsonify({'success': False, 'error': f'Failed to fetch billers from {COMPANY_NAME}'}), 500
 
-
-@app.route('/api/bills/validate', methods=['POST'])
-@token_required
-def validate_bill_account():
-    """Validate bill account number"""
-    try:
-        data = request.get_json()
-        biller_code = data.get('biller_code')
-        account_number = data.get('account_number')
-        
-        result = BillPaymentService.validate_account(biller_code, account_number)
-        
-        return jsonify(result)
-        
-    except Exception as e:
-        print(f"Validate bill account error: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@app.route('/api/bills/pay', methods=['POST'])
-@token_required
-def pay_bill():
-    """Pay a bill (Email ONLY)"""
-    try:
-        data = request.get_json()
-        biller_code = data.get('biller_code')
-        account_number = data.get('account_number')
-        amount = data.get('amount')
-        customer_name = data.get('customer_name')
-        customer_email = data.get('customer_email')
-        customer_phone = data.get('customer_phone')
-        
-        if not all([biller_code, account_number, amount]):
-            return jsonify({'success': False, 'error': 'Missing required fields'}), 400
-        
-        try:
-            amount = float(amount)
-        except:
-            return jsonify({'success': False, 'error': 'Invalid amount'}), 400
-        
-        if amount < 1:
-            return jsonify({'success': False, 'error': 'Amount must be at least GHS 1'}), 400
-        
-        result = BillPaymentService.pay_bill(
-            user_id=g.current_user.id,
-            biller_code=biller_code,
-            account_number=account_number,
-            amount=amount,
-            customer_name=customer_name,
-            customer_email=customer_email,
-            customer_phone=customer_phone
-        )
-        
-        if not result['success']:
-            return jsonify({'success': False, 'error': result['error']}), 400
-        
-        return jsonify(result)
-        
-    except Exception as e:
-        print(f"Pay bill error: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@app.route('/api/bills/history', methods=['GET'])
-@token_required
-def get_bill_payment_history():
-    """Get user's bill payment history"""
-    try:
-        limit = request.args.get('limit', 20, type=int)
-        
-        payments = BillPaymentService.get_bill_payment_history(g.current_user.id, limit)
-        
-        return jsonify({'success': True, 'data': payments})
-        
-    except Exception as e:
-        print(f"Get bill payment history error: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@app.route('/api/bills/status/<reference>', methods=['GET'])
-@token_required
-def get_bill_payment_status(reference):
-    """Get bill payment status"""
-    try:
-        payment = BillPayment.query.filter_by(reference=reference, user_id=g.current_user.id).first()
-        
-        if not payment:
-            return jsonify({'success': False, 'error': 'Payment not found'}), 404
-        
-        return jsonify({
-            'success': True,
-            'data': {
-                'reference': payment.reference,
-                'status': payment.status,
-                'amount': float(payment.amount),
-                'biller': payment.biller_name,
-                'account_number': payment.account_number,
-                'created_at': payment.created_at.isoformat(),
-                'completed_at': payment.completed_at.isoformat() if payment.completed_at else None
-            }
-        })
-        
-    except Exception as e:
-        print(f"Get bill payment status error: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/user/withdrawals', methods=['GET'])
 @token_required
