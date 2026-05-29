@@ -79,6 +79,55 @@ env = os.environ.get('FLASK_ENV', 'production')
 app.config.from_object(config[env])
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', secrets.token_hex(16))
 
+
+REDIS_URL = os.environ.get('REDIS_URL')
+
+# Try Redis connection
+redis_available = False
+redis_client = None
+
+if REDIS_URL:
+    try:
+        redis_client = redis.from_url(
+            REDIS_URL,
+            decode_responses=True,
+            socket_connect_timeout=3,
+            socket_timeout=3
+        )
+        redis_client.ping()
+        redis_available = True
+        print("✅ Redis connected for temporary storage")
+    except Exception as e:
+        print(f"⚠️ Redis connection failed: {e}")
+        print("   Using memory storage for rate limiting")
+
+# Fallback for local development (memory storage)
+if not redis_available:
+    temp_storage = {}
+    print("⚠️ Using memory storage for temporary data (local development)")
+
+def set_temp_data(key, data, expiry_seconds=600):
+    """Store temporary data in Redis or memory"""
+    if redis_available and redis_client:
+        redis_client.setex(f"temp:{key}", expiry_seconds, json.dumps(data))
+    else:
+        temp_storage[key] = data
+
+def get_temp_data(key):
+    """Get temporary data from Redis or memory"""
+    if redis_available and redis_client:
+        data = redis_client.get(f"temp:{key}")
+        return json.loads(data) if data else None
+    else:
+        return temp_storage.get(key)
+
+def delete_temp_data(key):
+    """Delete temporary data from Redis or memory"""
+    if redis_available and redis_client:
+        redis_client.delete(f"temp:{key}")
+    else:
+        if key in temp_storage:
+            del temp_storage[key]
 # ========== UPLOAD CONFIGURATION ==========
 UPLOAD_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'uploads', 'profile_pics')
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
