@@ -5826,7 +5826,7 @@ def create_manual_request():
     })
 
 
-@app.route('/api/wallet/manual/upload-proof', methods=['POST'])
+@app.route('/api/payment/upload-proof', methods=['POST']) 
 @token_required
 def upload_manual_proof():
     """Upload proof of manual payment"""
@@ -6205,100 +6205,6 @@ def admin_get_manual_payments():
         print(f"Admin get manual payments error: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
-@app.route('/api/payment/upload-proof', methods=['POST']) 
-@token_required
-def upload_payment_proof():
-    """Upload payment proof document"""
-    print("\n" + "="*60)
-    print("[DEBUG] UPLOAD PROOF ENDPOINT CALLED")
-    print("="*60)
-    
-    try:
-        # Debug: Log request info
-        print(f"[DEBUG] Request method: {request.method}")
-        print(f"[DEBUG] Request headers: {dict(request.headers)}")
-        print(f"[DEBUG] Request files: {request.files}")
-        print(f"[DEBUG] Request form: {request.form}")
-        print(f"[DEBUG] User: {g.current_user.id if hasattr(g, 'current_user') else 'No user'}")
-        
-        file = request.files.get('proof')
-        reference = request.form.get('reference')
-        
-        print(f"[DEBUG] File received: {file.filename if file else 'No file'}")
-        print(f"[DEBUG] Reference: {reference}")
-        
-        if not file:
-            print("[DEBUG] ERROR: No file uploaded")
-            return jsonify({'success': False, 'error': 'No file uploaded'}), 400
-        
-        if not reference:
-            print("[DEBUG] ERROR: No reference provided")
-            return jsonify({'success': False, 'error': 'Reference is required'}), 400
-        
-        # Check file extension
-        extension = file.filename.rsplit('.', 1)[1].lower() if '.' in file.filename else ''
-        print(f"[DEBUG] File extension: {extension}")
-        
-        # Debug: Check ALLOWED_EXTENSIONS
-        from app import ALLOWED_EXTENSIONS
-        print(f"[DEBUG] ALLOWED_EXTENSIONS: {ALLOWED_EXTENSIONS}")
-        
-        if extension not in ALLOWED_EXTENSIONS:
-            print(f"[DEBUG] ERROR: File type {extension} not allowed")
-            return jsonify({'success': False, 'error': f'File type not allowed. Allowed: {", ".join(ALLOWED_EXTENSIONS)}'}), 400
-        
-        # Generate unique filename
-        import uuid
-        filename = f"proof_{reference}_{uuid.uuid4().hex[:8]}.{extension}"
-        print(f"[DEBUG] Generated filename: {filename}")
-        
-        # Debug: Check UPLOAD_FOLDER
-        from app import UPLOAD_FOLDER
-        print(f"[DEBUG] UPLOAD_FOLDER: {UPLOAD_FOLDER}")
-        
-        # Save to UPLOAD_FOLDER
-        file_path = os.path.join(UPLOAD_FOLDER, filename)
-        print(f"[DEBUG] Full file path: {file_path}")
-        
-        file.save(file_path)
-        print(f"[DEBUG] File saved successfully")
-        
-        # Store ONLY the filename
-        proof_url = filename
-        print(f"[DEBUG] Proof URL: {proof_url}")
-        
-        # Update the payment record
-        print(f"[DEBUG] Looking for ManualPayment with reference: {reference}")
-        manual_payment = ManualPayment.query.filter_by(reference=reference).first()
-        
-        if manual_payment:
-            print(f"[DEBUG] Found manual payment ID: {manual_payment.id}")
-            print(f"[DEBUG] Current proof_url: {manual_payment.proof_url}")
-            manual_payment.proof_url = proof_url
-            db.session.commit()
-            print(f"[DEBUG] Updated proof_url to: {manual_payment.proof_url}")
-        else:
-            print(f"[DEBUG] WARNING: No manual payment found with reference: {reference}")
-        
-        full_url = f"{request.host_url.rstrip('/')}/uploads/profile_pics/{filename}"
-        print(f"[DEBUG] Full URL: {full_url}")
-        
-        print("[DEBUG] Upload successful!")
-        print("="*60 + "\n")
-        
-        return jsonify({
-            'success': True,
-            'message': 'Proof uploaded successfully',
-            'proof_url': proof_url,
-            'full_url': full_url
-        })
-        
-    except Exception as e:
-        print(f"[DEBUG] EXCEPTION: {e}")
-        import traceback
-        traceback.print_exc()
-        print("="*60 + "\n")
-        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/admin/manual-payments/<int:payment_id>/approve-simple', methods=['POST'])
 @token_required
