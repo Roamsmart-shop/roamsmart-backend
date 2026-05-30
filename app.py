@@ -6040,26 +6040,20 @@ def generate_manual_reference():
     try:
         data = request.get_json()
         amount = data.get('amount')
-        phone = data.get('phone')
         
         if not amount or amount <= 0:
             return jsonify({'success': False, 'error': 'Invalid amount'}), 400
         
-        # Generate unique reference
         import uuid
         reference = f"MAN-{uuid.uuid4().hex[:8].upper()}"
         
-        # Create manual payment record (without payment_method field)
         manual_payment = ManualPayment(
             user_id=g.current_user.id,
             amount=amount,
             reference=reference,
-            status='pending_verification',
+            status='pending',
             created_at=datetime.utcnow()
         )
-        
-        if phone:
-            manual_payment.sender_phone = phone
         
         db.session.add(manual_payment)
         db.session.commit()
@@ -6067,7 +6061,7 @@ def generate_manual_reference():
         return jsonify({
             'success': True,
             'data': {
-                'id': manual_payment.id,
+                'id': manual_payment.id,          # ← This is important for the upload
                 'reference': reference,
                 'amount': amount,
                 'created_at': manual_payment.created_at.isoformat()
