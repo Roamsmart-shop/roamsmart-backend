@@ -6049,13 +6049,12 @@ def generate_manual_reference():
         import uuid
         reference = f"MAN-{uuid.uuid4().hex[:8].upper()}"
         
-        # Create manual payment record
+        # Create manual payment record (without payment_method field)
         manual_payment = ManualPayment(
             user_id=g.current_user.id,
             amount=amount,
             reference=reference,
             status='pending_verification',
-            payment_method='manual',
             created_at=datetime.utcnow()
         )
         
