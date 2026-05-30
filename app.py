@@ -6205,7 +6205,7 @@ def admin_get_manual_payments():
         print(f"Admin get manual payments error: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
-@app.route('/payment/upload-proof', methods=['POST'])
+@app.route('/api/payment/upload-proof', methods=['POST']) 
 @token_required
 def upload_payment_proof():
     """Upload payment proof document"""
