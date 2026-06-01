@@ -58,6 +58,8 @@ from sqlalchemy import func, and_, or_
 from werkzeug.utils import secure_filename
 from flask_session import Session
 import secrets
+from sqlalchemy.exc import SQLAlchemyError, IntegrityError, DataError
+
 # ========== LOCAL IMPORTS ==========
 from config import config
 from models import *
@@ -4860,8 +4862,7 @@ def redeem_referral_data():
         if (user.referral_data_balance or 0) < mb_amount:
             return jsonify({'success': False, 'error': f'Insufficient referral data. You have {user.referral_data_balance or 0} MB'}), 400
         
-        # Check max redeemable (50MB total) - track redeemed amount separately
-        # You may want to add a redeemed_referral_data column to User model
+        
         if not hasattr(user, 'redeemed_referral_data'):
             user.redeemed_referral_data = 0
         
@@ -5282,7 +5283,7 @@ def create_order():
         # Generate order ID
         order_id = f"ORD-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{g.current_user.id}"
         
-        # Create order
+        # Create order with delivery status tracking
         order = Order(
             user_id=g.current_user.id,
             order_id=order_id,
@@ -5293,6 +5294,8 @@ def create_order():
             amount=total_price,
             quantity=quantity,
             status='pending' if payment_method == 'manual' else 'processing',
+            delivery_status='pending',  # NEW: Initial delivery status
+            delivery_status_updated_at=datetime.utcnow(),
             payment_method=payment_method,
             created_at=datetime.utcnow()
         )
@@ -5321,8 +5324,21 @@ def create_order():
             db.session.add(transaction)
             db.session.commit()
             
-            # Call Digimall for delivery (no pricing involved)
-            digimall_response = digimall.deliver_data(network, phone, size_gb)
+            # Update delivery status to queued before sending
+            order.delivery_status = 'queued'
+            order.delivery_status_updated_at = datetime.utcnow()
+            db.session.commit()
+            
+            # Call Digimall for delivery with webhook URL
+            webhook_url = f"{current_app.config.get('BASE_URL', 'https://roamsmart-backend-production.up.railway.app')}/api/webhooks/digimall"
+            
+            digimall_response = digimall.deliver_data(
+                network=network, 
+                phone=phone, 
+                size_gb=size_gb,
+                reference=order_id,
+                webhook_url=webhook_url
+            )
             
             if digimall_response.get('success'):
                 order.status = 'completed'
@@ -5331,6 +5347,8 @@ def create_order():
                 order.provider_order_id = digimall_response.get('orderId')
                 order.provider_reference = digimall_response.get('reference')
                 order.provider_cost = digimall_response.get('totalAmount', 0)
+                order.delivery_status = 'processing'  # Update to processing
+                order.delivery_status_updated_at = datetime.utcnow()
                 
                 transaction.status = 'completed'
                 db.session.commit()
@@ -5345,6 +5363,7 @@ def create_order():
                         'amount': float(total_price),
                         'provider_order_id': digimall_response.get('orderId'),
                         'provider_status': digimall_response.get('status'),
+                        'delivery_status': order.delivery_status,  # NEW
                         'profit': float(profit)
                     },
                     'message': f'✅ {size_gb}GB {network.upper()} data ordered. Processing delivery...'
@@ -5353,7 +5372,9 @@ def create_order():
                 # Refund on delivery failure
                 g.current_user.wallet_balance += total_price
                 order.status = 'failed'
-                order.error_message = digimall_response.get('error', 'Digimall delivery failed')
+                order.delivery_status = 'failed'  # NEW
+                order.delivery_status_updated_at = datetime.utcnow()
+                order.last_delivery_error = digimall_response.get('error', 'Digimall delivery failed')
                 transaction.status = 'failed'
                 db.session.commit()
                 
@@ -5365,6 +5386,9 @@ def create_order():
         elif payment_method == 'manual':
             reference = f"MAN-{uuid.uuid4().hex[:8].upper()}"
             order.payment_reference = reference
+            order.status = 'pending'
+            order.delivery_status = 'pending'
+            db.session.commit()
             
             manual_payment = ManualPayment(
                 user_id=g.current_user.id,
@@ -5381,7 +5405,8 @@ def create_order():
                 'data': {
                     'order_id': order_id,
                     'reference': reference,
-                    'amount': total_price
+                    'amount': total_price,
+                    'delivery_status': 'pending'
                 },
                 'payment_instructions': {
                     'mobile_money_number': COMPANY_PHONE,
@@ -5594,42 +5619,194 @@ def bulk_agent_order():
         'message': f'Successfully processed {success_count} out of {len(orders)} orders via Digimall'
     })
 
-
-
-
 @app.route('/api/webhooks/digimall', methods=['POST'])
 def digimall_webhook():
-    """Handle Digimall order status webhooks"""
+    """Handle Digimall webhook notifications for order status updates"""
+    try:
+        payload = request.get_json()
+        print(f"[Webhook] Digimall notification: {payload}")
+        
+        
+        event = payload.get('event')
+        order_id = payload.get('orderId')  
+        reference = payload.get('reference')  
+        status = payload.get('status')  
+        recipient = payload.get('recipient')
+        volume = payload.get('volume')
+        timestamp = payload.get('timestamp')
+        
+    
+        order = None
+        if reference:
+            order = Order.query.filter_by(order_id=reference).first()
+        if not order and order_id:
+            order = Order.query.filter_by(provider_order_id=order_id).first()
+        
+        if not order:
+            print(f"[Webhook] Order not found: reference={reference}, orderId={order_id}")
+            return jsonify({'success': False, 'error': 'Order not found'}), 200
+        
+        # Update delivery status
+        old_status = order.delivery_status
+        order.delivery_status = status
+        order.delivery_status_updated_at = datetime.utcnow()
+        order.webhook_received = True
+        order.webhook_last_payload = payload
+        order.last_status_check = datetime.utcnow()
+        
+        # Handle status changes
+        if status == 'delivered':
+            order.completed_at = datetime.utcnow()
+            if order.status != 'completed':
+                order.status = 'completed'
+        
+        elif status == 'failed':
+            order.last_delivery_error = f"Digimall reported failure at {timestamp}"
+        
+        db.session.commit()
+        
+        print(f"[Webhook] Order {order.order_id}: {old_status} -> {status}")
+        
+        return jsonify({'success': True, 'message': 'Webhook processed'}), 200
+        
+    except Exception as e:
+        print(f"[Webhook] Error: {e}")
+        import traceback
+        traceback.print_exc()
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 200
+
+
+# ========== DIGIMALL DIRECT STATUS CHECK ENDPOINTS ==========
+@app.route('/api/digimall/bulk-status', methods=['POST'])
+@token_required
+def bulk_check_digimall_status():
+    """Bulk check order statuses from Digimall"""
     try:
         data = request.get_json()
-        print(f"[Digimall Webhook] Received: {data}")
+        identifiers = data.get('identifiers', [])
         
-        event = data.get('event')
+        print(f"[DIGIMALL BULK] Checking status for {len(identifiers)} orders")
         
-        if event == 'order.status.updated':
-            order_id = data.get('orderId')
-            reference = data.get('reference')
-            status = data.get('status')
-            recipient = data.get('recipient')
-            volume = data.get('volume')
+        if not identifiers:
+            return jsonify({'success': False, 'error': 'No identifiers provided'}), 400
+        
+        digimall = DigimallService()
+        results = []
+        
+        for identifier in identifiers[:20]:  # Limit to 20 per request
+            try:
+                result = digimall.check_delivery_status(identifier)
+                
+                if result.get('success'):
+                    order_data = result.get('order', {})
+                    status = order_data.get('status')
+                    
+                    # Update local database
+                    order = Order.query.filter(
+                        (Order.provider_order_id == identifier) | 
+                        (Order.order_id == identifier)
+                    ).first()
+                    
+                    if order and status and status != order.delivery_status:
+                        old_status = order.delivery_status
+                        order.delivery_status = status
+                        order.delivery_status_updated_at = datetime.utcnow()
+                        if status == 'delivered':
+                            order.completed_at = datetime.utcnow()
+                        db.session.commit()
+                        print(f"[DIGIMALL BULK] Updated order {order.order_id}: {old_status} -> {status}")
+                    
+                    results.append({
+                        'identifier': identifier,
+                        'status': status,
+                        'found': True
+                    })
+                else:
+                    results.append({
+                        'identifier': identifier,
+                        'status': None,
+                        'found': False,
+                        'error': result.get('error')
+                    })
+            except Exception as e:
+                print(f"[DIGIMALL BULK] Error checking {identifier}: {e}")
+                results.append({
+                    'identifier': identifier,
+                    'status': None,
+                    'found': False,
+                    'error': str(e)
+                })
+        
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'results': results,
+            'total': len(results)
+        })
+        
+    except Exception as e:
+        print(f"Bulk status check error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/digimall/order-status/<identifier>', methods=['GET'])
+@token_required
+def check_single_order_status(identifier):
+    """Check single order status from Digimall"""
+    try:
+        print(f"[DIGIMALL] Checking status for identifier: {identifier}")
+        
+        digimall = DigimallService()
+        result = digimall.check_delivery_status(identifier)
+        
+        if result.get('success'):
+            order_data = result.get('order', {})
+            status = order_data.get('status')
             
-            # Update order status in your database
-            if order_id:
-                order = Order.query.filter_by(provider_order_id=order_id).first()
-                if order:
-                    old_status = order.status
-                    order.status = 'completed' if status == 'delivered' else status
+            # Update local database
+            order = Order.query.filter(
+                (Order.provider_order_id == identifier) | 
+                (Order.order_id == identifier)
+            ).first()
+            
+            if order and status:
+                old_status = order.delivery_status
+                if status != old_status:
+                    order.delivery_status = status
+                    order.delivery_status_updated_at = datetime.utcnow()
                     if status == 'delivered':
                         order.completed_at = datetime.utcnow()
                     db.session.commit()
-                    print(f"[Digimall] Updated order {order_id}: {old_status} -> {status}")
+                    print(f"[DIGIMALL] Updated order {order.order_id}: {old_status} -> {status}")
+                
+                return jsonify({
+                    'success': True,
+                    'status': status,
+                    'order_id': order.order_id,
+                    'provider_status': order_data,
+                    'updated': status != old_status
+                })
+            else:
+                return jsonify({
+                    'success': True,
+                    'status': status,
+                    'order_id': None,
+                    'provider_status': order_data,
+                    'updated': False
+                })
         
-        return jsonify({'success': True}), 200
+        return jsonify({'success': False, 'error': result.get('error')}), 400
         
     except Exception as e:
-        print(f"[Digimall Webhook Error] {e}")
+        print(f"Check order status error: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
-    
+
 @app.route('/api/admin/digimall-balance', methods=['GET'])
 @token_required
 @admin_required
@@ -5748,6 +5925,421 @@ def get_wallet_transactions():
         'total_pages': pagination.pages
     })
 
+@app.route('/order/<order_id>/retry', methods=['POST'])
+@token_required
+def retry_order(order_id):
+    """Retry a failed order"""
+    try:
+        order = Order.query.filter_by(order_id=order_id, user_id=g.current_user.id).first()
+        
+        if not order:
+            return jsonify({'success': False, 'error': 'Order not found'}), 404
+        
+        if order.delivery_status != 'failed':
+            return jsonify({'success': False, 'error': 'Only failed orders can be retried'}), 400
+        
+        # Reset order status
+        order.delivery_status = 'pending'
+        order.delivery_attempts += 1
+        order.last_delivery_error = None
+        order.delivery_status_updated_at = datetime.utcnow()
+        db.session.commit()
+        
+        # Retry Digimall delivery
+        try:
+            digimall = DigimallService()
+            result = digimall.deliver_data(
+                network=order.network,
+                phone_number=order.phone_number,
+                volume=order.size_gb
+            )
+            
+            if result and result.get('success'):
+                order.provider_order_id = result.get('orderId')
+                order.provider_reference = result.get('reference')
+                order.delivery_status = 'processing'
+                db.session.commit()
+                
+                return jsonify({
+                    'success': True,
+                    'message': 'Order retried successfully',
+                    'provider_order_id': result.get('orderId')
+                })
+            else:
+                order.delivery_status = 'failed'
+                order.last_delivery_error = result.get('error', 'Retry failed')
+                db.session.commit()
+                
+                return jsonify({
+                    'success': False,
+                    'error': result.get('error', 'Retry failed')
+                }), 400
+                
+        except Exception as e:
+            order.delivery_status = 'failed'
+            order.last_delivery_error = str(e)
+            db.session.commit()
+            return jsonify({'success': False, 'error': str(e)}), 500
+        
+    except Exception as e:
+        print(f"Retry order error: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/store/<slug>', methods=['GET'])
+def get_public_store(slug):
+    """Get public store data (no login required)"""
+    try:
+        store = Store.query.filter_by(store_slug=slug, is_active=True).first()
+        
+        if not store:
+            return jsonify({'success': False, 'error': 'Store not found'}), 404
+        
+        agent = User.query.get(store.agent_id)
+        
+        # Get agent's prices
+        agent_bundles = {}
+        for network in ['mtn', 'telecel', 'airteltigo']:
+            agent_bundles[network] = {}
+            for size_gb in [1, 2, 5, 10, 20]:
+                price = get_agent_price(network, size_gb)
+                if price > 0:
+                    agent_bundles[network][size_gb] = price
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'store_name': store.store_name,
+                'store_slug': store.store_slug,
+                'store_description': store.store_description,
+                'contact_phone': store.contact_phone,
+                'contact_email': store.contact_email,
+                'markup': store.markup,
+                'custom_prices': store.custom_prices,
+                'brand_color': store.brand_color,
+                'agent_id': store.agent_id,
+                'agent_name': agent.username if agent else None,
+                'bundles': agent_bundles
+            }
+        })
+        
+    except Exception as e:
+        print(f"Get public store error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/store/order', methods=['POST'])
+def create_store_order():
+    """Create order from public store (no login required)"""
+    try:
+        data = request.get_json()
+        
+        agent_id = data.get('agent_id')
+        network = data.get('network')
+        size_gb = data.get('size_gb')
+        phone = data.get('phone')
+        amount = data.get('amount')
+        
+        # Get agent
+        agent = User.query.get(agent_id)
+        if not agent:
+            return jsonify({'success': False, 'error': 'Agent not found'}), 404
+        
+        # Get wholesale price
+        wholesale_price = get_agent_price(network, size_gb)
+        if wholesale_price == 0:
+            return jsonify({'success': False, 'error': 'Invalid bundle'}), 400
+        
+        # Check agent's wallet balance
+        if agent.wallet_balance < wholesale_price:
+            return jsonify({'success': False, 'error': 'Agent has insufficient balance'}), 400
+        
+        # Create order
+        order_id = f"STORE-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{agent_id}"
+        
+        # Deduct from agent's wallet
+        agent.wallet_balance -= wholesale_price
+        
+        order = Order(
+            user_id=agent_id,
+            agent_id=agent_id,
+            order_id=order_id,
+            type='data',
+            network=network,
+            size_gb=size_gb,
+            phone_number=phone,
+            amount=amount,
+            cost=wholesale_price,
+            profit=amount - wholesale_price,
+            status='completed',
+            delivery_status='pending',
+            payment_method='store',
+            created_at=datetime.utcnow()
+        )
+        db.session.add(order)
+        db.session.commit()
+        
+        # Send to Digimall
+        digimall = DigimallService()
+        digimall_result = digimall.deliver_data(network, phone, size_gb)
+        
+        if digimall_result and digimall_result.get('success'):
+            order.provider = 'digimall'
+            order.provider_order_id = digimall_result.get('orderId')
+            order.delivery_status = 'processing'
+            db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': 'Order placed successfully!',
+            'order_id': order_id
+        })
+        
+    except Exception as e:
+        print(f"Store order error: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+# ========== AGENT STORE PRODUCT MANAGEMENT ENDPOINTS ==========
+
+@app.route('/api/agent/store/products', methods=['GET'])
+@token_required
+@agent_required
+def get_agent_store_products():
+    """Get products for agent's store with custom prices"""
+    try:
+        agent_id = g.current_user.id
+        print(f"[DEBUG] Getting products for agent: {agent_id}")
+        
+        # Get agent's store settings
+        store = Store.query.filter_by(agent_id=agent_id).first()
+        print(f"[DEBUG] Store found: {store}")
+        
+        # Get base wholesale prices
+        base_prices = {}
+        for network in ['mtn', 'telecel', 'airteltigo']:
+            base_prices[network] = {}
+            for size_gb in [1, 2, 5, 10, 20]:
+                price = get_agent_price(network, size_gb)
+                if price > 0:
+                    base_prices[network][size_gb] = price
+        
+        print(f"[DEBUG] Base prices: {base_prices}")
+        
+        # Safely get custom_prices and markup (handle None values)
+        custom_prices = store.custom_prices if store and store.custom_prices else {}
+        markup = store.markup if store and store.markup else 15
+        
+        products = []
+        for network in ['mtn', 'telecel', 'airteltigo']:
+            for size_gb, wholesale_price in base_prices.get(network, {}).items():
+                # Get custom price or calculate with markup
+                if custom_prices.get(network, {}).get(str(size_gb)):
+                    selling_price = custom_prices[network][str(size_gb)]
+                    is_custom = True
+                else:
+                    selling_price = wholesale_price * (1 + markup / 100)
+                    is_custom = False
+                
+                products.append({
+                    'id': f"{network}_{size_gb}",
+                    'network': network,
+                    'size_gb': size_gb,
+                    'wholesale_price': wholesale_price,
+                    'selling_price': round(selling_price, 2),
+                    'profit': round(selling_price - wholesale_price, 2),
+                    'custom_price': selling_price if is_custom else None
+                })
+        
+        print(f"[DEBUG] Total products found: {len(products)}")
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'products': products,
+                'store': {
+                    'store_name': store.store_name if store else None,
+                    'store_slug': store.store_slug if store else None,
+                    'markup': markup,
+                    'custom_prices': custom_prices,
+                    'banner_color': store.banner_color if store else '#8B0000'
+                }
+            }
+        })
+        
+    except Exception as e:
+        print(f"[ERROR] Get agent store products error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/agent/store/products/update-price', methods=['POST'])
+@token_required
+@agent_required
+def update_agent_product_price():
+    """Update a single product's custom price in agent's store"""
+    try:
+        data = request.get_json()
+        network = data.get('network')
+        size_gb = data.get('size_gb')
+        custom_price = data.get('custom_price')
+        
+        if not network or not size_gb:
+            return jsonify({'success': False, 'error': 'Network and size are required'}), 400
+        
+        # Get agent's store
+        store = Store.query.filter_by(agent_id=g.current_user.id).first()
+        if not store:
+            return jsonify({'success': False, 'error': 'Store not found. Please set up your store first.'}), 404
+        
+        # Initialize custom_prices dict if not exists
+        if not store.custom_prices:
+            store.custom_prices = {}
+        
+        if network not in store.custom_prices:
+            store.custom_prices[network] = {}
+        
+        # Update or remove custom price
+        if custom_price and custom_price > 0:
+            store.custom_prices[network][str(size_gb)] = custom_price
+        else:
+            # Remove custom price if exists (use default markup)
+            if network in store.custom_prices and str(size_gb) in store.custom_prices[network]:
+                del store.custom_prices[network][str(size_gb)]
+        
+        store.updated_at = datetime.utcnow()
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': f'Price for {network.upper()} {size_gb}GB updated successfully',
+            'data': {
+                'network': network,
+                'size_gb': size_gb,
+                'custom_price': custom_price if custom_price > 0 else None
+            }
+        })
+        
+    except Exception as e:
+        print(f"Update product price error: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/agent/store/products/bulk-update', methods=['POST'])
+@token_required
+@agent_required
+def bulk_update_agent_prices():
+    """Bulk update multiple product prices"""
+    try:
+        data = request.get_json()
+        products = data.get('products', [])
+        default_markup = data.get('default_markup')
+        
+        # Get agent's store
+        store = Store.query.filter_by(agent_id=g.current_user.id).first()
+        if not store:
+            return jsonify({'success': False, 'error': 'Store not found. Please set up your store first.'}), 404
+        
+        # Update default markup if provided
+        if default_markup is not None:
+            store.markup = default_markup
+        
+        # Initialize custom_prices dict if not exists
+        if not store.custom_prices:
+            store.custom_prices = {}
+        
+        # Update individual product prices
+        for product in products:
+            network = product.get('network')
+            size_gb = product.get('size_gb')
+            custom_price = product.get('custom_price')
+            
+            if network and size_gb:
+                if network not in store.custom_prices:
+                    store.custom_prices[network] = {}
+                
+                if custom_price and custom_price > 0:
+                    store.custom_prices[network][str(size_gb)] = custom_price
+                else:
+                    if network in store.custom_prices and str(size_gb) in store.custom_prices[network]:
+                        del store.custom_prices[network][str(size_gb)]
+        
+        store.updated_at = datetime.utcnow()
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': f'Updated {len(products)} products and markup successfully',
+            'data': {
+                'markup': store.markup,
+                'updated_products': len(products)
+            }
+        })
+        
+    except Exception as e:
+        print(f"Bulk update prices error: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/agent/store/markup', methods=['PUT'])
+@token_required
+@agent_required
+def update_agent_store_markup():
+    """Update the default markup for agent's store"""
+    try:
+        data = request.get_json()
+        markup = data.get('markup')
+        
+        if markup is None or markup < 0 or markup > 100:
+            return jsonify({'success': False, 'error': 'Markup must be between 0 and 100'}), 400
+        
+        store = Store.query.filter_by(agent_id=g.current_user.id).first()
+        if not store:
+            return jsonify({'success': False, 'error': 'Store not found. Please set up your store first.'}), 404
+        
+        store.markup = markup
+        store.updated_at = datetime.utcnow()
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': f'Store markup updated to {markup}%',
+            'data': {'markup': markup}
+        })
+        
+    except Exception as e:
+        print(f"Update markup error: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/agent/store/reset-prices', methods=['POST'])
+@token_required
+@agent_required
+def reset_agent_store_prices():
+    """Reset all custom prices to use default markup"""
+    try:
+        store = Store.query.filter_by(agent_id=g.current_user.id).first()
+        if not store:
+            return jsonify({'success': False, 'error': 'Store not found'}), 404
+        
+        # Clear custom prices
+        store.custom_prices = {}
+        store.updated_at = datetime.utcnow()
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': 'All custom prices reset. Using default markup.'
+        })
+        
+    except Exception as e:
+        print(f"Reset prices error: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/wallet/fund', methods=['POST'])
 @token_required
@@ -5829,10 +6421,13 @@ def create_manual_request():
 @app.route('/api/payment/upload-proof', methods=['POST']) 
 @token_required
 def upload_manual_proof():
-    """Upload proof of manual payment"""
+    """Upload proof of manual payment - Accepts both ID (int) or Reference (string)"""
     try:
         request_id = request.form.get('request_id')
         proof = request.files.get('proof')
+        
+        print(f"[DEBUG] request_id: {request_id}")
+        print(f"[DEBUG] request_id type: {type(request_id)}")
         
         if not proof:
             return jsonify({'success': False, 'error': 'No proof file provided'}), 400
@@ -5850,9 +6445,26 @@ def upload_manual_proof():
         if file_size > 5 * 1024 * 1024:
             return jsonify({'success': False, 'error': 'File too large. Max 5MB'}), 400
         
-        manual_payment = ManualPayment.query.get(request_id)
-        if not manual_payment or manual_payment.user_id != g.current_user.id:
-            return jsonify({'success': False, 'error': 'Request not found'}), 404
+        # ========== FIX: Find payment by either ID or Reference ==========
+        manual_payment = None
+        
+        # First, try to find by reference string
+        manual_payment = ManualPayment.query.filter_by(reference=request_id).first()
+        
+        # If not found, try as integer ID
+        if not manual_payment:
+            try:
+                payment_id = int(request_id)
+                manual_payment = db.session.get(ManualPayment, payment_id)
+            except (ValueError, TypeError):
+                pass
+        
+        if not manual_payment:
+            return jsonify({'success': False, 'error': f'Payment request not found: {request_id}'}), 404
+        
+        # Check if user owns this payment
+        if manual_payment.user_id != g.current_user.id:
+            return jsonify({'success': False, 'error': 'You do not own this payment request'}), 403
         
         if manual_payment.status != 'pending':
             return jsonify({'success': False, 'error': f'Payment already {manual_payment.status}'}), 400
@@ -5874,6 +6486,8 @@ def upload_manual_proof():
         
         db.session.commit()
         
+        print(f"[DEBUG] Payment {manual_payment.id} updated with proof")
+        
         # Notify admins via email
         admins = User.query.filter(User.role.in_(['admin', 'super_admin'])).all()
         for admin in admins:
@@ -5893,6 +6507,8 @@ def upload_manual_proof():
             'success': True, 
             'message': 'Proof uploaded successfully. Awaiting admin verification.',
             'data': {
+                'id': manual_payment.id,
+                'reference': manual_payment.reference,
                 'proof_url': manual_payment.proof_url,
                 'status': manual_payment.status
             }
@@ -5900,9 +6516,10 @@ def upload_manual_proof():
         
     except Exception as e:
         print(f"Upload proof error: {e}")
+        import traceback
+        traceback.print_exc()
         db.session.rollback()
-        return jsonify({'success': False, 'error': 'Failed to upload proof'}), 500
-
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/wallet/manual/verify', methods=['POST'])
 @token_required
@@ -6138,7 +6755,6 @@ def cancel_manual_request(request_id):
         return jsonify({'success': False, 'error': 'Failed to cancel request'}), 500
 
 
-# ========== ADMIN MANUAL PAYMENT ENDPOINTS ==========
 @app.route('/api/admin/manual-payments', methods=['GET'])
 @token_required
 @admin_required
@@ -6198,6 +6814,7 @@ def admin_get_manual_payments():
     except Exception as e:
         print(f"Admin get manual payments error: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
+
 
 
 @app.route('/api/admin/manual-payments/<int:payment_id>/approve-simple', methods=['POST'])
@@ -7022,9 +7639,14 @@ def get_agent_dashboard():
 @token_required
 @agent_required
 def agent_sell():
-    """Sell data to customer - No profit calculation shown"""
+    """Sell data to customer - Agent pays wholesale price only"""
     try:
+        print(f"\n{'='*80}")
+        print(f"🟢 AGENT SELL ENDPOINT CALLED")
+        print(f"{'='*80}")
+        
         data = request.get_json()
+        print(f"📦 Request Data: {data}")
         
         network = data.get('network')
         size_gb = data.get('size_gb')
@@ -7033,25 +7655,39 @@ def agent_sell():
         quantity = data.get('quantity', 1)
         selling_price = data.get('selling_price')
         
+        print(f"📱 Network: {network}")
+        print(f"💾 Size GB: {size_gb}")
+        print(f"📞 Phone: {phone}")
+        print(f"👤 Customer: {customer_name}")
+        print(f"🔢 Quantity: {quantity}")
+        print(f"💰 Selling Price (provided): {selling_price}")
+        
         if not all([network, size_gb, phone]):
             return jsonify({'success': False, 'error': 'Missing required fields'}), 400
         
         # Get agent's wholesale price from database
         agent_cost = get_agent_price(network, size_gb)
+        print(f"💰 Agent Wholesale Cost: GHS {agent_cost}")
         
         if agent_cost == 0:
             return jsonify({'success': False, 'error': f'Price not configured for {network} {size_gb}GB'}), 400
         
         total_cost = agent_cost * quantity
+        print(f"💰 Total Cost (Wholesale): GHS {total_cost}")
         
-        # If selling price not provided, use agent cost + markup
+        # If selling price not provided, calculate it with markup
         if not selling_price:
             markup = db.session.query(StoreSettings.markup).filter_by(agent_id=g.current_user.id).scalar() or 15
             selling_price = total_cost * (1 + markup / 100)
+            print(f"💰 Calculated Selling Price with {markup}% markup: GHS {selling_price}")
         
         total_revenue = selling_price * quantity
+        print(f"💰 Total Revenue (Customer pays): GHS {total_revenue}")
+        print(f"💰 Agent Profit: GHS {total_revenue - total_cost}")
         
         # Check agent's wallet balance
+        print(f"💳 Agent Wallet Balance: GHS {g.current_user.wallet_balance}")
+        
         if g.current_user.wallet_balance < total_cost:
             return jsonify({
                 'success': False, 
@@ -7060,12 +7696,14 @@ def agent_sell():
         
         # Generate order ID
         order_id = f"ORD-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{g.current_user.id}"
+        print(f"🆔 Generated Order ID: {order_id}")
         
         # Deduct from agent's wallet
         balance_before = g.current_user.wallet_balance
         g.current_user.wallet_balance -= total_cost
+        print(f"💰 Wallet: GHS {balance_before} -> GHS {g.current_user.wallet_balance} (deducted GHS {total_cost})")
         
-        # Create order (profit still stored internally but not shown to agent)
+        # Create order
         order = Order(
             user_id=g.current_user.id,
             agent_id=g.current_user.id,
@@ -7077,30 +7715,35 @@ def agent_sell():
             customer_name=customer_name,
             amount=total_revenue,
             cost=total_cost,
-            profit=total_revenue - total_cost,  # Stored but not returned
+            profit=total_revenue - total_cost,
             quantity=quantity,
             status='completed',
+            delivery_status='pending',
+            delivery_status_updated_at=datetime.utcnow(),
             payment_method='wallet',
             completed_at=datetime.utcnow(),
             created_at=datetime.utcnow()
         )
         db.session.add(order)
+        print(f"📝 Order created in database (ID: {order.id})")
         
         # Create transaction record
         transaction = Transaction(
             user_id=g.current_user.id,
             type='sale',
-            amount=total_revenue,
+            amount=total_cost,
             balance_before=balance_before,
             balance_after=g.current_user.wallet_balance,
-            description=f'Sale: {quantity}x {size_gb}GB {network} to {phone}',
+            description=f'Sale: {quantity}x {size_gb}GB {network} to {phone} (Cost: GHS {total_cost:.2f})',
             reference=order_id,
             status='completed'
         )
         db.session.add(transaction)
+        print(f"📝 Transaction record created")
         
         # Update agent's stats
         g.current_user.total_sales = (g.current_user.total_sales or 0) + total_revenue
+        print(f"📊 Agent total sales updated: GHS {g.current_user.total_sales}")
         
         # Add to store clients
         if customer_name or phone:
@@ -7111,6 +7754,7 @@ def agent_sell():
                     client.total_spent = (client.total_spent or 0) + total_revenue
                     client.order_count = (client.order_count or 0) + 1
                     client.last_purchase = datetime.utcnow()
+                    print(f"👥 Updated existing client: {customer_name or 'Customer'}")
                 else:
                     client = StoreClient(
                         agent_id=g.current_user.id,
@@ -7121,47 +7765,274 @@ def agent_sell():
                         last_purchase=datetime.utcnow()
                     )
                     db.session.add(client)
+                    print(f"👥 Created new client: {customer_name or 'Customer'}")
             except Exception as e:
-                print(f"StoreClient error: {e}")
+                print(f"❌ StoreClient error: {e}")
         
         db.session.commit()
+        print(f"💾 Database changes committed")
         
-        # Send data delivery
+        # ========== DIGIMALL DELIVERY WITH FULL DEBUG ==========
+        print(f"\n{'='*60}")
+        print(f"📡 DIGIMALL DELIVERY START")
+        print(f"{'='*60}")
+        
         digimall_result = None
         try:
+            # Check if DigimallService is available
+            print(f"🔧 Initializing DigimallService...")
             digimall = DigimallService()
-            digimall_result = digimall.deliver_data(network, phone, size_gb)
+            
+            # Log Digimall configuration
+            print(f"🔑 API Key exists: {bool(digimall.api_key)}")
+            if digimall.api_key:
+                print(f"🔑 API Key (first 10 chars): {digimall.api_key[:10]}...")
+            print(f"🌐 Base URL: {digimall.base_url}")
+            print(f"🔗 Webhook URL: {digimall.webhook_url}")
+            
+            webhook_url = f"{current_app.config.get('BASE_URL', 'https://roamsmart-backend-production.up.railway.app')}/api/webhooks/digimall"
+            print(f"🔗 Generated Webhook URL: {webhook_url}")
+            
+            print(f"\n📤 Calling digimall.deliver_data with:")
+            print(f"   network: {network}")
+            print(f"   phone_number: {phone}")
+            print(f"   volume: {size_gb}")
+            
+            # Make the Digimall call
+            digimall_result = digimall.deliver_data(
+                network=network, 
+                phone_number=phone,
+                volume=size_gb
+            )
+            
+            print(f"\n📥 Digimall Response:")
+            print(f"   Result: {digimall_result}")
             
             if digimall_result and digimall_result.get('success'):
+                # Update order with Digimall info
                 order.provider = 'digimall'
                 order.provider_order_id = digimall_result.get('orderId')
                 order.provider_reference = digimall_result.get('reference')
                 order.provider_cost = digimall_result.get('totalAmount', 0)
+                order.delivery_status = 'processing'
+                order.delivery_status_updated_at = datetime.utcnow()
                 db.session.commit()
+                print(f"\n✅ DIGIMALL DELIVERY SUCCESS!")
+                print(f"   Order ID: {digimall_result.get('orderId')}")
+                print(f"   Reference: {digimall_result.get('reference')}")
+                print(f"   Status: {digimall_result.get('status')}")
+                print(f"   Amount: GHS {digimall_result.get('totalAmount', 0)}")
+            else:
+                error_msg = digimall_result.get('error') if digimall_result else 'No response from Digimall'
+                print(f"\n❌ DIGIMALL DELIVERY FAILED!")
+                print(f"   Error: {error_msg}")
+                order.delivery_status = 'failed'
+                order.delivery_status_updated_at = datetime.utcnow()
+                order.last_delivery_error = error_msg
+                db.session.commit()
+                
         except Exception as e:
-            print(f"Digimall delivery error: {e}")
+            print(f"\n❌ DIGIMALL EXCEPTION!")
+            print(f"   Error type: {type(e).__name__}")
+            print(f"   Error message: {str(e)}")
+            import traceback
+            print(f"   Traceback:")
+            traceback.print_exc()
+            order.delivery_status = 'failed'
+            order.delivery_status_updated_at = datetime.utcnow()
+            order.last_delivery_error = str(e)
+            db.session.commit()
         
-        # Return response WITHOUT profit
+        print(f"\n{'='*60}")
+        print(f"🏁 AGENT SELL COMPLETED")
+        print(f"{'='*60}")
+        
+        # Return response
         return jsonify({
             'success': True,
             'message': f'Sold {quantity}x {size_gb}GB {network.upper()} to {phone}',
             'data': {
                 'order_id': order_id,
-                'amount': total_revenue,
+                'amount_deducted': float(total_cost),
+                'customer_paid': float(total_revenue),
+                'profit': float(total_revenue - total_cost),
                 'balance': float(g.current_user.wallet_balance),
-                # REMOVED: 'cost'
-                # REMOVED: 'profit'
-                'digimall_delivery': digimall_result.get('success') if digimall_result else False
+                'delivery_status': order.delivery_status,
+                'digimall_delivery': digimall_result.get('success') if digimall_result else False,
+                'digimall_response': digimall_result if digimall_result else None
             }
         })
         
     except Exception as e:
-        print(f"Agent sell error: {e}")
+        print(f"\n{'='*60}")
+        print(f"❌ AGENT SELL FATAL ERROR")
+        print(f"{'='*60}")
+        print(f"Error: {str(e)}")
         import traceback
         traceback.print_exc()
         db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
 
+@app.route('/api/payment/manual-verify', methods=['POST'])
+@token_required
+def manual_verify_payment():
+    """Submit manual payment proof for admin approval"""
+    try:
+        # Debug logging
+        print(f"\n{'='*60}")
+        print(f"[MANUAL VERIFY] Request received from user: {g.current_user.username} (ID: {g.current_user.id})")
+        print(f"[MANUAL VERIFY] Request method: {request.method}")
+        print(f"[MANUAL VERIFY] Request files: {request.files.keys() if request.files else 'No files'}")
+        print(f"{'='*60}\n")
+        
+        # Get form data
+        reference = request.form.get('reference')
+        amount = request.form.get('amount')
+        proof = request.files.get('proof')
+        phone = request.form.get('phone')
+        
+        # Debug: print received values
+        print(f"[DEBUG] Reference: {reference}")
+        print(f"[DEBUG] Amount: {amount}")
+        print(f"[DEBUG] Phone: {phone}")
+        print(f"[DEBUG] Proof file: {proof.filename if proof else 'None'}")
+        
+        # Validate required fields
+        if not reference:
+            return jsonify({'success': False, 'error': 'Reference is required'}), 400
+        
+        if not proof:
+            return jsonify({'success': False, 'error': 'Payment proof is required'}), 400
+        
+        # Validate amount
+        try:
+            amount_float = float(amount) if amount else 0
+        except ValueError:
+            amount_float = 0
+        
+        # Create upload directory if it doesn't exist
+        upload_dir = os.path.join(current_app.config.get('UPLOAD_FOLDER', 'uploads'), 'payment_proofs')
+        os.makedirs(upload_dir, exist_ok=True)
+        
+        # Save the proof file
+        filename = secure_filename(f"manual_proof_{reference}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.jpg")
+        filepath = os.path.join(upload_dir, filename)
+        proof.save(filepath)
+        
+        print(f"[DEBUG] File saved to: {filepath}")
+        
+        # Check if reference already exists
+        existing = ManualPayment.query.filter_by(reference=reference.upper()).first()
+        if existing:
+            print(f"[DEBUG] Reference {reference} already exists!")
+            return jsonify({'success': False, 'error': 'This reference has already been submitted'}), 400
+        
+        # Create manual payment request
+        manual_payment = ManualPayment(
+            user_id=g.current_user.id,
+            reference=reference.upper(),
+            amount=amount_float,
+            proof_url=f"/uploads/payment_proofs/{filename}",
+            phone=phone,
+            status='pending',
+            created_at=datetime.utcnow()
+        )
+        db.session.add(manual_payment)
+        db.session.commit()
+        
+        print(f"[DEBUG] Manual payment record created with ID: {manual_payment.id}")
+        
+        # Create notification for admin
+        try:
+            from models import Notification
+            notification = Notification(
+                user_id=g.current_user.id,
+                title='Manual Payment Verification Request',
+                message=f'User {g.current_user.username} submitted a manual payment request of ₵{amount_float} with reference {reference}',
+                type='admin_alert',
+                is_admin_only=True,
+                created_at=datetime.utcnow()
+            )
+            db.session.add(notification)
+            db.session.commit()
+            print(f"[DEBUG] Admin notification created")
+        except Exception as e:
+            print(f"Notification error: {e}")
+        
+        return jsonify({
+            'success': True,
+            'message': 'Payment proof submitted successfully. Admin will review and credit your wallet within 5-30 minutes.',
+            'data': {
+                'reference': reference,
+                'amount': amount_float,
+                'status': 'pending',
+                'id': manual_payment.id
+            }
+        })
+        
+    except Exception as e:
+        print(f"[ERROR] Manual verification error: {e}")
+        import traceback
+        traceback.print_exc()
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/user/pending-payments', methods=['GET'])
+@token_required
+def get_pending_payments():
+    """Get user's pending manual payment requests"""
+    try:
+        pending = ManualPayment.query.filter_by(
+            user_id=g.current_user.id,
+            status='pending'
+        ).order_by(ManualPayment.created_at.desc()).all()
+        
+        return jsonify({
+            'success': True,
+            'data': [{
+                'id': p.id,
+                'reference': p.reference,
+                'amount': float(p.amount),
+                'status': p.status,
+                'created_at': p.created_at.isoformat() if p.created_at else None
+            } for p in pending]
+        })
+        
+    except Exception as e:
+        print(f"Get pending payments error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/user/manual-requests', methods=['GET', 'OPTIONS'])
+@token_required
+def get_user_manual_requests():
+    """Get user's manual payment requests (pending approval)"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        
+        requests = ManualPayment.query.filter_by(
+            user_id=g.current_user.id
+        ).filter(
+            ManualPayment.status.in_(['pending', 'pending_verification'])
+        ).order_by(ManualPayment.created_at.desc()).all()
+        
+        return jsonify({
+            'success': True,
+            'data': [{
+                'id': r.id,                    # Integer ID for upload
+                'reference': r.reference,      # String reference for display
+                'amount': float(r.amount),
+                'status': r.status,
+                'proof_url': r.proof_url,
+                'created_at': r.created_at.isoformat() if r.created_at else None
+            } for r in requests]
+        })
+        
+    except Exception as e:
+        print(f"Get user manual requests error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/agent/earnings', methods=['GET'])
 @token_required
@@ -14729,7 +15600,7 @@ def debug_agent_orders():
 @token_required
 @agent_required
 def get_agent_orders():
-    """Get all orders for the agent"""
+    """Get all orders for the agent with detailed information"""
     try:
         agent = g.current_user
         
@@ -14741,61 +15612,116 @@ def get_agent_orders():
         print(f"Agent Email: {agent.email}")
         print(f"Is Agent: {agent.is_agent}")
         
-        # Get orders where this agent made the sale
-        orders = Order.query.filter_by(agent_id=agent.id).order_by(Order.created_at.desc()).limit(50).all()
+        # Get pagination parameters
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('limit', 20, type=int)
+        status_filter = request.args.get('status', 'all')
+        search = request.args.get('search', '')
         
-        print(f"\nFound {len(orders)} orders for agent {agent.id}")
+        # Build query
+        query = Order.query.filter_by(agent_id=agent.id)
         
-        # Debug: Print each order
-        for idx, order in enumerate(orders):
-            print(f"\nOrder {idx + 1}:")
-            print(f"  ID: {order.id}")
-            print(f"  Order ID: {order.order_id}")
-            print(f"  Agent ID in DB: {order.agent_id}")
-            print(f"  User ID: {order.user_id}")
-            print(f"  Network: {order.network}")
-            print(f"  Size: {order.size_gb}GB")
-            print(f"  Amount: ₵{order.amount}")
-            print(f"  Status: {order.status}")
-            print(f"  Phone: {order.phone_number}")
-            print(f"  Created: {order.created_at}")
+        # Apply status filter
+        if status_filter != 'all':
+            if status_filter == 'delivered':
+                query = query.filter(Order.delivery_status == 'delivered')
+            elif status_filter == 'pending':
+                query = query.filter(Order.delivery_status.in_(['pending', 'queued']))
+            elif status_filter == 'processing':
+                query = query.filter(Order.delivery_status == 'processing')
+            elif status_filter == 'failed':
+                query = query.filter(Order.delivery_status == 'failed')
         
-        # Also check for orders with NULL agent_id
-        null_orders = Order.query.filter(Order.agent_id.is_(None)).count()
-        if null_orders > 0:
-            print(f"\n⚠️ WARNING: {null_orders} orders have NULL agent_id!")
-            
-            # Show sample of NULL agent_id orders
-            sample_null = Order.query.filter(Order.agent_id.is_(None)).limit(3).all()
-            for order in sample_null:
-                print(f"  NULL Agent Order: ID={order.id}, Order={order.order_id}, Amount=₵{order.amount}")
+        # Apply search filter
+        if search:
+            query = query.filter(
+                db.or_(
+                    Order.order_id.ilike(f'%{search}%'),
+                    Order.phone_number.ilike(f'%{search}%'),
+                    Order.customer_name.ilike(f'%{search}%')
+                )
+            )
+        
+        # Get paginated results
+        paginated = query.order_by(Order.created_at.desc()).paginate(
+            page=page, per_page=per_page, error_out=False
+        )
+        
+        orders = paginated.items
+        print(f"\nFound {len(orders)} orders for agent {agent.id} (Page {page} of {paginated.pages})")
         
         orders_list = []
         for order in orders:
+            # Get transaction details for balance info
+            transaction = Transaction.query.filter_by(reference=order.order_id, type='sale').first()
+            
+            # Calculate profit (if not already stored)
+            profit = order.profit if order.profit else (order.amount - order.cost) if order.cost else 0
+            
             orders_list.append({
+                # Basic Info
                 'id': order.id,
                 'order_id': order.order_id,
                 'customer_name': order.customer_name or 'Customer',
                 'customer_phone': order.phone_number,
+                
+                # Product Info
                 'network': order.network,
                 'size_gb': order.size_gb,
-                'amount': float(order.amount),
+                'quantity': order.quantity,
+                'total_gb': order.size_gb * order.quantity,
+                
+                # Financial Info
+                'amount': float(order.amount),  # Customer paid
+                'cost': float(order.cost) if order.cost else 0,  # Wholesale cost
+                'profit': float(profit),  # Agent profit
+                'balance_before': float(transaction.balance_before) if transaction else 0,
+                'balance_after': float(transaction.balance_after) if transaction else 0,
+                'amount_deducted': float(order.cost) if order.cost else float(order.amount),
+                
+                # Status Info
                 'status': order.status,
+                'delivery_status': order.delivery_status or 'pending',
+                'delivery_status_display': get_status_display(order.delivery_status or 'pending'),
+                'delivery_status_updated_at': order.delivery_status_updated_at.isoformat() if order.delivery_status_updated_at else None,
+                
+                # Provider Info
+                'provider': order.provider,
+                'provider_order_id': order.provider_order_id,
+                'provider_reference': order.provider_reference,
+                
+                # Source Info
+                'source': 'Agent' if order.agent_id else 'User',
                 'payment_method': order.payment_method,
+                
+                # Timestamps
                 'created_at': order.created_at.isoformat() if order.created_at else None,
-                'profit': float(order.amount * 0.15)
+                'created_at_display': order.created_at.strftime('%Y-%m-%d %H:%M:%S') if order.created_at else None,
+                'completed_at': order.completed_at.isoformat() if order.completed_at else None,
+                'updated_at': order.delivery_status_updated_at.strftime('%Y-%m-%d %H:%M:%S') if order.delivery_status_updated_at else None,
+                
+                # Error info
+                'error_message': order.last_delivery_error if order.delivery_status == 'failed' else None
             })
         
-        print(f"\n✅ Returning {len(orders_list)} orders to frontend")
+        print(f"✅ Returning {len(orders_list)} orders to frontend")
         print("="*60 + "\n")
         
         return jsonify({
             'success': True,
             'data': orders_list,
-            'debug': {
-                'agent_id': agent.id,
-                'orders_found': len(orders_list),
-                'null_agent_orders': null_orders
+            'pagination': {
+                'page': page,
+                'per_page': per_page,
+                'total': paginated.total,
+                'pages': paginated.pages,
+                'has_next': paginated.has_next,
+                'has_prev': paginated.has_prev
+            },
+            'stats': {
+                'total_orders': paginated.total,
+                'total_sales': float(sum(o.amount for o in orders)),
+                'total_profit': float(sum(o.profit if o.profit else 0 for o in orders))
             }
         })
         
@@ -14803,6 +15729,80 @@ def get_agent_orders():
         print(f"❌ Get agent orders error: {e}")
         import traceback
         traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+def get_status_display(status):
+    """Get human-readable status display"""
+    status_map = {
+        'pending': '⏳ Pending',
+        'queued': '📋 Queued',
+        'processing': '🔄 Processing',
+        'delivered': '✅ Delivered',
+        'failed': '❌ Failed',
+        'cancelled': '🚫 Cancelled',
+        'refunded': '💰 Refunded',
+        'resolved': '✓ Resolved'
+    }
+    return status_map.get(status, status)
+
+@app.route('/api/agent/orders/stats', methods=['GET'])
+@token_required
+@agent_required
+def get_agent_orders_stats():
+    """Get order statistics summary"""
+    try:
+        agent = g.current_user
+        
+        # Get all orders
+        orders = Order.query.filter_by(agent_id=agent.id).all()
+        
+        # Calculate stats
+        total_orders = len(orders)
+        total_sales = sum(o.amount for o in orders)
+        total_cost = sum(o.cost for o in orders if o.cost)
+        total_profit = total_sales - total_cost
+        
+        # Status breakdown
+        status_counts = {}
+        delivery_status_counts = {}
+        for order in orders:
+            status = order.status
+            delivery_status = order.delivery_status or 'pending'
+            status_counts[status] = status_counts.get(status, 0) + 1
+            delivery_status_counts[delivery_status] = delivery_status_counts.get(delivery_status, 0) + 1
+        
+        # Network breakdown
+        network_sales = {}
+        for order in orders:
+            network = order.network
+            network_sales[network] = network_sales.get(network, 0) + order.amount
+        
+        # Today's stats
+        today = datetime.utcnow().date()
+        today_start = datetime.combine(today, datetime.min.time())
+        today_orders = [o for o in orders if o.created_at >= today_start]
+        today_sales = sum(o.amount for o in today_orders)
+        today_profit = sum(o.amount - (o.cost or 0) for o in today_orders)
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'total_orders': total_orders,
+                'total_sales': float(total_sales),
+                'total_cost': float(total_cost),
+                'total_profit': float(total_profit),
+                'avg_order_value': float(total_sales / total_orders) if total_orders > 0 else 0,
+                'today_orders': len(today_orders),
+                'today_sales': float(today_sales),
+                'today_profit': float(today_profit),
+                'status_breakdown': status_counts,
+                'delivery_status_breakdown': delivery_status_counts,
+                'network_sales': network_sales
+            }
+        })
+        
+    except Exception as e:
+        print(f"Get agent orders stats error: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
@@ -17705,53 +18705,74 @@ class BillPaymentService:
             'completed_at': p.completed_at.isoformat() if p.completed_at else None
         } for p in payments]
 
-
-# ========== REFERRAL CLAIM ENDPOINT ==========
-# ========== USER ENDPOINTS FOR DASHBOARD ==========
-
 @app.route('/api/user/orders', methods=['GET'])
 @token_required
 def get_user_orders():
-    """Get user orders with pagination"""
+    """Get user's orders with delivery status"""
     try:
-        user = g.current_user
+        limit = request.args.get('limit', 50, type=int)
         
-        # Get pagination parameters
-        page = request.args.get('page', 1, type=int)
-        per_page = request.args.get('limit', 20, type=int)
-        
-        # Query orders for this user with pagination
-        paginated_orders = Order.query.filter_by(
-            user_id=user.id
-        ).order_by(Order.created_at.desc()).paginate(
-            page=page, per_page=per_page, error_out=False
-        )
-        
-        orders = []
-        for order in paginated_orders.items:
-            orders.append({
-                'order_id': order.order_id,
-                'phone': order.phone_number,
-                'network': order.network,
-                'size_gb': order.size_gb,
-                'amount': float(order.amount),
-                'status': order.status,
-                'payment_method': order.payment_method,
-                'created_at': order.created_at.isoformat() if order.created_at else None,
-                'date': order.created_at.strftime('%Y-%m-%d %H:%M:%S') if order.created_at else None
-            })
+        orders = Order.query.filter_by(
+            user_id=g.current_user.id
+        ).order_by(Order.created_at.desc()).limit(limit).all()
         
         return jsonify({
             'success': True,
-            'data': orders,
-            'total_pages': paginated_orders.pages,
-            'current_page': page,
-            'total': paginated_orders.total
+            'data': [{
+                'order_id': o.order_id,
+                'network': o.network,
+                'size_gb': o.size_gb,
+                'amount': o.amount,
+                'status': o.status,
+                'delivery_status': o.delivery_status,  # NEW
+                'delivery_status_updated_at': o.delivery_status_updated_at.isoformat() if o.delivery_status_updated_at else None,
+                'phone': o.phone_number,
+                'date': o.created_at.strftime('%Y-%m-%d %H:%M:%S')
+            } for o in orders]
         })
         
     except Exception as e:
-        print(f"User orders error: {e}")
-        return jsonify({'success': False, 'error': 'Failed to fetch orders'}), 500
+        print(f"Get user orders error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/order/<order_id>/status', methods=['GET'])
+@token_required
+def get_order_status(order_id):
+    """Get specific order's delivery status"""
+    try:
+        order = Order.query.filter_by(
+            order_id=order_id,
+            user_id=g.current_user.id
+        ).first_or_404()
+        
+        # Optionally fetch fresh status from Digimall
+        if order.provider == 'digimall' and order.delivery_status not in ['delivered', 'failed']:
+            digimall = DigimallService()
+            fresh_status = digimall.get_order_status(order.provider_order_id or order.provider_reference)
+            
+            if fresh_status.get('success'):
+                # Update local status if changed
+                new_status = fresh_status.get('status')
+                if new_status and new_status != order.delivery_status:
+                    order.delivery_status = new_status
+                    order.delivery_status_updated_at = datetime.utcnow()
+                    db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'order_id': order.order_id,
+                'delivery_status': order.delivery_status,
+                'status_updated_at': order.delivery_status_updated_at.isoformat() if order.delivery_status_updated_at else None,
+                'provider': order.provider,
+                'provider_order_id': order.provider_order_id
+            }
+        })
+        
+    except Exception as e:
+        print(f"Get order status error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/user/wallet/history', methods=['GET'])
 @token_required
@@ -18665,6 +19686,56 @@ def forbidden_error(error):
         'status_code': 403
     }), 403
 
+
+@app.errorhandler(SQLAlchemyError)
+def handle_db_error(error):
+    """Handle database errors gracefully"""
+    print(f"Database error: {error}")
+    db.session.rollback()
+    return jsonify({
+        'success': False,
+        'error': 'A system error occurred. Please try again later.'
+    }), 500
+
+@app.errorhandler(IntegrityError)
+def handle_integrity_error(error):
+    """Handle database integrity errors"""
+    print(f"Integrity error: {error}")
+    db.session.rollback()
+    return jsonify({
+        'success': False,
+        'error': 'Invalid data submitted. Please check your input.'
+    }), 400
+
+@app.errorhandler(DataError)
+def handle_data_error(error):
+    """Handle data type errors (like VARCHAR truncation)"""
+    print(f"Data error: {error}")
+    db.session.rollback()
+    return jsonify({
+        'success': False,
+        'error': 'The data you entered is too long. Please shorten your input.'
+    }), 400
+
+@app.errorhandler(500)
+def handle_500_error(error):
+    """Handle unexpected 500 errors"""
+    print(f"500 error: {error}")
+    return jsonify({
+        'success': False,
+        'error': 'Something went wrong. Our team has been notified.'
+    }), 500
+
+@app.errorhandler(Exception)
+def handle_generic_error(error):
+    """Handle any unhandled exceptions"""
+    print(f"Unhandled error: {error}")
+    import traceback
+    traceback.print_exc()
+    return jsonify({
+        'success': False,
+        'error': 'An unexpected error occurred. Please try again.'
+    }), 500
 
 # ========== RUN APP ==========
 

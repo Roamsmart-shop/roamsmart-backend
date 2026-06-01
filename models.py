@@ -269,46 +269,41 @@ class DataBundle(db.Model):
 # ========== ORDER MODEL ==========
 class Order(db.Model):
     __tablename__ = 'orders'
-    
     id = db.Column(db.Integer, primary_key=True)
     order_id = db.Column(db.String(20), unique=True, default=lambda: f"RS-{uuid.uuid4().hex[:8].upper()}")
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     agent_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
-    
-    # Order Details
-    type = db.Column(db.String(20), default='data')  # 'data', 'bill_payment', 'waec'
+    type = db.Column(db.String(20), default='data') 
     network = db.Column(db.String(20), nullable=True)
     size_gb = db.Column(db.Float, nullable=True)
     quantity = db.Column(db.Integer, default=1)
     phone_number = db.Column(db.String(20), nullable=True)
     customer_name = db.Column(db.String(100), nullable=True)
-    
-    # ========== BILL PAYMENT FIELDS (ADD THESE) ==========
-    biller_code = db.Column(db.String(20), nullable=True)  # ECG, GWCL, DSTV, etc.
+    biller_code = db.Column(db.String(20), nullable=True)  
     biller_name = db.Column(db.String(100), nullable=True)
     account_number = db.Column(db.String(50), nullable=True)
-    
-    # Payment and Costs
-    amount = db.Column(db.Float, nullable=False)  # Customer paid amount
-    cost = db.Column(db.Float, default=0.0)  # Agent's wholesale cost
-    profit = db.Column(db.Float, default=0.0)  # Profit made (amount - cost)
+    amount = db.Column(db.Float, nullable=False)  
+    cost = db.Column(db.Float, default=0.0)  
+    profit = db.Column(db.Float, default=0.0)  
     payment_method = db.Column(db.String(20), default='wallet')
     payment_reference = db.Column(db.String(100), nullable=True)
-    
-    # Delivery Provider
-    provider = db.Column(db.String(50), nullable=True)  # 'digimall', 'africastalking', 'hubtel', etc.
-    provider_order_id = db.Column(db.String(100), nullable=True)  # Order ID from provider
-    provider_reference = db.Column(db.String(100), nullable=True)  # Reference from provider
-    provider_cost = db.Column(db.Float, default=0.0)  # Cost charged by provider
-    
-    # Status
-    status = db.Column(db.String(20), default='pending')
-    
-    # Timestamps
+    provider = db.Column(db.String(50), nullable=True) 
+    provider_order_id = db.Column(db.String(100), nullable=True)  
+    provider_reference = db.Column(db.String(100), nullable=True)  
+    provider_cost = db.Column(db.Float, default=0.0)  
+    delivery_status = db.Column(db.String(30), default='pending') 
+    delivery_status_updated_at = db.Column(db.DateTime, nullable=True)
+    delivery_attempts = db.Column(db.Integer, default=0)
+    last_delivery_error = db.Column(db.String(500), nullable=True)
+    webhook_received = db.Column(db.Boolean, default=False)
+    webhook_last_payload = db.Column(db.JSON, nullable=True)
+    webhook_retry_count = db.Column(db.Integer, default=0)
+    status = db.Column(db.String(20), default='pending')  
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     completed_at = db.Column(db.DateTime, nullable=True)
+    last_status_check = db.Column(db.DateTime, nullable=True) 
     
-    # Relationships
+    
     customer = db.relationship('User', foreign_keys=[user_id], backref='purchases')
     agent = db.relationship('User', foreign_keys=[agent_id], backref='sales')
     
@@ -333,10 +328,54 @@ class Order(db.Model):
             'payment_method': self.payment_method,
             'provider': self.provider,
             'provider_order_id': self.provider_order_id,
-            'status': self.status,
+            'status': self.status,  # payment status
+            'delivery_status': self.delivery_status,  # NEW: delivery status
+            'delivery_status_updated_at': self.delivery_status_updated_at.isoformat() if self.delivery_status_updated_at else None,
             'created_at': self.created_at.isoformat() if self.created_at else None,
-            'date': self.created_at.strftime('%Y-%m-%d %H:%M:%S') if self.created_at else None
+            'date': self.created_at.strftime('%Y-%m-%d %H:%M:%S') if self.created_at else None,
+            'completed_at': self.completed_at.isoformat() if self.completed_at else None
         }
+    
+    def get_delivery_status_display(self):
+        """Get human-readable delivery status"""
+        status_map = {
+            'pending': '⏳ Pending',
+            'queued': '📋 Queued',
+            'processing': '🔄 Processing',
+            'delivered': '✅ Delivered',
+            'failed': '❌ Failed',
+            'cancelled': '🚫 Cancelled',
+            'refunded': '💰 Refunded',
+            'resolved': '✓ Resolved'
+        }
+        return status_map.get(self.delivery_status, self.delivery_status or 'Unknown')
+    
+    def update_delivery_status(self, new_status, error=None):
+        """Update delivery status with timestamp"""
+        self.delivery_status = new_status
+        self.delivery_status_updated_at = datetime.utcnow()
+        if error:
+            self.last_delivery_error = error
+        db.session.commit()
+    
+    def set_safe_values(self, **kwargs):
+        """Set values with safe truncation"""
+        max_lengths = {
+            'order_id': 100,
+            'provider_order_id': 200,
+            'provider_reference': 200,
+            'customer_name': 200,
+            'phone_number': 20,
+            'network': 20,
+            'biller_code': 50,
+            'account_number': 100
+        }
+        
+        for key, value in kwargs.items():
+            if key in max_lengths and value and len(str(value)) > max_lengths[key]:
+                value = str(value)[:max_lengths[key]]
+            setattr(self, key, value)
+
 
 class RecurringBill(db.Model):
     __tablename__ = 'recurring_bills'
@@ -574,6 +613,7 @@ class Store(db.Model):
     
     # Pricing
     markup = db.Column(db.Integer, default=15)
+    custom_prices = db.Column(db.JSON, nullable=True)  # ADD THIS LINE
     
     # Status
     is_active = db.Column(db.Boolean, default=True)
@@ -597,12 +637,12 @@ class Store(db.Model):
             'logo_url': self.logo_url,
             'banner_color': self.banner_color,
             'markup': self.markup,
+            'custom_prices': self.custom_prices,  # ADD THIS
             'is_active': self.is_active,
             'total_sales': self.total_sales,
             'total_orders': self.total_orders,
             'store_url': f"/store/{self.store_slug}"
         }
-
 class AgentProductPrice(db.Model):
     __tablename__ = 'agent_product_prices'
     
