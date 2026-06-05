@@ -543,6 +543,7 @@ class Transaction(db.Model):
     
     # Timestamps
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)  # Add this line
     
     def to_dict(self):
         return {
@@ -554,9 +555,9 @@ class Transaction(db.Model):
             'description': self.description,
             'reference': self.reference,
             'status': self.status,
-            'created_at': self.created_at.isoformat() if self.created_at else None
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None  # Add this line
         }
-
 # ========== AGENT REQUEST MODEL ==========
 class AgentRequest(db.Model):
     __tablename__ = 'agent_requests'
