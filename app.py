@@ -6564,8 +6564,9 @@ def initiate_store_payment():
             'Content-Type': 'application/json'
         }
         
-        # Get frontend URL from environment (no hardcoded localhost)
+        # Build callback URL with fallback to store URL
         frontend_url = current_app.config.get('FRONTEND_URL', 'https://roamsmart.shop')
+        callback_url = f"{frontend_url}/store/{store_slug}?reference={payment_ref}"
         
         payload = {
             'email': customer_email,
@@ -6580,8 +6581,10 @@ def initiate_store_payment():
                 'phone': phone,
                 'session_id': payment_session.id
             },
-            'callback_url': f"{frontend_url}/store/{store_slug}?reference={payment_ref}"
+            'callback_url': callback_url
         }
+        
+        print(f"🔗 Callback URL: {callback_url}")
         
         response = requests.post(
             'https://api.paystack.co/transaction/initialize',
