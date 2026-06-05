@@ -6141,9 +6141,10 @@ def retry_order(order_id):
 
 @app.route('/api/store/<slug>', methods=['GET'])
 def get_public_store(slug):
-    """Get public store data (no login required)"""
+    """Get public store data (no login required) - Filters unavailable packages"""
     try:
         from models import Store, User
+        from sqlalchemy import text
         
         store = Store.query.filter_by(store_slug=slug, is_active=True).first()
         
@@ -6154,17 +6155,63 @@ def get_public_store(slug):
         if not agent:
             return jsonify({'success': False, 'error': 'Store owner not found'}), 404
         
+        # Get unavailable packages from database
+        unavailable_packages = {}
+        try:
+            result = db.session.execute(text("""
+                SELECT network, size_gb 
+                FROM package_availability 
+                WHERE is_available = FALSE
+            """))
+            for row in result:
+                network = row[0]
+                size_gb = str(int(row[1])) if float(row[1]).is_integer() else str(row[1])
+                if network not in unavailable_packages:
+                    unavailable_packages[network] = []
+                unavailable_packages[network].append(size_gb)
+            print(f"Unavailable packages filtered: {unavailable_packages}")
+        except Exception as e:
+            print(f"Error fetching unavailable packages: {e}")
+        
         # Use the store's own markup (no StoreSettings needed)
         markup = store.markup if store.markup else 15
         
-        # Get agent's wholesale prices
+        # Get agent's wholesale prices - filter unavailable sizes
         agent_bundles = {}
+        # Get all available sizes from price_settings first
+        all_sizes = set()
+        price_settings = PriceSetting.query.filter_by(category='agent_price', is_available=True).all()
+        for setting in price_settings:
+            if setting.network and setting.size_gb:
+                all_sizes.add(setting.size_gb)
+        
+        # Sort sizes
+        all_sizes = sorted(list(all_sizes))
+        
         for network in ['mtn', 'telecel', 'airteltigo']:
             agent_bundles[network] = {}
-            for size_gb in [1, 2, 5, 10, 20]:
+            for size_gb in all_sizes:
+                # Skip if this size is unavailable for this network
+                size_str = str(size_gb)
+                if size_str in unavailable_packages.get(network, []):
+                    print(f"Skipping unavailable: {network} {size_gb}GB")
+                    continue
+                    
                 price = get_agent_price(network, size_gb)
                 if price > 0:
                     agent_bundles[network][size_gb] = price
+        
+        # Filter custom prices to remove unavailable sizes
+        filtered_custom_prices = {}
+        if store.custom_prices:
+            for network, prices in store.custom_prices.items():
+                filtered_custom_prices[network] = {}
+                for size, price in prices.items():
+                    size_str = str(size)
+                    if size_str not in unavailable_packages.get(network, []):
+                        filtered_custom_prices[network][size] = price
+                    else:
+                        print(f"Filtered out custom price: {network} {size}GB")
         
         return jsonify({
             'success': True,
@@ -6177,7 +6224,7 @@ def get_public_store(slug):
                 'contact_phone': store.contact_phone or agent.phone,
                 'contact_email': store.contact_email or agent.email,
                 'markup': markup,
-                'custom_prices': store.custom_prices or {},
+                'custom_prices': filtered_custom_prices,
                 'agent_id': store.agent_id,
                 'agent_name': agent.username if agent else None,
                 'bundles': agent_bundles,
