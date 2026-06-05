@@ -271,7 +271,7 @@ class Order(db.Model):
     __tablename__ = 'orders'
     id = db.Column(db.Integer, primary_key=True)
     order_id = db.Column(db.String(20), unique=True, default=lambda: f"RS-{uuid.uuid4().hex[:8].upper()}")
-    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     agent_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     type = db.Column(db.String(20), default='data') 
     network = db.Column(db.String(20), nullable=True)
@@ -442,19 +442,71 @@ class AgentInventoryTransaction(db.Model):
             'created_at': self.created_at.isoformat() if self.created_at else None
         }
 
-# models.py - Add this model
+# models.py - Add this class
 
+class StorePayment(db.Model):
+    __tablename__ = 'store_payments'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    order_id = db.Column(db.Integer, db.ForeignKey('orders.id'), nullable=False)
+    store_id = db.Column(db.Integer, db.ForeignKey('stores.id'), nullable=False)
+    
+    amount = db.Column(db.Float, nullable=False)
+    reference = db.Column(db.String(100), unique=True, nullable=False)
+    payment_method = db.Column(db.String(50), nullable=False)  # mobile_money, bank_transfer, paystack
+    
+    # Payment details
+    recipient_phone = db.Column(db.String(20), nullable=True)
+    recipient_name = db.Column(db.String(100), nullable=True)
+    bank_name = db.Column(db.String(100), nullable=True)
+    account_name = db.Column(db.String(100), nullable=True)
+    account_number = db.Column(db.String(50), nullable=True)
+    
+    # Paystack specific
+    paystack_reference = db.Column(db.String(100), nullable=True)
+    paystack_amount = db.Column(db.Float, nullable=True)
+    
+    # Status
+    status = db.Column(db.String(20), default='pending')  # pending, completed, failed, refunded
+    
+    # Timestamps
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    verified_at = db.Column(db.DateTime, nullable=True)
+    
+    # Relationships
+    order = db.relationship('Order', backref='store_payment', uselist=False)
+    store = db.relationship('Store', backref='payments')
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'order_id': self.order_id,
+            'store_id': self.store_id,
+            'amount': self.amount,
+            'reference': self.reference,
+            'payment_method': self.payment_method,
+            'recipient_phone': self.recipient_phone,
+            'recipient_name': self.recipient_name,
+            'bank_name': self.bank_name,
+            'account_name': self.account_name,
+            'account_number': self.account_number,
+            'status': self.status,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'verified_at': self.verified_at.isoformat() if self.verified_at else None
+        }
+    
 class PriceSetting(db.Model):
     __tablename__ = 'price_settings'
     
     id = db.Column(db.Integer, primary_key=True)
-    category = db.Column(db.String(50), nullable=False)  # user_price, agent_price, waec_price, commission_rate
-    network = db.Column(db.String(50), nullable=True)    # mtn, telecel, airteltigo
-    size_gb = db.Column(db.Integer, nullable=True)       # 1, 2, 5, 10, 20
-    exam_type = db.Column(db.String(50), nullable=True)  # WASSCE, BECE, SHS Placement
-    tier = db.Column(db.String(50), nullable=True)       # Bronze, Silver, Gold, Platinum
+    category = db.Column(db.String(50), nullable=False)  
+    network = db.Column(db.String(50), nullable=True)    
+    size_gb = db.Column(db.Integer, nullable=True)       
+    exam_type = db.Column(db.String(50), nullable=True)  
+    tier = db.Column(db.String(50), nullable=True)       
     price = db.Column(db.Numeric(10, 2), nullable=True)
-    rate = db.Column(db.Numeric(5, 2), nullable=True)    # For commission rates
+    rate = db.Column(db.Numeric(5, 2), nullable=True)
+    is_available = db.Column(db.Boolean, default=True)  # NEW COLUMN
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
@@ -468,19 +520,17 @@ class PriceSetting(db.Model):
             'tier': self.tier,
             'price': float(self.price) if self.price else None,
             'rate': float(self.rate) if self.rate else None,
+            'is_available': self.is_available,  # NEW
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None
         }
-
 # ========== TRANSACTION MODEL ==========
 class Transaction(db.Model):
     __tablename__ = 'transactions'
     
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
-    
-    # Transaction Details
-    type = db.Column(db.String(20), nullable=False)  # purchase, fund, withdrawal, commission, refund, credit, debit
+    type = db.Column(db.String(20), nullable=False)  
     amount = db.Column(db.Float, nullable=False)
     balance_before = db.Column(db.Float, nullable=False)
     balance_after = db.Column(db.Float, nullable=False)
@@ -595,14 +645,11 @@ class Notification(db.Model):
             'created_at': self.created_at.isoformat() if self.created_at else None
         }
 
-# ========== STORE MODEL ==========
 class Store(db.Model):
     __tablename__ = 'stores'
     
     id = db.Column(db.Integer, primary_key=True)
     agent_id = db.Column(db.Integer, db.ForeignKey('users.id'), unique=True, nullable=False)
-    
-    # Store Details
     store_name = db.Column(db.String(100), nullable=False)
     store_slug = db.Column(db.String(100), unique=True, nullable=False)
     contact_phone = db.Column(db.String(20), nullable=False)
@@ -610,19 +657,12 @@ class Store(db.Model):
     store_description = db.Column(db.Text, nullable=True)
     logo_url = db.Column(db.String(500), nullable=True)
     banner_color = db.Column(db.String(7), default='#8B0000')
-    
-    # Pricing
     markup = db.Column(db.Integer, default=15)
-    custom_prices = db.Column(db.JSON, nullable=True)  # ADD THIS LINE
-    
-    # Status
+    custom_prices = db.Column(db.JSON, nullable=True)      # Original column
+    custom_products = db.Column(db.JSON, nullable=True)    # New column (add this)
     is_active = db.Column(db.Boolean, default=True)
-    
-    # Stats
     total_sales = db.Column(db.Float, default=0.0)
     total_orders = db.Column(db.Integer, default=0)
-    
-    # Timestamps
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
@@ -637,12 +677,67 @@ class Store(db.Model):
             'logo_url': self.logo_url,
             'banner_color': self.banner_color,
             'markup': self.markup,
-            'custom_prices': self.custom_prices,  # ADD THIS
+            'custom_prices': self.custom_prices,
+            'custom_products': self.custom_products,  # Add this
             'is_active': self.is_active,
             'total_sales': self.total_sales,
             'total_orders': self.total_orders,
             'store_url': f"/store/{self.store_slug}"
         }
+
+# models.py - Add this model
+class PackageAvailability(db.Model):
+    __tablename__ = 'package_availability'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    network = db.Column(db.String(50), nullable=False)
+    size_gb = db.Column(db.Float, nullable=False)
+    is_available = db.Column(db.Boolean, default=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    
+    # Add unique constraint
+    __table_args__ = (db.UniqueConstraint('network', 'size_gb', name='unique_network_size'),)
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'network': self.network,
+            'size_gb': self.size_gb,
+            'is_available': self.is_available,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None
+        }
+
+class PaymentSession(db.Model):
+    __tablename__ = 'payment_sessions'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    reference = db.Column(db.String(100), unique=True, nullable=False)
+    store_slug = db.Column(db.String(100), nullable=False)
+    agent_id = db.Column(db.Integer, nullable=False)
+    network = db.Column(db.String(20), nullable=False)
+    size_gb = db.Column(db.Float, nullable=False)
+    phone = db.Column(db.String(20), nullable=False)
+    amount = db.Column(db.Float, nullable=False)
+    status = db.Column(db.String(20), default='pending')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    expires_at = db.Column(db.DateTime, default=lambda: datetime.utcnow() + timedelta(hours=1))
+    order_id = db.Column(db.String(50), nullable=True)
+    def to_dict(self):
+        return {
+            'reference': self.reference,
+            'store_slug': self.store_slug,
+            'agent_id': self.agent_id,
+            'network': self.network,
+            'size_gb': self.size_gb,
+            'phone': self.phone,
+            'amount': self.amount,
+            'status': self.status,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'order_id': self.order_id
+        }
+
 class AgentProductPrice(db.Model):
     __tablename__ = 'agent_product_prices'
     

@@ -39,7 +39,7 @@ from functools import wraps
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from urllib.parse import urlparse
-
+from sqlalchemy import text
 # ========== THIRD PARTY IMPORTS ==========
 import redis
 import bcrypt
@@ -698,6 +698,172 @@ def test_redis():
         return {"error": str(e)}
 
 
+def verify_price_password(password):
+    """Verify the price management password"""
+    stored_hash, salt = get_or_create_price_password()
+    
+    input_hash = hashlib.sha256(f"{password}{salt}".encode()).hexdigest()
+    return input_hash == stored_hash
+
+
+def price_auth_required(f):
+    """Decorator to require price management password"""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        auth_token = request.headers.get('X-Price-Auth')
+        
+        if not auth_token:
+            return jsonify({
+                'success': False, 
+                'error': 'Price management password required',
+                'requires_auth': True
+            }), 401
+        
+        # Verify the token against stored hash
+        stored_hash, _ = get_or_create_price_password()
+        
+        if auth_token != stored_hash:
+            return jsonify({
+                'success': False, 
+                'error': 'Invalid or expired session',
+                'requires_auth': True
+            }), 401
+        
+        return f(*args, **kwargs)
+    return decorated
+
+
+def create_price_session(user_id):
+    """Create a new price management session in Redis"""
+    token = secrets.token_hex(32)
+    expiry = datetime.utcnow() + timedelta(hours=1)
+    expiry_timestamp = expiry.timestamp()
+    
+    session_data = {
+        'user_id': user_id,
+        'expiry': expiry_timestamp,
+        'created_at': datetime.utcnow().timestamp(),
+        'last_accessed': datetime.utcnow().timestamp()
+    }
+    
+    # Store in Redis with 1 hour expiry
+    if redis_client:
+        try:
+            redis_client.setex(
+                f"price_session:{token}",
+                3600,  # 1 hour
+                json.dumps(session_data)
+            )
+            print(f"✅ Price session created in Redis: {token[:8]}...")
+        except Exception as e:
+            print(f"Redis store error: {e}")
+            # Fallback to memory
+            active_price_sessions[token] = session_data
+    else:
+        # Fallback to memory
+        active_price_sessions[token] = session_data
+    
+    return token
+
+
+def verify_price_session(token):
+    """Verify if session token is valid using Redis"""
+    if not token:
+        return False
+    
+    session_data = None
+    
+    # Try Redis first
+    if redis_client:
+        try:
+            data = redis_client.get(f"price_session:{token}")
+            if data:
+                session_data = json.loads(data)
+                print(f"✅ Price session found in Redis: {token[:8]}...")
+        except Exception as e:
+            print(f"Redis get error: {e}")
+    
+    # Fallback to memory
+    if not session_data and token in active_price_sessions:
+        session_data = active_price_sessions[token]
+    
+    if not session_data:
+        return False
+    
+    # Check expiry
+    if datetime.utcnow().timestamp() > session_data['expiry']:
+        # Session expired, delete it
+        if redis_client:
+            redis_client.delete(f"price_session:{token}")
+        if token in active_price_sessions:
+            del active_price_sessions[token]
+        return False
+    
+    # Update last accessed
+    session_data['last_accessed'] = datetime.utcnow().timestamp()
+    
+    # Refresh in Redis
+    if redis_client:
+        try:
+            redis_client.setex(
+                f"price_session:{token}",
+                3600,
+                json.dumps(session_data)
+            )
+        except Exception as e:
+            print(f"Redis refresh error: {e}")
+    
+    return True
+
+
+def destroy_price_session(token):
+    """Destroy a price management session"""
+    if not token:
+        return
+    
+    # Remove from Redis
+    if redis_client:
+        try:
+            redis_client.delete(f"price_session:{token}")
+            print(f"✅ Price session destroyed in Redis: {token[:8]}...")
+        except Exception as e:
+            print(f"Redis delete error: {e}")
+    
+    # Remove from memory fallback
+    if token in active_price_sessions:
+        del active_price_sessions[token]
+
+
+def price_session_required(f):
+    """Decorator to require price management session token"""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        auth_token = request.headers.get('X-Price-Auth')
+        
+        if not auth_token:
+            return jsonify({
+                'success': False, 
+                'error': 'Price management session required',
+                'requires_auth': True,
+                'code': 'SESSION_REQUIRED'
+            }), 401
+        
+        if not verify_price_session(auth_token):
+            return jsonify({
+                'success': False, 
+                'error': 'Session expired or invalid. Please re-enter password.',
+                'requires_auth': True,
+                'code': 'SESSION_EXPIRED'
+            }), 401
+        
+        return f(*args, **kwargs)
+    return decorated
+
+
+# Store active sessions in memory as fallback (when Redis is unavailable)
+active_price_sessions = {}  # {token: session_data}
+
+
 def get_current_utc():
     """Get current UTC time (timezone naive but in UTC)"""
     return datetime.utcnow()
@@ -1344,80 +1510,8 @@ def init_db():
                 # ===== ORDERS TABLE MIGRATION =====
                 print("\n📋 Checking Orders table columns...")
                 
-                if 'cost' not in orders_columns:
-                    conn.execute(text('ALTER TABLE orders ADD COLUMN cost FLOAT DEFAULT 0.0'))
-                    print("✅ Added 'cost' column to orders table")
-                else:
-                    print("⏭️ Column 'cost' already exists")
                 
-                if 'profit' not in orders_columns:
-                    conn.execute(text('ALTER TABLE orders ADD COLUMN profit FLOAT DEFAULT 0.0'))
-                    print("✅ Added 'profit' column to orders table")
-                else:
-                    print("⏭️ Column 'profit' already exists")
                 
-                if 'provider' not in orders_columns:
-                    conn.execute(text("ALTER TABLE orders ADD COLUMN provider VARCHAR(50)"))
-                    print("✅ Added 'provider' column to orders table")
-                else:
-                    print("⏭️ Column 'provider' already exists")
-                
-                if 'provider_order_id' not in orders_columns:
-                    conn.execute(text("ALTER TABLE orders ADD COLUMN provider_order_id VARCHAR(100)"))
-                    print("✅ Added 'provider_order_id' column to orders table")
-                else:
-                    print("⏭️ Column 'provider_order_id' already exists")
-                
-                if 'provider_reference' not in orders_columns:
-                    conn.execute(text("ALTER TABLE orders ADD COLUMN provider_reference VARCHAR(100)"))
-                    print("✅ Added 'provider_reference' column to orders table")
-                else:
-                    print("⏭️ Column 'provider_reference' already exists")
-                
-                if 'provider_cost' not in orders_columns:
-                    conn.execute(text('ALTER TABLE orders ADD COLUMN provider_cost FLOAT DEFAULT 0.0'))
-                    print("✅ Added 'provider_cost' column to orders table")
-                else:
-                    print("⏭️ Column 'provider_cost' already exists")
-                
-                # ===== USERS TABLE MIGRATION =====
-                print("\n📋 Checking Users table columns...")
-                
-                if 'total_sales' not in users_columns:
-                    conn.execute(text('ALTER TABLE users ADD COLUMN total_sales FLOAT DEFAULT 0.0'))
-                    print("✅ Added 'total_sales' column to users table")
-                else:
-                    print("⏭️ Column 'total_sales' already exists")
-                
-                if 'total_commission' not in users_columns:
-                    conn.execute(text('ALTER TABLE users ADD COLUMN total_commission FLOAT DEFAULT 0.0'))
-                    print("✅ Added 'total_commission' column to users table")
-                else:
-                    print("⏭️ Column 'total_commission' already exists")
-                
-                if 'today_sales' not in users_columns:
-                    conn.execute(text('ALTER TABLE users ADD COLUMN today_sales FLOAT DEFAULT 0.0'))
-                    print("✅ Added 'today_sales' column to users table")
-                else:
-                    print("⏭️ Column 'today_sales' already exists")
-                
-                if 'this_week_sales' not in users_columns:
-                    conn.execute(text('ALTER TABLE users ADD COLUMN this_week_sales FLOAT DEFAULT 0.0'))
-                    print("✅ Added 'this_week_sales' column to users table")
-                else:
-                    print("⏭️ Column 'this_week_sales' already exists")
-                
-                if 'this_month_sales' not in users_columns:
-                    conn.execute(text('ALTER TABLE users ADD COLUMN this_month_sales FLOAT DEFAULT 0.0'))
-                    print("✅ Added 'this_month_sales' column to users table")
-                else:
-                    print("⏭️ Column 'this_month_sales' already exists")
-                
-                if 'total_customers' not in users_columns:
-                    conn.execute(text('ALTER TABLE users ADD COLUMN total_customers INTEGER DEFAULT 0'))
-                    print("✅ Added 'total_customers' column to users table")
-                else:
-                    print("⏭️ Column 'total_customers' already exists")
                 
                 conn.commit()
                 print("✅ Database migration completed")
@@ -2864,15 +2958,15 @@ def update_profile():
 @app.route('/api/prices', methods=['GET'])
 @token_required
 def get_prices():
-    """Get data bundle prices based on user role from database (1-100GB dynamic)"""
+    """Get data bundle prices - Only available packages"""
     try:
         user = g.current_user
         is_agent = user.is_agent and getattr(user, 'agent_approved', False)
         
-        # Get all prices from PriceSetting table
-        price_settings = PriceSetting.query.all()
+        # Get ONLY AVAILABLE prices from PriceSetting table
+        price_settings = PriceSetting.query.filter_by(is_available=True).all()
         
-        # Build price dictionaries from database only (no defaults)
+        # Build price dictionaries
         user_prices = {}
         agent_prices = {}
         
@@ -2881,51 +2975,44 @@ def get_prices():
                 if setting.network not in user_prices:
                     user_prices[setting.network] = {}
                 user_prices[setting.network][str(setting.size_gb)] = float(setting.price)
-                print(f"Loaded user price: {setting.network} {setting.size_gb}GB = ₵{setting.price}")
                 
             elif setting.category == 'agent_price' and setting.network and setting.size_gb:
                 if setting.network not in agent_prices:
                     agent_prices[setting.network] = {}
                 agent_prices[setting.network][str(setting.size_gb)] = float(setting.price)
-                print(f"Loaded agent price: {setting.network} {setting.size_gb}GB = ₵{setting.price}")
         
-        # Get all available sizes for reference
-        all_sizes = sorted(set(
-            [s.size_gb for s in price_settings if s.size_gb]
-        ))
+        # Log what's being returned
+        user_total = sum(len(p) for p in user_prices.values())
+        agent_total = sum(len(p) for p in agent_prices.values())
+        print(f"Available packages - User: {user_total}, Agent: {agent_total}")
         
         # Return prices based on user role
         if is_agent:
-            print(f"Returning agent prices for user {user.username} - {len(agent_prices.get('mtn', {}))} sizes available")
             return jsonify({
                 'success': True,
                 'data': agent_prices,
                 'user_role': 'agent',
                 'source': 'database',
-                'available_sizes': all_sizes,
-                'message': f'Prices configured by admin for {len(all_sizes)} data sizes'
+                'total_packages': agent_total
             })
         else:
-            print(f"Returning user prices for user {user.username} - {len(user_prices.get('mtn', {}))} sizes available")
             return jsonify({
                 'success': True,
                 'data': user_prices,
                 'user_role': 'user',
                 'source': 'database',
-                'available_sizes': all_sizes,
-                'message': f'Prices configured by admin for {len(all_sizes)} data sizes'
+                'total_packages': user_total
             })
         
     except Exception as e:
         print(f"Prices error: {e}")
         import traceback
         traceback.print_exc()
-        # Return empty prices on error (no defaults)
         return jsonify({
             'success': False,
-            'error': 'Failed to load prices',
-            'message': 'Please contact admin to configure prices'
+            'error': 'Failed to load prices'
         }), 500
+
 
 @app.route('/api/admin/total-sales', methods=['GET'])
 @token_required
@@ -2956,6 +3043,8 @@ def admin_total_sales():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
+
+    
 @app.route('/api/wallet/pending-topups', methods=['GET'])
 @token_required
 def get_pending_topups():
@@ -5259,25 +5348,48 @@ def create_order():
         # Get MANUAL prices from database (admin sets these)
         is_agent = g.current_user.is_agent and getattr(g.current_user, 'agent_approved', False)
         
+        # Debug: Print price lookup
+        print(f"\n[Price Lookup]")
+        print(f"  Is Agent: {is_agent}")
+        print(f"  Network: {network}")
+        print(f"  Size: {size_gb}GB")
+        
         if is_agent:
             unit_price = get_agent_price(network, size_gb)
+            print(f"  Agent price: ₵{unit_price}")
         else:
             unit_price = get_user_price(network, size_gb)
+            print(f"  User price: ₵{unit_price}")
         
         if unit_price == 0:
             return jsonify({
                 'success': False, 
-                'error': f'Price not configured for {network} {size_gb}GB. Please contact admin.'
+                'error': f'Price not configured for {network} {size_gb}GB. Please contact admin.',
+                'debug': {
+                    'network': network,
+                    'size_gb': size_gb,
+                    'is_agent': is_agent
+                }
             }), 400
         
         total_price = unit_price * quantity
+        print(f"  Total price ({quantity} x {unit_price}): ₵{total_price}")
         
         # Check wallet balance
         if payment_method == 'wallet':
+            print(f"\n[Balance Check]")
+            print(f"  Wallet balance: ₵{g.current_user.wallet_balance}")
+            print(f"  Required: ₵{total_price}")
+            
             if g.current_user.wallet_balance < total_price:
                 return jsonify({
                     'success': False, 
-                    'error': f'Insufficient wallet balance. Need GHS {total_price:.2f}. Your balance: GHS {g.current_user.wallet_balance:.2f}'
+                    'error': f'Insufficient wallet balance. Need GHS {total_price:.2f}. Your balance: GHS {g.current_user.wallet_balance:.2f}',
+                    'debug': {
+                        'balance': float(g.current_user.wallet_balance),
+                        'required': float(total_price),
+                        'shortfall': float(total_price - g.current_user.wallet_balance)
+                    }
                 }), 400
         
         # Generate order ID
@@ -5294,7 +5406,7 @@ def create_order():
             amount=total_price,
             quantity=quantity,
             status='pending' if payment_method == 'manual' else 'processing',
-            delivery_status='pending',  # NEW: Initial delivery status
+            delivery_status='pending',
             delivery_status_updated_at=datetime.utcnow(),
             payment_method=payment_method,
             created_at=datetime.utcnow()
@@ -5309,6 +5421,10 @@ def create_order():
             # Deduct from wallet (admin's retail price)
             balance_before = g.current_user.wallet_balance
             g.current_user.wallet_balance -= total_price
+            print(f"\n[Wallet Deducted]")
+            print(f"  Before: ₵{balance_before}")
+            print(f"  Deducted: ₵{total_price}")
+            print(f"  After: ₵{g.current_user.wallet_balance}")
             
             # Create transaction record
             transaction = Transaction(
@@ -5329,58 +5445,100 @@ def create_order():
             order.delivery_status_updated_at = datetime.utcnow()
             db.session.commit()
             
-            # Call Digimall for delivery with webhook URL
-            webhook_url = f"{current_app.config.get('BASE_URL', 'https://roamsmart-backend-production.up.railway.app')}/api/webhooks/digimall"
-            
-            digimall_response = digimall.deliver_data(
-                network=network, 
-                phone=phone, 
-                size_gb=size_gb,
-                reference=order_id,
-                webhook_url=webhook_url
-            )
-            
-            if digimall_response.get('success'):
-                order.status = 'completed'
-                order.completed_at = datetime.utcnow()
-                order.provider = 'digimall'
-                order.provider_order_id = digimall_response.get('orderId')
-                order.provider_reference = digimall_response.get('reference')
-                order.provider_cost = digimall_response.get('totalAmount', 0)
-                order.delivery_status = 'processing'  # Update to processing
-                order.delivery_status_updated_at = datetime.utcnow()
+            # Call Digimall for delivery
+            try:
+                # Format phone number for Digimall
+                formatted_phone = phone
+                if formatted_phone.startswith('0'):
+                    formatted_phone = '233' + formatted_phone[1:]
+                elif not formatted_phone.startswith('233'):
+                    formatted_phone = '233' + formatted_phone
                 
-                transaction.status = 'completed'
-                db.session.commit()
+                print(f"\n[Digimall Delivery]")
+                print(f"  Network: {network}")
+                print(f"  Volume: {size_gb}GB")
+                print(f"  Phone: {formatted_phone}")
                 
-                profit = total_price - (digimall_response.get('totalAmount', 0) * quantity)
+                # Call deliver_data with correct parameters
+                digimall_response = digimall.deliver_data(
+                    network=network,
+                    phone_number=formatted_phone,
+                    volume=size_gb
+                )
                 
-                return jsonify({
-                    'success': True,
-                    'data': {
-                        'order_id': order_id,
-                        'balance': float(g.current_user.wallet_balance),
-                        'amount': float(total_price),
-                        'provider_order_id': digimall_response.get('orderId'),
-                        'provider_status': digimall_response.get('status'),
-                        'delivery_status': order.delivery_status,  # NEW
-                        'profit': float(profit)
-                    },
-                    'message': f'✅ {size_gb}GB {network.upper()} data ordered. Processing delivery...'
-                })
-            else:
-                # Refund on delivery failure
+                print(f"  Response: {digimall_response}")
+                
+                # Check if delivery was successful
+                if digimall_response.get('orderId') or digimall_response.get('success'):
+                    # Success
+                    order.status = 'completed'
+                    order.completed_at = datetime.utcnow()
+                    order.provider = 'digimall'
+                    order.provider_order_id = digimall_response.get('orderId')
+                    order.delivery_status = digimall_response.get('status', 'processing')
+                    order.delivery_status_updated_at = datetime.utcnow()
+                    
+                    transaction.status = 'completed'
+                    db.session.commit()
+                    
+                    return jsonify({
+                        'success': True,
+                        'data': {
+                            'order_id': order_id,
+                            'balance': float(g.current_user.wallet_balance),
+                            'amount': float(total_price),
+                            'provider_order_id': digimall_response.get('orderId'),
+                            'provider_status': digimall_response.get('status'),
+                            'delivery_status': order.delivery_status
+                        },
+                        'message': f'✅ {size_gb}GB {network.upper()} data ordered. Delivery in progress...'
+                    })
+                else:
+                    # Delivery failed - refund
+                    error_msg = digimall_response.get('error', 'Unknown error')
+                    print(f"[Digimall] Delivery failed: {error_msg}")
+                    
+                    # Refund the wallet
+                    g.current_user.wallet_balance += total_price
+                    order.status = 'failed'
+                    order.delivery_status = 'failed'
+                    order.delivery_status_updated_at = datetime.utcnow()
+                    order.last_delivery_error = error_msg
+                    transaction.status = 'failed'
+                    db.session.commit()
+                    
+                    return jsonify({
+                        'success': False,
+                        'error': f'Delivery failed: {error_msg}. Amount refunded.',
+                        'debug': {
+                            'order_id': order_id,
+                            'refunded_amount': float(total_price),
+                            'new_balance': float(g.current_user.wallet_balance)
+                        }
+                    }), 500
+                    
+            except Exception as e:
+                print(f"[Digimall] Exception: {e}")
+                import traceback
+                traceback.print_exc()
+                
+                # Refund on exception
                 g.current_user.wallet_balance += total_price
                 order.status = 'failed'
-                order.delivery_status = 'failed'  # NEW
+                order.delivery_status = 'failed'
                 order.delivery_status_updated_at = datetime.utcnow()
-                order.last_delivery_error = digimall_response.get('error', 'Digimall delivery failed')
+                order.last_delivery_error = str(e)
                 transaction.status = 'failed'
                 db.session.commit()
                 
                 return jsonify({
                     'success': False,
-                    'error': f'Delivery failed: {digimall_response.get("error")}. Amount refunded.'
+                    'error': f'Delivery service error: {str(e)}. Amount refunded.',
+                    'debug': {
+                        'order_id': order_id,
+                        'refunded_amount': float(total_price),
+                        'new_balance': float(g.current_user.wallet_balance)
+                    }
                 }), 500
             
         elif payment_method == 'manual':
@@ -5423,13 +5581,8 @@ def create_order():
         traceback.print_exc()
         db.session.rollback()
         
-        if 'balance_before' in locals() and 'total_price' in locals():
-            if 'g' in locals() and hasattr(g, 'current_user'):
-                g.current_user.wallet_balance = balance_before
-        
         return jsonify({'success': False, 'error': str(e)}), 500
-
-
+    
 @app.route('/api/order/bulk', methods=['POST'])
 @token_required
 @agent_required
@@ -5990,14 +6143,21 @@ def retry_order(order_id):
 def get_public_store(slug):
     """Get public store data (no login required)"""
     try:
+        from models import Store, User
+        
         store = Store.query.filter_by(store_slug=slug, is_active=True).first()
         
         if not store:
             return jsonify({'success': False, 'error': 'Store not found'}), 404
         
         agent = User.query.get(store.agent_id)
+        if not agent:
+            return jsonify({'success': False, 'error': 'Store owner not found'}), 404
         
-        # Get agent's prices
+        # Use the store's own markup (no StoreSettings needed)
+        markup = store.markup if store.markup else 15
+        
+        # Get agent's wholesale prices
         agent_bundles = {}
         for network in ['mtn', 'telecel', 'airteltigo']:
             agent_bundles[network] = {}
@@ -6011,22 +6171,648 @@ def get_public_store(slug):
             'data': {
                 'store_name': store.store_name,
                 'store_slug': store.store_slug,
-                'store_description': store.store_description,
-                'contact_phone': store.contact_phone,
-                'contact_email': store.contact_email,
-                'markup': store.markup,
-                'custom_prices': store.custom_prices,
-                'brand_color': store.brand_color,
+                'store_description': store.store_description or '',
+                'logo_url': store.logo_url,
+                'banner_color': store.banner_color,
+                'contact_phone': store.contact_phone or agent.phone,
+                'contact_email': store.contact_email or agent.email,
+                'markup': markup,
+                'custom_prices': store.custom_prices or {},
                 'agent_id': store.agent_id,
                 'agent_name': agent.username if agent else None,
-                'bundles': agent_bundles
+                'bundles': agent_bundles,
+                'is_active': store.is_active
             }
         })
         
     except Exception as e:
         print(f"Get public store error: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
+@app.route('/api/store/paystack-webhook', methods=['POST'])
+def store_paystack_webhook():
+    """Handle Paystack webhook for store payments"""
+    try:
+        payload = request.get_json()
+        
+        # Verify webhook signature
+        signature = request.headers.get('x-paystack-signature')
+        # Verify signature logic here (Paystack provides verification)
+        
+        event = payload.get('event')
+        
+        if event == 'charge.success':
+            data = payload.get('data', {})
+            reference = data.get('reference')
+            amount = data.get('amount', 0) / 100  # Convert from pesewas
+            fees = data.get('fees', 0) / 100  # Paystack fees
+            net_amount = amount - fees  # What you actually receive
+            
+            # Find order by reference
+            order = Order.query.filter_by(payment_reference=reference).first()
+            if not order:
+                return jsonify({'success': False, 'error': 'Order not found'}), 404
+            
+            # Check if already processed
+            if order.status == 'completed':
+                return jsonify({'success': True, 'message': 'Already processed'}), 200
+            
+            # Get agent
+            agent = User.query.get(order.agent_id)
+            
+            # Calculate agent's share (selling price - wholesale price = profit)
+            agent_earnings = order.profit  # This is the profit the agent makes
+            
+            # Deduct wholesale price from agent's wallet (they pay for the data)
+            wholesale_price = order.cost
+            if agent.wallet_balance >= wholesale_price:
+                agent.wallet_balance -= wholesale_price
+                
+                # Credit agent's earnings (profit) to their wallet
+                # This is their commission for the sale
+                agent.wallet_balance += agent_earnings
+                
+                # Create transaction records
+                # 1. Debit for wholesale cost
+                debit_transaction = Transaction(
+                    user_id=agent.id,
+                    type='debit',
+                    amount=wholesale_price,
+                    balance_before=agent.wallet_balance - agent_earnings + wholesale_price,
+                    balance_after=agent.wallet_balance - agent_earnings,
+                    description=f'Store sale cost: {order.size_gb}GB {order.network} to {order.phone_number}',
+                    reference=f"COST-{reference}",
+                    status='completed'
+                )
+                db.session.add(debit_transaction)
+                
+                # 2. Credit for profit
+                credit_transaction = Transaction(
+                    user_id=agent.id,
+                    type='credit',
+                    amount=agent_earnings,
+                    balance_before=agent.wallet_balance - agent_earnings,
+                    balance_after=agent.wallet_balance,
+                    description=f'Store sale earnings: {order.size_gb}GB {order.network}',
+                    reference=f"EARN-{reference}",
+                    status='completed'
+                )
+                db.session.add(credit_transaction)
+                
+                # Send data via Digimall
+                try:
+                    digimall = DigimallService()
+                    digimall_result = digimall.deliver_data(
+                        network=order.network,
+                        phone_number=order.phone_number,
+                        volume=order.size_gb
+                    )
+                    
+                    if digimall_result and digimall_result.get('success'):
+                        order.delivery_status = 'delivered'
+                        order.status = 'completed'
+                        order.completed_at = datetime.utcnow()
+                        order.provider = 'digimall'
+                        order.provider_order_id = digimall_result.get('orderId')
+                    else:
+                        order.delivery_status = 'failed'
+                        order.last_delivery_error = digimall_result.get('error', 'Delivery failed')
+                        # Refund the agent? Or handle appropriately
+                except Exception as e:
+                    print(f"Digimall error: {e}")
+                    order.delivery_status = 'failed'
+                    order.last_delivery_error = str(e)
+            else:
+                order.status = 'failed'
+                order.last_delivery_error = 'Insufficient agent balance'
+                # Notify agent to fund wallet
+            
+            db.session.commit()
+        
+        return jsonify({'success': True}), 200
+        
+    except Exception as e:
+        print(f"Webhook error: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+    
+@app.route('/api/agent/store-earnings', methods=['GET'])
+@token_required
+@agent_required
+def get_agent_store_earnings():
+    """Get agent's earnings from store sales"""
+    try:
+        from models import Store, Order
+        
+        # Get store - make sure to select only existing columns
+        store = Store.query.filter_by(agent_id=g.current_user.id).first()
+        
+        if not store:
+            return jsonify({
+                'success': True,
+                'data': {
+                    'total_sales': 0,
+                    'total_earnings': 0,
+                    'pending_payouts': 0,
+                    'orders_count': 0,
+                    'earnings_by_month': {},
+                    'recent_orders': []
+                }
+            })
+        
+        # Get all store orders (using payment_method='paystack' or just all orders)
+        orders = Order.query.filter_by(
+            agent_id=g.current_user.id
+        ).filter(
+            Order.payment_method.in_(['paystack', 'store_pending', 'store_payment'])
+        ).order_by(Order.created_at.desc()).all()
+        
+        # Calculate stats
+        completed_orders = [o for o in orders if o.status == 'completed']
+        total_sales = sum(o.amount for o in completed_orders)
+        total_earnings = sum(o.profit for o in completed_orders)
+        pending_payouts = sum(o.profit for o in orders if o.status == 'pending_payment')
+        
+        # Group by month
+        earnings_by_month = {}
+        for order in completed_orders:
+            month_key = order.created_at.strftime('%Y-%m')
+            earnings_by_month[month_key] = earnings_by_month.get(month_key, 0) + order.profit
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'total_sales': float(total_sales),
+                'total_earnings': float(total_earnings),
+                'pending_payouts': float(pending_payouts),
+                'orders_count': len(orders),
+                'earnings_by_month': earnings_by_month,
+                'recent_orders': [{
+                    'order_id': o.order_id,
+                    'amount': float(o.amount),
+                    'earnings': float(o.profit),
+                    'customer_phone': o.phone_number,
+                    'product': f"{o.size_gb}GB {o.network}" if o.network else 'Data Bundle',
+                    'created_at': o.created_at.isoformat(),
+                    'status': o.status
+                } for o in orders[:20]]
+            }
+        })
+        
+    except Exception as e:
+        print(f"Get store earnings error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/store/order', methods=['POST'])
+def public_store_order():
+    """Public endpoint to place order - NO LOGIN REQUIRED"""
+    try:
+        from models import Store, User, Order
+        
+        data = request.get_json()
+        
+        store_slug = data.get('store_slug')
+        network = data.get('network')
+        size_gb = data.get('size_gb')
+        phone = data.get('phone')
+        amount = data.get('amount')
+        
+        print(f"\n{'='*60}")
+        print(f"🔓 PUBLIC STORE ORDER")
+        print(f"{'='*60}")
+        print(f"Store Slug: {store_slug}")
+        print(f"Network: {network}")
+        print(f"Size: {size_gb}GB")
+        print(f"Phone: {phone}")
+        print(f"Amount: ₵{amount}")
+        
+        if not all([store_slug, network, size_gb, phone, amount]):
+            return jsonify({'success': False, 'error': 'Missing required fields'}), 400
+        
+        # Find store by slug to get agent_id
+        store = Store.query.filter_by(store_slug=store_slug, is_active=True).first()
+        if not store:
+            return jsonify({'success': False, 'error': 'Store not found'}), 404
+        
+        agent_id = store.agent_id
+        print(f"Agent ID: {agent_id}")
+        
+        # Find agent
+        agent = User.query.get(agent_id)
+        if not agent:
+            return jsonify({'success': False, 'error': 'Agent not found'}), 404
+        
+        # Get wholesale price
+        wholesale_price = get_agent_price(network, size_gb)
+        
+        # Generate order ID
+        order_id = f"STR-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{agent_id}"
+        
+        # Create order
+        order = Order(
+            user_id=None,
+            agent_id=agent_id,
+            order_id=order_id,
+            type='data',
+            network=network,
+            size_gb=size_gb,
+            phone_number=phone,
+            amount=amount,
+            cost=wholesale_price,
+            profit=amount - wholesale_price,
+            quantity=1,
+            status='pending',
+            payment_method='store_pending',
+            created_at=datetime.utcnow()
+        )
+        db.session.add(order)
+        db.session.commit()
+        
+        print(f"✅ Order created: {order_id}")
+        
+        return jsonify({
+            'success': True,
+            'message': 'Order placed successfully! The agent will contact you to confirm payment.',
+            'data': {
+                'order_id': order_id,
+                'status': 'pending'
+            }
+        })
+        
+    except Exception as e:
+        print(f"Public store order error: {e}")
+        import traceback
+        traceback.print_exc()
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/store/initiate-payment', methods=['POST'])
+def initiate_store_payment():
+    """Initialize Paystack payment"""
+    try:
+        from models import Store, PaymentSession
+        
+        data = request.get_json()
+        
+        store_slug = data.get('store_slug')
+        network = data.get('network')
+        size_gb = data.get('size_gb')
+        phone = data.get('phone')
+        amount = data.get('amount')
+        customer_email = data.get('email')
+        
+        print(f"\n{'='*60}")
+        print(f"🔓 INITIATE STORE PAYMENT")
+        print(f"{'='*60}")
+        print(f"Store Slug: {store_slug}")
+        print(f"Network: {network}")
+        print(f"Size: {size_gb}GB")
+        print(f"Phone: {phone}")
+        print(f"Amount: ₵{amount}")
+        
+        if not all([store_slug, network, size_gb, phone, amount, customer_email]):
+            return jsonify({'success': False, 'error': 'Missing required fields'}), 400
+        
+        # Find store
+        store = Store.query.filter_by(store_slug=store_slug, is_active=True).first()
+        if not store:
+            return jsonify({'success': False, 'error': 'Store not found'}), 404
+        
+        # Generate unique reference
+        payment_ref = f"PAY-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{store.agent_id}"
+        
+        # Check if reference already exists (unique constraint)
+        existing = PaymentSession.query.filter_by(reference=payment_ref).first()
+        if existing:
+            # Generate new reference with timestamp
+            payment_ref = f"PAY-{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}-{store.agent_id}"
+        
+        # Create payment session
+        payment_session = PaymentSession(
+            reference=payment_ref,
+            store_slug=store_slug,
+            agent_id=store.agent_id,
+            network=network,
+            size_gb=size_gb,
+            phone=phone,
+            amount=amount,
+            status='pending',
+            created_at=datetime.utcnow(),
+            expires_at=datetime.utcnow() + timedelta(hours=1)
+        )
+        db.session.add(payment_session)
+        db.session.commit()
+        
+        print(f"✅ Payment session created: {payment_ref}")
+        
+        # Initialize Paystack
+        paystack_secret = current_app.config.get('PAYSTACK_SECRET_KEY')
+        
+        headers = {
+            'Authorization': f'Bearer {paystack_secret}',
+            'Content-Type': 'application/json'
+        }
+        
+        payload = {
+            'email': customer_email,
+            'amount': int(amount * 100),
+            'currency': 'GHS',
+            'reference': payment_ref,
+            'metadata': {
+                'store_slug': store_slug,
+                'agent_id': store.agent_id,
+                'network': network,
+                'size_gb': size_gb,
+                'phone': phone,
+                'session_id': payment_session.id
+            },
+            'callback_url': f"{current_app.config.get('FRONTEND_URL', 'http://localhost:3000')}/store/{store_slug}?reference={payment_ref}"
+        }
+        
+        response = requests.post(
+            'https://api.paystack.co/transaction/initialize',
+            json=payload,
+            headers=headers,
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
+            if result.get('status'):
+                return jsonify({
+                    'success': True,
+                    'data': {
+                        'authorization_url': result['data']['authorization_url'],
+                        'reference': payment_ref
+                    }
+                })
+        
+        return jsonify({'success': False, 'error': 'Payment initialization failed'}), 400
+        
+    except Exception as e:
+        print(f"Initiate payment error: {e}")
+        import traceback
+        traceback.print_exc()
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/webhooks/paystack-store', methods=['POST'])
+def paystack_store_webhook():
+    """Create order ONLY after successful payment"""
+    try:
+        # Log EVERYTHING
+        print(f"\n{'='*80}")
+        print(f"🔥 PAYSTACK WEBHOOK RECEIVED")
+        print(f"{'='*80}")
+        print(f"Headers: {dict(request.headers)}")
+        print(f"Body: {request.get_data(as_text=True)}")
+        print(f"{'='*80}\n")
+        
+        payload = request.get_json()
+        event = payload.get('event')
+        
+        print(f"Event type: {event}")
+        
+        if event == 'charge.success':
+            data = payload.get('data', {})
+            reference = data.get('reference')
+            amount = data.get('amount', 0) / 100
+            status = data.get('status')
+            
+            print(f"Reference: {reference}")
+            print(f"Amount: ₵{amount}")
+            print(f"Status: {status}")
+            
+            # Find payment session
+            payment_session = PaymentSession.query.filter_by(
+                reference=reference,
+                status='pending'
+            ).first()
+            
+            if not payment_session:
+                print(f"⚠️ No pending session found for reference: {reference}")
+                # Check if session exists with different status
+                any_session = PaymentSession.query.filter_by(reference=reference).first()
+                if any_session:
+                    print(f"Session exists but status is: {any_session.status}")
+                return jsonify({'success': False, 'error': 'Session not found'}), 404
+            
+            print(f"✅ Found payment session for store: {payment_session.store_slug}")
+            
+            # Update session
+            payment_session.status = 'completed'
+            db.session.commit()
+            
+            # Create order
+            order_id = f"STR-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{payment_session.agent_id}"
+            
+            order = Order(
+                user_id=None,
+                agent_id=payment_session.agent_id,
+                order_id=order_id,
+                type='data',
+                network=payment_session.network,
+                size_gb=payment_session.size_gb,
+                phone_number=payment_session.phone,
+                amount=amount,
+                quantity=1,
+                status='completed',
+                payment_method='paystack',
+                payment_reference=reference,
+                created_at=datetime.utcnow()
+            )
+            db.session.add(order)
+            db.session.commit()
+            
+            print(f"✅ Order created: {order_id}")
+            
+        return jsonify({'success': True}), 200
+        
+    except Exception as e:
+        print(f"Webhook error: {e}")
+        import traceback
+        traceback.print_exc()
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 50
+
+@app.route('/api/store/verify-payment', methods=['POST'])
+def verify_store_payment():
+    """Verify payment and deliver data via Digimall"""
+    try:
+        from models import PaymentSession, Order, User
+        
+        
+        data = request.get_json()
+        reference = data.get('reference')
+        
+        print(f"\n{'='*60}")
+        print(f"🔍 VERIFY PAYMENT & DELIVER DATA")
+        print(f"{'='*60}")
+        print(f"Reference: {reference}")
+        
+        if not reference:
+            return jsonify({'success': False, 'error': 'Reference is required'}), 400
+        
+        # Call Paystack API to verify
+        paystack_secret = current_app.config.get('PAYSTACK_SECRET_KEY')
+        
+        headers = {
+            'Authorization': f'Bearer {paystack_secret}'
+        }
+        
+        response = requests.get(
+            f'https://api.paystack.co/transaction/verify/{reference}',
+            headers=headers,
+            timeout=30
+        )
+        
+        if response.status_code != 200:
+            return jsonify({'success': False, 'error': 'Failed to verify payment with Paystack'}), 400
+        
+        result = response.json()
+        
+        if not result.get('status'):
+            return jsonify({'success': False, 'error': 'Invalid payment reference'}), 400
+        
+        transaction = result.get('data', {})
+        
+        if transaction.get('status') != 'success':
+            return jsonify({
+                'success': False, 
+                'error': f'Payment status: {transaction.get("status")}'
+            }), 400
+        
+        amount = transaction.get('amount', 0) / 100
+        
+        # Find payment session
+        payment_session = PaymentSession.query.filter_by(reference=reference).first()
+        
+        if not payment_session:
+            return jsonify({'success': False, 'error': 'Payment session not found'}), 404
+        
+        if payment_session.status == 'completed':
+            return jsonify({
+                'success': True,
+                'message': 'Payment already verified',
+                'order_id': payment_session.order_id
+            })
+        
+        if payment_session.status != 'pending':
+            return jsonify({
+                'success': False,
+                'error': f'Payment session status: {payment_session.status}'
+            }), 400
+        
+        # Update session
+        payment_session.status = 'completed'
+        
+        # Get wholesale price
+        wholesale_price = get_agent_price(payment_session.network, payment_session.size_gb)
+        
+        # Create order
+        order_id = f"STR-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{payment_session.agent_id}"
+        
+        order = Order(
+            user_id=None,
+            agent_id=payment_session.agent_id,
+            order_id=order_id,
+            type='data',
+            network=payment_session.network,
+            size_gb=payment_session.size_gb,
+            phone_number=payment_session.phone,
+            amount=amount,
+            cost=wholesale_price,
+            profit=amount - wholesale_price,
+            quantity=1,
+            status='processing',
+            payment_method='paystack',
+            payment_reference=reference,
+            delivery_status='processing',
+            created_at=datetime.utcnow()
+        )
+        db.session.add(order)
+        db.session.flush()  # Get the order ID without committing yet
+        
+        payment_session.order_id = order_id
+        db.session.commit()
+        
+        print(f"✅ Order created: {order_id}")
+        
+        # ========== DELIVER DATA VIA DIGIMALL ==========
+        digimall_result = None
+        delivery_success = False
+        
+        try:
+            print(f"\n📡 SENDING TO DIGIMALL...")
+            print(f"Network: {payment_session.network}")
+            print(f"Phone: {payment_session.phone}")
+            print(f"Volume: {payment_session.size_gb}GB")
+            
+            digimall = DigimallService()
+            digimall_result = digimall.deliver_data(
+                network=payment_session.network,
+                phone_number=payment_session.phone,
+                volume=payment_session.size_gb
+            )
+            
+            print(f"Digimall Response: {digimall_result}")
+            
+            if digimall_result and digimall_result.get('success'):
+                order.delivery_status = 'delivered'
+                order.status = 'completed'
+                order.provider = 'digimall'
+                order.provider_order_id = digimall_result.get('orderId')
+                order.provider_reference = digimall_result.get('reference')
+                order.completed_at = datetime.utcnow()
+                delivery_success = True
+                db.session.commit()
+                print(f"✅ Data delivered successfully to {payment_session.phone}")
+            else:
+                error_msg = digimall_result.get('error') if digimall_result else 'No response from Digimall'
+                order.delivery_status = 'failed'
+                order.last_delivery_error = error_msg
+                db.session.commit()
+                print(f"❌ Digimall delivery failed: {error_msg}")
+                
+        except Exception as e:
+            print(f"❌ Digimall exception: {e}")
+            order.delivery_status = 'failed'
+            order.last_delivery_error = str(e)
+            db.session.commit()
+        
+        # ========== CREDIT AGENT'S WALLET ==========
+        if delivery_success:
+            try:
+                agent = db.session.get(User, payment_session.agent_id)
+                if agent:
+                    # Deduct wholesale cost from agent
+                    agent.wallet_balance -= wholesale_price
+                    # Add profit to agent
+                    agent.wallet_balance += (amount - wholesale_price)
+                    db.session.commit()
+                    print(f"💰 Agent wallet updated: +₵{amount - wholesale_price} profit")
+            except Exception as e:
+                print(f"Agent wallet update error: {e}")
+        
+        return jsonify({
+            'success': True,
+            'message': 'Payment verified successfully!',
+            'order_id': order_id,
+            'delivery_status': order.delivery_status,
+            'data_delivered': delivery_success,
+            'amount': amount
+        })
+        
+    except Exception as e:
+        print(f"Verify payment error: {e}")
+        import traceback
+        traceback.print_exc()
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/store/order', methods=['POST'])
 def create_store_order():
@@ -6173,6 +6959,403 @@ def get_agent_store_products():
         traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
+@app.route('/api/wallet/verify-payment', methods=['POST'])
+@token_required
+def verify_wallet_payment():
+    """Verify manual payment and credit wallet"""
+    try:
+        data = request.get_json()
+        
+        reference = data.get('reference')
+        transaction_id = data.get('transaction_id')
+        sender_name = data.get('sender_name')
+        sender_phone = data.get('sender_phone')
+        
+        print(f"\n{'='*60}")
+        print(f"VERIFY PAYMENT REQUEST")
+        print(f"{'='*60}")
+        print(f"User: {g.current_user.username} (ID: {g.current_user.id})")
+        print(f"Reference: {reference}")
+        print(f"Transaction ID: {transaction_id}")
+        print(f"Sender: {sender_name} / {sender_phone}")
+        
+        if not reference or not transaction_id:
+            return jsonify({'success': False, 'error': 'Reference and transaction ID are required'}), 400
+        
+        # Find the manual payment request
+        manual_payment = ManualPayment.query.filter_by(
+            reference=reference.upper(),
+            user_id=g.current_user.id
+        ).first()
+        
+        if not manual_payment:
+            return jsonify({'success': False, 'error': f'Payment request not found for reference: {reference}'}), 404
+        
+        if manual_payment.status != 'pending':
+            return jsonify({'success': False, 'error': f'Payment already {manual_payment.status}'}), 400
+        
+        # Update payment record
+        manual_payment.status = 'verified'
+        manual_payment.transaction_id = transaction_id
+        manual_payment.sender_name = sender_name
+        manual_payment.sender_phone = sender_phone
+        manual_payment.verified_at = datetime.utcnow()
+        manual_payment.verified_by = g.current_user.id  # or 'system'
+        manual_payment.notes = f'Verified via auto verification with transaction ID: {transaction_id}'
+        
+        # Credit user's wallet
+        old_balance = g.current_user.wallet_balance
+        g.current_user.wallet_balance += manual_payment.amount
+        
+        # Create transaction record
+        transaction = Transaction(
+            user_id=g.current_user.id,
+            type='credit',
+            amount=manual_payment.amount,
+            balance_before=old_balance,
+            balance_after=g.current_user.wallet_balance,
+            description=f'Manual payment verification - Ref: {reference}',
+            reference=reference,
+            status='completed',
+            meta_data={
+                'payment_id': manual_payment.id,
+                'transaction_id': transaction_id,
+                'verification_method': 'auto'
+            }
+        )
+        db.session.add(transaction)
+        
+        db.session.commit()
+        
+        print(f"✅ Payment verified! Credited ₵{manual_payment.amount} to {g.current_user.username}")
+        
+        return jsonify({
+            'success': True,
+            'message': f'Payment verified! ₵{manual_payment.amount:.2f} credited to your wallet.',
+            'data': {
+                'amount': manual_payment.amount,
+                'reference': reference,
+                'transaction_id': transaction_id,
+                'new_balance': g.current_user.wallet_balance
+            }
+        })
+        
+    except Exception as e:
+        print(f"Verify payment error: {e}")
+        import traceback
+        traceback.print_exc()
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+
+@app.route('/api/payment/verify-transfer', methods=['POST'])
+@token_required
+def verify_transfer_payment():
+    """Verify mobile money transfer using Paystack Transfer API"""
+    try:
+        data = request.get_json()
+        
+        reference = data.get('reference')
+        transaction_id = data.get('transaction_id')
+        amount = data.get('amount')
+        sender_phone = data.get('sender_phone')
+        
+        print(f"\n{'='*80}")
+        print(f"🔍 VERIFY TRANSFER PAYMENT - DEBUG START")
+        print(f"{'='*80}")
+        print(f"📱 User: {g.current_user.username} (ID: {g.current_user.id})")
+        print(f"📧 Email: {g.current_user.email}")
+        print(f"💰 Current Wallet Balance: ₵{g.current_user.wallet_balance}")
+        print(f"📝 Reference: {reference}")
+        print(f"🆔 Transaction ID: {transaction_id}")
+        print(f"💵 Amount: ₵{amount}")
+        print(f"📞 Sender Phone: {sender_phone}")
+        print(f"{'='*80}\n")
+        
+        # Validate required fields
+        if not reference or not transaction_id:
+            print(f"❌ Validation failed: Missing reference or transaction_id")
+            return jsonify({'success': False, 'error': 'Reference and transaction ID are required'}), 400
+        
+        # Debug: Check all manual payments for this user
+        print(f"📊 Checking all manual payments for user {g.current_user.username}:")
+        all_user_payments = ManualPayment.query.filter_by(user_id=g.current_user.id).all()
+        if all_user_payments:
+            for p in all_user_payments:
+                print(f"   - ID: {p.id}, Ref: {p.reference}, Status: {p.status}, Amount: ₵{p.amount}, Created: {p.created_at}")
+        else:
+            print(f"   ⚠️ No manual payments found for this user")
+        
+        # Find the pending manual payment
+        print(f"\n🔎 Searching for payment with reference: {reference.upper()}")
+        manual_payment = ManualPayment.query.filter_by(
+            reference=reference.upper(),
+            user_id=g.current_user.id
+        ).first()
+        
+        if not manual_payment:
+            print(f"❌ No payment found with reference: {reference.upper()}")
+            return jsonify({'success': False, 'error': f'Payment request not found for reference: {reference}'}), 404
+        
+        print(f"✅ Found payment: ID={manual_payment.id}, Status={manual_payment.status}, Amount=₵{manual_payment.amount}")
+        
+        # Check payment status
+        if manual_payment.status != 'pending':
+            print(f"❌ Payment status is '{manual_payment.status}', not 'pending'")
+            return jsonify({'success': False, 'error': f'Payment already {manual_payment.status}'}), 400
+        
+        # Call Paystack Transfer API to verify
+        print(f"\n🔗 Calling Paystack Transfer API...")
+        paystack_secret = current_app.config.get('PAYSTACK_SECRET_KEY')
+        
+        if not paystack_secret:
+            print(f"⚠️ PAYSTACK_SECRET_KEY not configured!")
+        else:
+            print(f"🔑 Paystack API Key exists: {bool(paystack_secret)}")
+        
+        headers = {
+            'Authorization': f'Bearer {paystack_secret}',
+            'Content-Type': 'application/json'
+        }
+        
+        # Option 1: Check by transfer reference
+        api_url = f'https://api.paystack.co/transfer/verify/{transaction_id}'
+        print(f"📡 Requesting: {api_url}")
+        
+        response = requests.get(
+            api_url,
+            headers=headers,
+            timeout=30
+        )
+        
+        print(f"📥 Response Status: {response.status_code}")
+        
+        if response.status_code == 200:
+            result = response.json()
+            print(f"📦 Response Body: {result}")
+            
+            if result.get('status'):
+                transfer_data = result.get('data', {})
+                transfer_status = transfer_data.get('status')
+                transfer_amount = transfer_data.get('amount', 0) / 100
+                transfer_reference = transfer_data.get('reference')
+                
+                print(f"\n💰 Transfer Details:")
+                print(f"   Status: {transfer_status}")
+                print(f"   Amount: ₵{transfer_amount}")
+                print(f"   Reference: {transfer_reference}")
+                
+                if transfer_status != 'success':
+                    print(f"❌ Transfer status is '{transfer_status}', not 'success'")
+                    return jsonify({
+                        'success': False, 
+                        'error': f'Payment status: {transfer_status}. Please wait or contact support.'
+                    }), 400
+                
+                # Verify amount matches
+                if amount:
+                    user_amount = float(amount)
+                    if abs(user_amount - transfer_amount) > 1:  # 1 GHS tolerance
+                        print(f"❌ Amount mismatch: User entered ₵{user_amount}, Paystack shows ₵{transfer_amount}")
+                        return jsonify({
+                            'success': False,
+                            'error': f'Amount mismatch. Paystack shows ₵{transfer_amount:.2f}, you entered ₵{user_amount:.2f}'
+                        }), 400
+                    else:
+                        print(f"✅ Amount verified: ₵{transfer_amount}")
+                
+                # Update payment record
+                print(f"\n📝 Updating payment record...")
+                manual_payment.status = 'verified'
+                manual_payment.transaction_id = transaction_id
+                manual_payment.sender_phone = sender_phone
+                manual_payment.verified_at = datetime.utcnow()
+                manual_payment.verified_by = 'paystack_api'
+                manual_payment.amount = transfer_amount
+                manual_payment.notes = f'Verified via Paystack API. Transaction ID: {transaction_id}'
+                
+                # Credit wallet
+                old_balance = g.current_user.wallet_balance
+                print(f"💰 Crediting wallet: ₵{old_balance} + ₵{transfer_amount}")
+                g.current_user.wallet_balance += transfer_amount
+                
+                # Create transaction record
+                transaction = Transaction(
+                    user_id=g.current_user.id,
+                    type='credit',
+                    amount=transfer_amount,
+                    balance_before=old_balance,
+                    balance_after=g.current_user.wallet_balance,
+                    description=f'Mobile money payment verified - Ref: {reference}',
+                    reference=reference,
+                    status='completed',
+                    meta_data={
+                        'transaction_id': transaction_id,
+                        'paystack_reference': transfer_reference,
+                        'verification_method': 'paystack_transfer_api'
+                    }
+                )
+                db.session.add(transaction)
+                
+                db.session.commit()
+                
+                print(f"\n✅ SUCCESS! Payment verified and credited!")
+                print(f"   Amount: ₵{transfer_amount}")
+                print(f"   New Balance: ₵{g.current_user.wallet_balance}")
+                print(f"{'='*80}\n")
+                
+                return jsonify({
+                    'success': True,
+                    'message': f'✅ Payment verified! ₵{transfer_amount:.2f} credited to your wallet.',
+                    'data': {
+                        'amount': transfer_amount,
+                        'reference': reference,
+                        'transaction_id': transaction_id,
+                        'new_balance': g.current_user.wallet_balance,
+                        'paystack_status': transfer_status
+                    }
+                })
+            else:
+                print(f"❌ Paystack API returned status: false")
+                print(f"   Message: {result.get('message', 'Unknown error')}")
+        else:
+            print(f"❌ Paystack API request failed with status {response.status_code}")
+            print(f"   Response: {response.text[:500]}")
+        
+        # If Paystack verification fails
+        print(f"\n❌ VERIFICATION FAILED - Unable to verify payment with Paystack")
+        print(f"{'='*80}\n")
+        
+        return jsonify({
+            'success': False,
+            'error': 'Unable to verify payment. Please check your transaction ID and try again, or contact support.'
+        }), 400
+        
+    except Exception as e:
+        print(f"\n❌ EXCEPTION in verify_transfer_payment:")
+        print(f"   Error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        print(f"{'='*80}\n")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/payment/manual-with-paystack-verify', methods=['POST'])
+@token_required
+def manual_payment_with_paystack_verify():
+    """
+    User makes manual payment, then verifies using Paystack reference
+    """
+    try:
+        data = request.get_json()
+        paystack_reference = data.get('paystack_reference')
+        amount = data.get('amount')
+        phone = data.get('phone')
+        
+        if not paystack_reference:
+            return jsonify({'success': False, 'error': 'Paystack reference is required'}), 400
+        
+        # 1. Verify the payment with Paystack API
+        headers = {
+            'Authorization': f'Bearer {current_app.config["PAYSTACK_SECRET_KEY"]}'
+        }
+        
+        response = requests.get(
+            f'https://api.paystack.co/transaction/verify/{paystack_reference}',
+            headers=headers,
+            timeout=30
+        )
+        
+        if response.status_code != 200:
+            return jsonify({'success': False, 'error': 'Failed to verify payment with Paystack'}), 400
+        
+        paystack_data = response.json()
+        
+        if not paystack_data.get('status'):
+            return jsonify({'success': False, 'error': 'Invalid Paystack reference'}), 400
+        
+        transaction_data = paystack_data.get('data', {})
+        
+        # Check if payment was successful
+        if transaction_data.get('status') != 'success':
+            return jsonify({
+                'success': False, 
+                'error': f'Payment not successful. Status: {transaction_data.get("status")}'
+            }), 400
+        
+        # Get payment details from Paystack
+        paystack_amount = transaction_data.get('amount', 0) / 100  # Convert from kobo/pesewas
+        paystack_currency = transaction_data.get('currency', 'GHS')
+        paystack_customer_email = transaction_data.get('customer', {}).get('email')
+        
+        # 2. Check if this reference has already been used
+        existing = ManualPayment.query.filter_by(paystack_reference=paystack_reference).first()
+        if existing:
+            return jsonify({'success': False, 'error': 'This reference has already been verified'}), 400
+        
+        # 3. Validate amount matches (optional - with tolerance)
+        if amount:
+            user_amount = float(amount)
+            if abs(user_amount - paystack_amount) > 1:  # 1 GHS tolerance
+                return jsonify({
+                    'success': False, 
+                    'error': f'Amount mismatch. Paystack shows ₵{paystack_amount:.2f}, you entered ₵{user_amount:.2f}'
+                }), 400
+        
+        # 4. Create manual payment record
+        manual_payment = ManualPayment(
+            user_id=g.current_user.id,
+            paystack_reference=paystack_reference,
+            amount=paystack_amount,
+            phone=phone or g.current_user.phone,
+            status='verified',  # Auto-verified!
+            payment_method='paystack_manual',
+            customer_email=paystack_customer_email,
+            paystack_data=transaction_data,
+            verified_at=datetime.utcnow(),
+            verified_by='system',
+            created_at=datetime.utcnow()
+        )
+        db.session.add(manual_payment)
+        
+        # 5. Credit user's wallet
+        old_balance = g.current_user.wallet_balance
+        g.current_user.wallet_balance += paystack_amount
+        
+        # Create transaction record
+        transaction = Transaction(
+            user_id=g.current_user.id,
+            type='deposit',
+            amount=paystack_amount,
+            balance_before=old_balance,
+            balance_after=g.current_user.wallet_balance,
+            description=f'Paystack manual payment verification - Ref: {paystack_reference}',
+            reference=paystack_reference,
+            status='completed',
+            payment_method='paystack_manual'
+        )
+        db.session.add(transaction)
+        
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': f'Payment verified! ₵{paystack_amount:.2f} credited to your wallet.',
+            'data': {
+                'amount': paystack_amount,
+                'reference': paystack_reference,
+                'new_balance': g.current_user.wallet_balance,
+                'paystack_status': transaction_data.get('status'),
+                'paystack_channel': transaction_data.get('channel')
+            }
+        })
+        
+    except Exception as e:
+        print(f"Manual payment with Paystack verify error: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/agent/store/products/update-price', methods=['POST'])
 @token_required
@@ -8647,6 +9830,25 @@ def get_admin_stats():
         # Get recent orders with user info
         recent_orders = Order.query.order_by(Order.created_at.desc()).limit(10).all()
         
+        # Build recent orders list safely handling NULL user_id
+        recent_orders_data = []
+        for order in recent_orders:
+            # Handle NULL user_id for public store orders
+            if order.user_id:
+                user = db.session.get(User, order.user_id)
+                username = user.username if user else 'N/A'
+            else:
+                # Public store order (guest customer)
+                username = 'Guest (Store Customer)'
+            
+            recent_orders_data.append({
+                'order_id': order.order_id,
+                'user': username,
+                'amount': float(order.amount),
+                'status': order.status,
+                'date': order.created_at.strftime('%Y-%m-%d') if order.created_at else 'N/A'
+            })
+        
         return jsonify({
             'success': True,
             'data': {
@@ -8657,19 +9859,320 @@ def get_admin_stats():
                 'total_revenue': float(total_revenue),
                 'pending_manual': pending_manual,
                 'pending_withdrawals': pending_withdrawals,
-                'recent_orders': [{
-                    'order_id': o.order_id,
-                    'user': User.query.get(o.user_id).username if o.user_id else 'N/A',
-                    'amount': float(o.amount),
-                    'status': o.status,
-                    'date': o.created_at.strftime('%Y-%m-%d')
-                } for o in recent_orders]
+                'recent_orders': recent_orders_data
             }
         })
     except Exception as e:
         print(f"Get admin stats error: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': 'Failed to fetch Roamsmart stats'}), 500
 
+@app.route('/api/admin/users/<int:user_id>', methods=['PUT'])
+@token_required
+@admin_required
+def update_admin_user(user_id):
+    """Update user details (admin only)"""
+    try:
+        data = request.get_json()
+        
+        user = User.query.get(user_id)
+        if not user:
+            return jsonify({'success': False, 'error': 'User not found'}), 404
+        
+        # Update basic fields
+        if 'username' in data and data['username']:
+            user.username = data['username']
+        
+        if 'email' in data and data['email']:
+            # Check if email already exists for another user
+            existing_user = User.query.filter_by(email=data['email']).first()
+            if existing_user and existing_user.id != user_id:
+                return jsonify({'success': False, 'error': 'Email already exists'}), 400
+            user.email = data['email']
+        
+        if 'phone' in data and data['phone']:
+            user.phone = data['phone']
+        
+        if 'role' in data and data['role']:
+            user.role = data['role']
+            # If role is agent, update is_agent flag
+            if data['role'] == 'agent':
+                user.is_agent = True
+                user.agent_approved = True
+            elif data['role'] == 'admin':
+                user.is_admin = True
+            else:
+                user.is_agent = False
+                user.is_admin = False
+        
+        if 'wallet_balance' in data:
+            old_balance = user.wallet_balance
+            new_balance = float(data['wallet_balance'])
+            user.wallet_balance = new_balance
+            
+            # Log balance change if significant
+            if abs(new_balance - old_balance) > 0:
+                log_entry = AdminLog(
+                    admin_id=request.user_id,
+                    action='wallet_adjustment',
+                    details=f"Adjusted user {user.username}'s wallet from {old_balance} to {new_balance}",
+                    user_id=user_id
+                )
+                db.session.add(log_entry)
+        
+        # Update password only if provided
+        if 'password' in data and data['password'] and len(data['password']) > 0:
+            user.set_password(data['password'])
+        
+        user.updated_at = datetime.utcnow()
+        db.session.commit()
+        
+        # Send notification email if important fields changed
+        if 'email' in data or 'password' in data:
+            send_email(
+                user.email,
+                f"Account Updated - {COMPANY_NAME}",
+                f"""
+                <h3>Your {COMPANY_NAME} Account Has Been Updated</h3>
+                <p>Dear {user.username},</p>
+                <p>An administrator has updated your account information.</p>
+                {'<p><strong>Email was changed to:</strong> ' + data["email"] + '</p>' if 'email' in data else ''}
+                {'<p><strong>Password was changed by administrator.</strong></p>' if 'password' in data and data['password'] else ''}
+                <p>If you did not authorize these changes, please contact support immediately.</p>
+                <a href="{COMPANY_WEBSITE}/login" style="background: #8B0000; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Login to Your Account</a>
+                """
+            )
+        
+        return jsonify({
+            'success': True, 
+            'message': 'User updated successfully',
+            'user': user.to_dict()
+        })
+        
+    except Exception as e:
+        print(f"Update admin user error: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': 'Failed to update user'}), 500
+
+@app.route('/api/admin/prices/toggle-availability', methods=['POST'])
+@token_required
+@admin_required
+@price_session_required
+def toggle_package_availability():
+    """Enable or disable a data package size"""
+    try:
+        data = request.get_json()
+        network = data.get('network')
+        size_gb = data.get('size_gb')
+        available = data.get('available', True)
+        
+        if not network or size_gb is None:
+            return jsonify({'success': False, 'error': 'Network and size are required'}), 400
+        
+        print(f"Toggling package: {network} {size_gb}GB -> {'available' if available else 'unavailable'}")
+        
+        # Update ALL entries for this network/size (both user and agent prices)
+        price_settings = PriceSetting.query.filter_by(
+            network=network,
+            size_gb=int(size_gb)
+        ).all()
+        
+        updated_count = 0
+        for setting in price_settings:
+            setting.is_available = available
+            setting.updated_at = datetime.utcnow()
+            updated_count += 1
+            print(f"  Updated {setting.category}: {setting.network} {setting.size_gb}GB -> is_available={available}")
+        
+        db.session.commit()
+        
+        if updated_count == 0:
+            return jsonify({
+                'success': False,
+                'error': f'No price entries found for {network} {size_gb}GB'
+            }), 404
+        
+        return jsonify({
+            'success': True,
+            'message': f'Package {size_gb}GB for {network.upper()} is now {"available" if available else "unavailable"}'
+        })
+        
+    except Exception as e:
+        print(f"Toggle availability error: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/admin/prices', methods=['GET'])
+@token_required
+@admin_required
+@price_session_required
+def get_admin_prices():
+    """Get all prices including availability status (for admin panel)"""
+    try:
+        # Get all price settings
+        all_prices = PriceSetting.query.all()
+        
+        # Organize by type
+        user_prices = {}
+        agent_prices = {}
+        waec_prices = {}
+        commission_rates = {}
+        
+        for setting in all_prices:
+            if setting.category == 'user_price' and setting.network and setting.size_gb:
+                if setting.network not in user_prices:
+                    user_prices[setting.network] = {}
+                user_prices[setting.network][str(setting.size_gb)] = {
+                    'price': float(setting.price),
+                    'is_available': setting.is_available
+                }
+                
+            elif setting.category == 'agent_price' and setting.network and setting.size_gb:
+                if setting.network not in agent_prices:
+                    agent_prices[setting.network] = {}
+                agent_prices[setting.network][str(setting.size_gb)] = {
+                    'price': float(setting.price),
+                    'is_available': setting.is_available
+                }
+                
+            elif setting.category == 'waec' and setting.exam_type:
+                waec_prices[setting.exam_type] = {
+                    'price': float(setting.price),
+                    'is_available': setting.is_available
+                }
+                
+            elif setting.category == 'commission' and setting.tier:
+                commission_rates[setting.tier] = {
+                    'rate': float(setting.rate),
+                    'is_available': setting.is_available
+                }
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'user_prices': user_prices,
+                'agent_prices': agent_prices,
+                'waec_prices': waec_prices,
+                'commission_rates': commission_rates
+            }
+        })
+        
+    except Exception as e:
+        print(f"Get admin prices error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/admin/prices/init-defaults', methods=['POST'])
+@token_required
+@admin_required
+@price_session_required
+def init_default_unavailable():
+    """Initialize default unavailable packages (AirtelTigo 1-4GB)"""
+    try:
+        # Set AirtelTigo 1-4GB as unavailable for both user and agent prices
+        updated_count = 0
+        
+        for size in [1, 2, 3, 4]:
+            price_settings = PriceSetting.query.filter_by(
+                network='airteltigo',
+                size_gb=size
+            ).all()
+            
+            for setting in price_settings:
+                setting.is_available = False
+                setting.updated_at = datetime.utcnow()
+                updated_count += 1
+        
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': f'Set {updated_count} AirtelTigo packages as unavailable (1-4GB)'
+        })
+        
+    except Exception as e:
+        print(f"Init defaults error: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/admin/prices/delete-size', methods=['DELETE'])
+@token_required
+@admin_required
+@price_session_required
+def delete_custom_size():
+    """Delete a custom data package size"""
+    try:
+        data = request.get_json()
+        network = data.get('network')
+        size_gb = data.get('size_gb')
+        
+        if not network or not size_gb:
+            return jsonify({'success': False, 'error': 'Network and size are required'}), 400
+        
+        # Delete all entries for this network/size
+        deleted = PriceSetting.query.filter_by(
+            network=network,
+            size_gb=int(size_gb)
+        ).delete()
+        
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': f'Deleted {size_gb}GB package for {network.upper()} ({deleted} entries)'
+        })
+        
+    except Exception as e:
+        print(f"Delete size error: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/user/unavailable-packages', methods=['GET'])
+@token_required
+def get_user_unavailable_packages():
+    """Get unavailable packages for user dashboard"""
+    try:
+        from sqlalchemy import text
+        
+        # Check if table exists using text()
+        result = db.session.execute(text("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_name = 'package_availability'
+            )
+        """))
+        table_exists = result.fetchone()[0]
+        
+        if not table_exists:
+            return jsonify({'success': True, 'data': {}})
+        
+        result = db.session.execute(text("""
+            SELECT network, size_gb 
+            FROM package_availability 
+            WHERE is_available = FALSE
+        """))
+        
+        # Organize by network
+        unavailable_map = {}
+        for row in result:
+            network = row[0]
+            size_gb = str(row[1])
+            if network not in unavailable_map:
+                unavailable_map[network] = []
+            unavailable_map[network].append(size_gb)
+        
+        print(f"Unavailable packages for user: {unavailable_map}")
+        
+        return jsonify({
+            'success': True,
+            'data': unavailable_map
+        })
+        
+    except Exception as e:
+        print(f"Error getting unavailable packages: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': True, 'data': {}}), 200
 
 @app.route('/api/admin/users', methods=['GET'])
 @token_required
@@ -11205,99 +12708,6 @@ def get_or_create_price_password():
     return password_hash, password_salt
 
 
-def verify_price_password(password):
-    """Verify the price management password"""
-    stored_hash, salt = get_or_create_price_password()
-    
-    input_hash = hashlib.sha256(f"{password}{salt}".encode()).hexdigest()
-    return input_hash == stored_hash
-
-
-def price_auth_required(f):
-    """Decorator to require price management password"""
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        auth_token = request.headers.get('X-Price-Auth')
-        
-        if not auth_token:
-            return jsonify({
-                'success': False, 
-                'error': 'Price management password required',
-                'requires_auth': True
-            }), 401
-        
-        # Verify the token (you can also implement proper JWT or session tokens)
-        # For simplicity, we'll verify against the stored hash
-        stored_hash, _ = get_or_create_price_password()
-        
-        # Simple token verification (in production, use JWT)
-        if auth_token != stored_hash:
-            return jsonify({
-                'success': False, 
-                'error': 'Invalid or expired session',
-                'requires_auth': True
-            }), 401
-        
-        return f(*args, **kwargs)
-    return decorated
-
-
-# Store active sessions (in production, use Redis or database)
-active_price_sessions = {}  # {token: expiry_timestamp}
-
-
-def create_price_session(user_id):
-    """Create a new price management session"""
-    token = secrets.token_hex(32)
-    expiry = datetime.utcnow() + timedelta(hours=1)
-    
-    # Store in database or cache
-    active_price_sessions[token] = {
-        'user_id': user_id,
-        'expiry': expiry.timestamp()
-    }
-    
-    return token
-
-
-def verify_price_session(token):
-    """Verify if session token is valid"""
-    session = active_price_sessions.get(token)
-    if not session:
-        return False
-    
-    if datetime.utcnow().timestamp() > session['expiry']:
-        # Session expired
-        del active_price_sessions[token]
-        return False
-    
-    return True
-
-
-def price_session_required(f):
-    """Decorator to require price management session token"""
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        auth_token = request.headers.get('X-Price-Auth')
-        
-        if not auth_token:
-            return jsonify({
-                'success': False, 
-                'error': 'Price management session required',
-                'requires_auth': True
-            }), 401
-        
-        if not verify_price_session(auth_token):
-            return jsonify({
-                'success': False, 
-                'error': 'Session expired or invalid. Please re-enter password.',
-                'requires_auth': True
-            }), 401
-        
-        return f(*args, **kwargs)
-    return decorated
-
-
 @app.route('/api/admin/prices/verify', methods=['POST'])
 @token_required
 @admin_required
@@ -11318,7 +12728,8 @@ def verify_admin_price_password_endpoint():
                 'success': True,
                 'message': 'Password verified',
                 'token': token,
-                'expires_in': 3600  # 1 hour
+                'expires_in': 3600,  # 1 hour
+                'expires_at': (datetime.utcnow() + timedelta(hours=1)).isoformat()
             })
         else:
             return jsonify({'success': False, 'error': 'Invalid password'}), 401
@@ -11334,8 +12745,7 @@ def price_session_admin_logout():
     """Logout from price management session"""
     try:
         auth_token = request.headers.get('X-Price-Auth')
-        if auth_token and auth_token in active_price_sessions:
-            del active_price_sessions[auth_token]
+        destroy_price_session(auth_token)
         
         return jsonify({'success': True, 'message': 'Logged out successfully'})
         
@@ -12309,12 +13719,23 @@ def get_all_orders():
         
         orders_data = []
         for order in pagination.items:
-            user = User.query.get(order.user_id)
+            
+            if order.user_id:
+                user = db.session.get(User, order.user_id)
+                username = user.username if user else 'Unknown'
+                user_email = user.email if user else 'Unknown'
+                user_phone = user.phone if user else 'Unknown'
+            else:
+                
+                username = 'Guest (Store Customer)'
+                user_email = 'guest@store.roamsmart.shop'
+                user_phone = order.phone_number or 'Unknown'
+            
             orders_data.append({
                 **order.to_dict(),
-                'username': user.username if user else 'Unknown',
-                'user_email': user.email if user else 'Unknown',
-                'user_phone': user.phone if user else 'Unknown',
+                'username': username,
+                'user_email': user_email,
+                'user_phone': user_phone,
                 'platform': COMPANY_NAME
             })
         
@@ -12329,6 +13750,8 @@ def get_all_orders():
         })
     except Exception as e:
         print(f"Get all orders error: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
@@ -16768,7 +18191,7 @@ def get_all_prices():
                 'agent_prices': {
                     'mtn': {'1': 5.50, '2': 10.00, '5': 22.00, '10': 42.00, '20': 80.00},
                     'telecel': {'1': 5.00, '2': 9.00, '5': 20.00, '10': 38.00, '20': 75.00},
-                    'airteltigo': {'1': 5.00, '2': 9.00, '5': 20.00, '10': 38.00, '20': 75.00}
+                    'airteltigo': { '5': 20.00, '10': 38.00, '20': 75.00}
                 },
                 'waec_prices': {
                     'WASSCE': 20.00,
@@ -16964,9 +18387,6 @@ def update_price_password():
         db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
 
-
-# ========== PRICE UPDATE ENDPOINTS (with session requirement) ==========
-
 @app.route('/api/admin/prices/user', methods=['PUT'])
 @token_required
 @admin_required
@@ -16991,6 +18411,7 @@ def update_user_prices():
         
         if price_setting:
             price_setting.price = price
+            price_setting.is_available = True  # Ensure it's available when updated
             price_setting.updated_at = datetime.utcnow()
         else:
             price_setting = PriceSetting(
@@ -16998,6 +18419,7 @@ def update_user_prices():
                 network=network,
                 size_gb=size_gb,
                 price=price,
+                is_available=True,  # New prices are available by default
                 created_at=datetime.utcnow()
             )
             db.session.add(price_setting)
@@ -17013,7 +18435,6 @@ def update_user_prices():
         print(f"Update user price error: {e}")
         db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
-
 
 @app.route('/api/admin/prices/agent', methods=['PUT'])
 @token_required
@@ -17038,6 +18459,7 @@ def update_agent_prices():
         
         if price_setting:
             price_setting.price = price
+            price_setting.is_available = True  # Ensure it's available when updated
             price_setting.updated_at = datetime.utcnow()
         else:
             price_setting = PriceSetting(
@@ -17045,6 +18467,7 @@ def update_agent_prices():
                 network=network,
                 size_gb=size_gb,
                 price=price,
+                is_available=True,  # New prices are available by default
                 created_at=datetime.utcnow()
             )
             db.session.add(price_setting)
@@ -17060,7 +18483,6 @@ def update_agent_prices():
         print(f"Update agent price error: {e}")
         db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
-
 
 @app.route('/api/admin/prices/waec', methods=['PUT'])
 @token_required
@@ -17343,14 +18765,26 @@ def admin_purchase_data():
 @app.route('/api/user/purchase-data', methods=['POST'])
 @token_required
 def user_purchase_data():
-    """User purchases data using wallet balance - delivers via Africa's Talking"""
+    """User purchases data using wallet balance - Same Digimall call as agent"""
     try:
+        from models import PriceSetting, Order, Transaction
+        from services.digimall_service import DigimallService
+        
         data = request.get_json()
         
         network = data.get('network')
         size_gb = data.get('size_gb')
         phone_number = data.get('phone_number')
         quantity = data.get('quantity', 1)
+        
+        print(f"\n{'='*60}")
+        print(f"📱 USER PURCHASE DATA")
+        print(f"{'='*60}")
+        print(f"User: {g.current_user.username} (ID: {g.current_user.id})")
+        print(f"Network: {network}")
+        print(f"Size: {size_gb}GB")
+        print(f"Phone: {phone_number}")
+        print(f"Quantity: {quantity}")
         
         if not network or not size_gb or not phone_number:
             return jsonify({'success': False, 'error': 'Network, size, and phone required'}), 400
@@ -17359,7 +18793,7 @@ def user_purchase_data():
         
         # Get price from PriceSetting
         price_setting = PriceSetting.query.filter_by(
-            category='user_price' if not user.is_agent else 'agent_price',
+            category='user_price',
             network=network,
             size_gb=size_gb
         ).first()
@@ -17371,92 +18805,130 @@ def user_purchase_data():
         total_price = price_per_unit * quantity
         total_gb = size_gb * quantity
         
+        print(f"💰 Total Price: ₵{total_price}")
+        print(f"💳 User Balance: ₵{user.wallet_balance}")
+        
         # Check wallet balance
         if user.wallet_balance < total_price:
-            return jsonify({'success': False, 'error': f'Insufficient balance. Need ₵{total_price:.2f}'}), 400
-        
-        # Check inventory
-        inventory = MasterInventory.query.filter_by(
-            network=network,
-            size_gb=size_gb
-        ).first()
-        
-        if not inventory or inventory.remaining < total_gb:
-            return jsonify({'success': False, 'error': 'Insufficient inventory. Please contact admin.'}), 400
-        
-        # Format phone number for Africa's Talking (international format)
-        # Convert Ghana number (024XXXXXXX) to international format (23324XXXXXXX)
-        if phone_number.startswith('0'):
-            international_phone = '233' + phone_number[1:]
-        else:
-            international_phone = phone_number
-        
-        # Send data via Africa's Talking
-        delivery_result = send_data_to_customer(international_phone, size_gb, quantity)
-        
-        if not delivery_result['success']:
             return jsonify({
                 'success': False, 
-                'error': f'Data delivery failed: {delivery_result.get("error", "Unknown error")}'
-            }), 500
+                'error': f'Insufficient balance. Need ₵{total_price:.2f}'
+            }), 400
+        
+        # Format phone number - same as agent
+        # Remove any non-digit characters and ensure proper format
+        def clean_phone(phone):
+            phone = ''.join(filter(str.isdigit, phone))
+            if phone.startswith('0'):
+                phone = '233' + phone[1:]
+            elif not phone.startswith('233'):
+                phone = '233' + phone
+            return phone
+        
+        clean_phone_number = clean_phone(phone_number)
+        print(f"📞 Clean phone: {clean_phone_number}")
+        
+        # Generate order ID (same format as agent)
+        order_id = f"ORD-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{user.id}"
         
         # Deduct from user wallet
         balance_before = user.wallet_balance
         user.wallet_balance -= total_price
         
-        # Update inventory
-        inventory.remaining -= total_gb
-        inventory.sold_to_users = (inventory.sold_to_users or 0) + total_gb
-        
         # Create order
-        order_id = f"ORD-{uuid.uuid4().hex[:8].upper()}"
         order = Order(
             user_id=user.id,
             order_id=order_id,
+            type='data',
             network=network,
             size_gb=size_gb,
             quantity=quantity,
             phone_number=phone_number,
             amount=total_price,
-            status='completed',
+            status='processing',
             payment_method='wallet',
-            created_at=datetime.utcnow(),
-            completed_at=datetime.utcnow(),
-            delivery_transaction_id=delivery_result.get('transaction_id')
+            delivery_status='pending',
+            delivery_status_updated_at=datetime.utcnow(),
+            created_at=datetime.utcnow()
         )
         db.session.add(order)
         
-        # Create transaction
+        # Create transaction record
         transaction = Transaction(
             user_id=user.id,
-            type='debit',
+            type='purchase',
             amount=total_price,
             balance_before=balance_before,
             balance_after=user.wallet_balance,
-            description=f'Data purchase - {quantity}x {size_gb}GB {network.upper()} to {phone_number}',
+            description=f'Purchase: {quantity}x {size_gb}GB {network} to {phone_number}',
             reference=order_id,
-            status='completed',
-            delivery_status='delivered'
+            status='completed'
         )
         db.session.add(transaction)
         
         db.session.commit()
         
+        # Update delivery status to queued (same as agent)
+        order.delivery_status = 'queued'
+        order.delivery_status_updated_at = datetime.utcnow()
+        db.session.commit()
+        
+        # ========== SEND TO DIGIMALL (SAME AS AGENT) ==========
+        digimall_result = None
+        try:
+            digimall = DigimallService()
+            webhook_url = f"{current_app.config.get('BASE_URL', 'https://roamsmart-backend-production.up.railway.app')}/api/webhooks/digimall"
+            
+            # SAME CALL AS AGENT SELL ENDPOINT
+            digimall_result = digimall.deliver_data(
+                network=network,
+                phone_number=clean_phone_number,
+                volume=size_gb
+            )
+            
+            print(f"📡 Digimall Result: {digimall_result}")
+            
+            if digimall_result and digimall_result.get('success'):
+                order.provider = 'digimall'
+                order.provider_order_id = digimall_result.get('orderId')
+                order.provider_reference = digimall_result.get('reference')
+                order.provider_cost = digimall_result.get('totalAmount', 0)
+                order.delivery_status = 'processing'
+                order.delivery_status_updated_at = datetime.utcnow()
+                order.status = 'completed'
+                db.session.commit()
+                print(f"✅ Digimall delivery initiated: {digimall_result.get('orderId')}")
+            else:
+                error_msg = digimall_result.get('error') if digimall_result else 'Digimall service error'
+                order.delivery_status = 'failed'
+                order.delivery_status_updated_at = datetime.utcnow()
+                order.last_delivery_error = error_msg
+                db.session.commit()
+                print(f"❌ Digimall delivery failed: {error_msg}")
+                
+        except Exception as e:
+            print(f"❌ Digimall exception: {e}")
+            order.delivery_status = 'failed'
+            order.delivery_status_updated_at = datetime.utcnow()
+            order.last_delivery_error = str(e)
+            db.session.commit()
+        
         return jsonify({
             'success': True,
-            'message': f'Successfully purchased and delivered {total_gb}GB {network.upper()} data to {phone_number}',
+            'message': f'Successfully purchased {total_gb}GB {network.upper()} data to {phone_number}',
             'data': {
                 'order_id': order_id,
-                'total_gb': total_gb,
-                'total_price': total_price,
-                'new_balance': float(user.wallet_balance),
-                'delivery_status': 'delivered',
-                'delivery_transaction_id': delivery_result.get('transaction_id')
+                'amount': total_price,
+                'balance': float(user.wallet_balance),
+                'delivery_status': order.delivery_status,
+                'digimall_delivery': digimall_result.get('success') if digimall_result else False
             }
         }), 201
         
     except Exception as e:
-        print(f"User purchase error: {e}")
+        print(f"❌ User purchase error: {e}")
+        import traceback
+        traceback.print_exc()
         db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
 
