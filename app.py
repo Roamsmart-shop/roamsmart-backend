@@ -6564,10 +6564,8 @@ def initiate_store_payment():
             'Content-Type': 'application/json'
         }
         
-        # Build callback URL with fallback to store URL
-        frontend_url = current_app.config.get('FRONTEND_URL', 'https://roamsmart.shop')
-        callback_url = f"{frontend_url}/store/{store_slug}?reference={payment_ref}"
-        
+        callback_url = f"https://roamsmart.shop/store/{store_slug}?reference={payment_ref}"
+        print(f"🔗 Callback URL: {callback_url}")
         payload = {
             'email': customer_email,
             'amount': int(amount * 100),
