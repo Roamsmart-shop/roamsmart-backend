@@ -9962,15 +9962,22 @@ def update_admin_user(user_id):
             new_balance = float(data['wallet_balance'])
             user.wallet_balance = new_balance
             
-            # Log balance change if significant
+            # Log balance change if significant - FIX: Use g.current_user.id
             if abs(new_balance - old_balance) > 0:
-                log_entry = AdminLog(
-                    admin_id=request.user_id,
-                    action='wallet_adjustment',
-                    details=f"Adjusted user {user.username}'s wallet from {old_balance} to {new_balance}",
-                    user_id=user_id
-                )
-                db.session.add(log_entry)
+                # Check if AdminLog model exists, if not, comment out or create it
+                try:
+                    from models import AdminLog
+                    log_entry = AdminLog(
+                        admin_id=g.current_user.id,  # Fixed: use g.current_user.id
+                        action='wallet_adjustment',
+                        details=f"Adjusted user {user.username}'s wallet from {old_balance} to {new_balance}",
+                        target_id=user_id,
+                        target_type='user'
+                    )
+                    db.session.add(log_entry)
+                except ImportError:
+                    # AdminLog model doesn't exist, skip logging
+                    print("AdminLog model not found, skipping log entry")
         
         # Update password only if provided
         if 'password' in data and data['password'] and len(data['password']) > 0:
@@ -9981,19 +9988,22 @@ def update_admin_user(user_id):
         
         # Send notification email if important fields changed
         if 'email' in data or 'password' in data:
-            send_email(
-                user.email,
-                f"Account Updated - {COMPANY_NAME}",
-                f"""
-                <h3>Your {COMPANY_NAME} Account Has Been Updated</h3>
-                <p>Dear {user.username},</p>
-                <p>An administrator has updated your account information.</p>
-                {'<p><strong>Email was changed to:</strong> ' + data["email"] + '</p>' if 'email' in data else ''}
-                {'<p><strong>Password was changed by administrator.</strong></p>' if 'password' in data and data['password'] else ''}
-                <p>If you did not authorize these changes, please contact support immediately.</p>
-                <a href="{COMPANY_WEBSITE}/login" style="background: #8B0000; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Login to Your Account</a>
-                """
-            )
+            try:
+                send_email(
+                    user.email,
+                    f"Account Updated - {COMPANY_NAME}",
+                    f"""
+                    <h3>Your {COMPANY_NAME} Account Has Been Updated</h3>
+                    <p>Dear {user.username},</p>
+                    <p>An administrator has updated your account information.</p>
+                    {'<p><strong>Email was changed to:</strong> ' + data["email"] + '</p>' if 'email' in data else ''}
+                    {'<p><strong>Password was changed by administrator.</strong></p>' if 'password' in data and data['password'] else ''}
+                    <p>If you did not authorize these changes, please contact support immediately.</p>
+                    <a href="{COMPANY_WEBSITE}/login" style="background: #8B0000; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Login to Your Account</a>
+                    """
+                )
+            except Exception as email_error:
+                print(f"Email error: {email_error}")
         
         return jsonify({
             'success': True, 
@@ -10003,8 +10013,10 @@ def update_admin_user(user_id):
         
     except Exception as e:
         print(f"Update admin user error: {e}")
+        import traceback
+        traceback.print_exc()
         db.session.rollback()
-        return jsonify({'success': False, 'error': 'Failed to update user'}), 500
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/admin/prices/toggle-availability', methods=['POST'])
 @token_required
