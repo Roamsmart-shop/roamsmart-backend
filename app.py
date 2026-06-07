@@ -3270,96 +3270,111 @@ def send_phone_verification_email(email, phone_number, code):
 @limiter.limit("10 per hour")
 def resend_verification():
     """Resend verification code for email verification"""
-    data = request.get_json()
-    email = data.get('email')
-    
-    print(f"[RESEND] Request for email: {email}")
-    
-    if not email:
-        return jsonify({'success': False, 'error': 'Email required'}), 400
-    
-    # Check for temp_user in session
-    temp_user = session.get('temp_user')
-    
-    if temp_user and temp_user.get('email') == email:
-        new_code = generate_verification_code()
-        temp_user['verification_code'] = new_code
-        temp_user['expires'] = (datetime.utcnow() + timedelta(minutes=10)).isoformat()
-        session['temp_user'] = temp_user
-        session[f'temp_user_{email}'] = temp_user
+    try:
+        data = request.get_json()
+        email = data.get('email')
         
-        print(f"[RESEND] New code for {email}: {new_code}")
+        print(f"\n{'='*60}")
+        print(f"📧 RESEND VERIFICATION REQUEST")
+        print(f"{'='*60}")
+        print(f"Request data: {data}")
+        print(f"Email from request: {email}")
+        print(f"Session keys: {list(session.keys())}")
         
-        email_sent = send_verification_email(email, temp_user.get('username', 'User'), new_code)
+        if not email:
+            return jsonify({'success': False, 'error': 'Email required'}), 400
         
-        if email_sent:
-            return jsonify({
-                'success': True,
-                'message': 'Verification code resent successfully',
-                'data': {'email': email, 'expires_in': 10}
-            })
-        else:
-            return jsonify({
-                'success': False,
-                'error': 'Failed to send email. Please try again.'
-            }), 500
-    
-    # Check for existing unverified user in database
-    user = User.query.filter_by(email=email, email_verified=False).first()
-    
-    if user:
-        new_code = generate_verification_code()
+        # Check for temp_user in session
+        temp_user = session.get('temp_user')
+        print(f"temp_user from session: {temp_user}")
         
-        session['temp_user'] = {
-            'username': user.username,
-            'email': user.email,
-            'phone': user.phone,
-            'password': None,
-            'referral_code': None,
-            'verification_code': new_code,
-            'expires': (datetime.utcnow() + timedelta(minutes=10)).isoformat(),
-            'existing_user_id': user.id
-        }
+        if temp_user and temp_user.get('email') == email:
+            new_code = generate_verification_code()
+            temp_user['verification_code'] = new_code
+            temp_user['expires'] = (datetime.utcnow() + timedelta(minutes=10)).isoformat()
+            session['temp_user'] = temp_user
+            session[f'temp_user_{email}'] = temp_user
+            
+            print(f"✅ Found temp_user, new code: {new_code}")
+            
+            email_sent = send_verification_email(email, temp_user.get('username', 'User'), new_code)
+            
+            if email_sent:
+                return jsonify({
+                    'success': True,
+                    'message': 'Verification code resent successfully',
+                    'data': {'email': email, 'expires_in': 10}
+                })
+            else:
+                return jsonify({
+                    'success': False,
+                    'error': 'Failed to send email. Please try again.'
+                }), 500
         
-        session[f'temp_user_{email}'] = session['temp_user']
+        # Check for email-specific session
+        email_temp = session.get(f'temp_user_{email}')
+        print(f"email_temp for {email}: {email_temp}")
         
-        print(f"[RESEND] New session created for existing user: {email}")
-        print(f"[RESEND] New code: {new_code}")
+        if email_temp:
+            new_code = generate_verification_code()
+            email_temp['verification_code'] = new_code
+            email_temp['expires'] = (datetime.utcnow() + timedelta(minutes=10)).isoformat()
+            session[f'temp_user_{email}'] = email_temp
+            session['temp_user'] = email_temp
+            
+            print(f"✅ Found email_temp, new code: {new_code}")
+            
+            email_sent = send_verification_email(email, email_temp.get('username', 'User'), new_code)
+            
+            if email_sent:
+                return jsonify({
+                    'success': True,
+                    'message': 'Verification code resent successfully',
+                    'data': {'email': email, 'expires_in': 10}
+                })
         
-        email_sent = send_verification_email(email, user.username, new_code)
+        # Check for existing unverified user in database
+        user = User.query.filter_by(email=email, email_verified=False).first()
+        print(f"Existing unverified user: {user}")
         
-        if email_sent:
-            return jsonify({
-                'success': True,
-                'message': 'Verification code resent successfully',
-                'data': {'email': email, 'expires_in': 10}
-            })
-    
-    email_temp = session.get(f'temp_user_{email}')
-    if email_temp:
-        new_code = generate_verification_code()
-        email_temp['verification_code'] = new_code
-        email_temp['expires'] = (datetime.utcnow() + timedelta(minutes=10)).isoformat()
-        session[f'temp_user_{email}'] = email_temp
-        session['temp_user'] = email_temp
+        if user:
+            new_code = generate_verification_code()
+            
+            session['temp_user'] = {
+                'username': user.username,
+                'email': user.email,
+                'phone': user.phone,
+                'password': None,
+                'referral_code': None,
+                'verification_code': new_code,
+                'expires': (datetime.utcnow() + timedelta(minutes=10)).isoformat(),
+                'existing_user_id': user.id
+            }
+            
+            session[f'temp_user_{email}'] = session['temp_user']
+            
+            print(f"✅ Found unverified user, created new session, code: {new_code}")
+            
+            email_sent = send_verification_email(email, user.username, new_code)
+            
+            if email_sent:
+                return jsonify({
+                    'success': True,
+                    'message': 'Verification code resent successfully',
+                    'data': {'email': email, 'expires_in': 10}
+                })
         
-        print(f"[RESEND] Found in email-specific session: {email}")
-        print(f"[RESEND] New code: {new_code}")
+        print(f"❌ No pending registration found for email: {email}")
+        return jsonify({
+            'success': False,
+            'error': 'No pending registration found. Please register again.'
+        }), 400
         
-        email_sent = send_verification_email(email, email_temp.get('username', 'User'), new_code)
-        
-        if email_sent:
-            return jsonify({
-                'success': True,
-                'message': 'Verification code resent successfully',
-                'data': {'email': email, 'expires_in': 10}
-            })
-    
-    return jsonify({
-        'success': False,
-        'error': 'No pending registration found. Please register again.'
-    }), 400
-
+    except Exception as e:
+        print(f"Resend verification error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/auth/resend-registration-code', methods=['POST'])
 def resend_registration_code():
@@ -3684,46 +3699,155 @@ def verify_registration_code():
         user_code = data.get('code')
         email = data.get('email')
         
-        print(f"[VERIFY] Received code: {user_code}")
-        print(f"[VERIFY] Email: {email}")
+        print(f"\n{'='*80}")
+        print(f"🔐 VERIFY REGISTRATION CODE")
+        print(f"{'='*80}")
+        print(f"Input data: {data}")
+        print(f"User code: {user_code}")
+        print(f"Email: {email}")
+        
+        # Normalize email
+        if email:
+            email = email.lower().strip()
+            print(f"Normalized email: {email}")
+        
+        if not user_code or not email:
+            print(f"❌ Missing required fields - code: {bool(user_code)}, email: {bool(email)}")
+            return jsonify({'success': False, 'error': 'Code and email are required'}), 400
         
         # Get temp data from Redis
-        temp_user = get_temp_data(f"register:{email}")
+        redis_key = f"register:{email}"
+        print(f"\n📡 Looking up Redis key: {redis_key}")
+        
+        temp_user = get_temp_data(redis_key)
         
         if not temp_user:
-            print(f"[VERIFY] No pending registration found for {email}")
-            return jsonify({
-                'success': False, 
-                'error': 'No pending registration found. Please register again.'
-            }), 400
+            print(f"❌ No temp data found for key: {redis_key}")
+            
+            # Try alternative case variations
+            alt_keys = [
+                f"register:{email.lower()}",
+                f"register:{email.upper()}",
+                f"register:{email.capitalize()}"
+            ]
+            
+            for alt_key in alt_keys:
+                if alt_key != redis_key:
+                    print(f"Trying alternative key: {alt_key}")
+                    alt_temp = get_temp_data(alt_key)
+                    if alt_temp:
+                        temp_user = alt_temp
+                        print(f"✅ Found data with alternative key: {alt_key}")
+                        break
+            
+            if not temp_user:
+                # Debug: List all Redis keys
+                try:
+                    if redis_available and redis_client:
+                        all_keys = redis_client.keys('register:*')
+                        print(f"All Redis keys with 'register:': {all_keys}")
+                        
+                        # Try to get each key's data
+                        for key in all_keys:
+                            key_data = get_temp_data(key)
+                            print(f"  Key: {key} -> email: {key_data.get('email') if key_data else 'None'}")
+                    else:
+                        print(f"Memory storage keys: {list(temp_storage.keys())}")
+                except Exception as debug_err:
+                    print(f"Debug error: {debug_err}")
+                
+                return jsonify({
+                    'success': False, 
+                    'error': 'No pending registration found. Please register again.',
+                    'debug': {
+                        'email_used': email,
+                        'redis_key_used': redis_key,
+                        'redis_available': redis_available
+                    }
+                }), 400
+        
+        print(f"✅ Found temp_user data:")
+        if temp_user:
+            print(f"   - username: {temp_user.get('username')}")
+            print(f"   - email: {temp_user.get('email')}")
+            print(f"   - phone: {temp_user.get('phone')}")
+            print(f"   - verification_code: {temp_user.get('verification_code')}")
+            print(f"   - expires: {temp_user.get('expires')}")
         
         # Check expiration
-        expires_at = datetime.fromisoformat(temp_user['expires'])
-        if datetime.utcnow() > expires_at:
-            # Clean up expired entry
-            delete_temp_data(f"register:{email}")
+        expires_at_str = temp_user.get('expires')
+        if not expires_at_str:
+            print(f"❌ No expiration time found in temp data")
+            delete_temp_data(redis_key)
+            return jsonify({
+                'success': False, 
+                'error': 'Invalid registration data. Please register again.'
+            }), 400
+        
+        expires_at = datetime.fromisoformat(expires_at_str)
+        now = datetime.utcnow()
+        
+        print(f"\n⏰ Time check:")
+        print(f"   Current UTC: {now}")
+        print(f"   Expires at: {expires_at}")
+        print(f"   Time remaining: {(expires_at - now).total_seconds()} seconds")
+        
+        if now > expires_at:
+            print(f"❌ Verification code expired")
+            delete_temp_data(redis_key)
             return jsonify({
                 'success': False, 
                 'error': 'Verification code expired. Please register again.'
             }), 400
         
         # Verify code
-        if user_code != temp_user.get('verification_code'):
-            return jsonify({'success': False, 'error': 'Invalid verification code'}), 400
+        stored_code = temp_user.get('verification_code')
+        print(f"\n🔑 Code verification:")
+        print(f"   Stored code: {stored_code}")
+        print(f"   User code: {user_code}")
+        print(f"   Match: {stored_code == user_code}")
+        
+        if user_code != stored_code:
+            # Increment attempts
+            attempts = temp_user.get('attempts', 0) + 1
+            temp_user['attempts'] = attempts
+            set_temp_data(redis_key, temp_user, expiry_seconds=600)
+            
+            remaining = 5 - attempts
+            if remaining <= 0:
+                delete_temp_data(redis_key)
+                return jsonify({'success': False, 'error': 'Too many failed attempts. Please register again.'}), 400
+            
+            return jsonify({
+                'success': False, 
+                'error': f'Invalid verification code. {remaining} attempts remaining.'
+            }), 400
+        
+        print(f"✅ Code verified successfully!")
         
         # Check if user already exists
         existing_user = User.query.filter_by(email=temp_user['email']).first()
         
         if existing_user:
+            print(f"\n👤 Existing user found: {existing_user.username}")
+            print(f"   Email verified: {existing_user.email_verified}")
+            
             if not existing_user.email_verified:
                 existing_user.email_verified = True
                 existing_user.email_verified_at = datetime.utcnow()
                 db.session.commit()
                 
-                # Clean up Redis
-                delete_temp_data(f"register:{email}")
+                print(f"✅ Updated existing user - email verified")
                 
-                send_welcome_email(existing_user.email, existing_user.username, 'user')
+                # Clean up Redis
+                delete_temp_data(redis_key)
+                
+                # Send welcome email
+                try:
+                    send_welcome_email(existing_user.email, existing_user.username, 'user')
+                except Exception as email_err:
+                    print(f"Welcome email error: {email_err}")
+                
                 token = existing_user.generate_token()
                 
                 return jsonify({
@@ -3733,12 +3857,14 @@ def verify_registration_code():
                     'user': existing_user.to_dict()
                 })
             else:
+                print(f"⚠️ Email already verified")
                 return jsonify({
                     'success': False,
                     'error': 'Email already verified. Please login.'
                 }), 400
         
         # Create new user
+        print(f"\n🆕 Creating new user:")
         user_ref_code = f"REF{uuid.uuid4().hex[:8].upper()}"
         
         new_user = User(
@@ -3753,10 +3879,18 @@ def verify_registration_code():
         )
         new_user.set_password(temp_user['password'])
         
+        print(f"   Username: {new_user.username}")
+        print(f"   Email: {new_user.email}")
+        print(f"   Phone: {new_user.phone}")
+        print(f"   Referral code: {user_ref_code}")
+        
+        # Handle referral
         if temp_user.get('referral_code'):
+            print(f"   Referral code provided: {temp_user['referral_code']}")
             referrer = User.query.filter_by(referral_code=temp_user['referral_code']).first()
             if referrer:
                 new_user.referred_by = referrer.id
+                print(f"   Referrer found: {referrer.username} (ID: {referrer.id})")
                 
                 referral = Referral(
                     referrer_id=referrer.id,
@@ -3765,16 +3899,31 @@ def verify_registration_code():
                     reward_amount=5.00
                 )
                 db.session.add(referral)
+                print(f"   Referral record created")
+            else:
+                print(f"   ⚠️ Referrer not found for code: {temp_user['referral_code']}")
         
         db.session.add(new_user)
         db.session.commit()
         
-        # Clean up Redis
-        delete_temp_data(f"register:{email}")
+        print(f"✅ User created successfully with ID: {new_user.id}")
         
-        send_welcome_email(new_user.email, new_user.username, 'user')
+        # Clean up Redis
+        delete_temp_data(redis_key)
+        print(f"✅ Redis data cleaned up")
+        
+        # Send welcome email
+        try:
+            send_welcome_email(new_user.email, new_user.username, 'user')
+            print(f"✅ Welcome email sent")
+        except Exception as email_err:
+            print(f"Welcome email error: {email_err}")
         
         token = new_user.generate_token()
+        
+        print(f"{'='*80}")
+        print(f"✅ REGISTRATION COMPLETE!")
+        print(f"{'='*80}\n")
         
         return jsonify({
             'success': True,
@@ -3784,12 +3933,13 @@ def verify_registration_code():
         })
         
     except Exception as e:
-        print(f"Verify code error: {e}")
+        print(f"\n❌ VERIFY CODE ERROR:")
+        print(f"   Error: {str(e)}")
         import traceback
         traceback.print_exc()
+        print(f"{'='*80}\n")
         db.session.rollback()
-        return jsonify({'success': False, 'error': str(e)}), 500
-
+        return jsonify({'success': False, 'error': 'An error occurred during verification. Please try again.'}), 500
 
 @app.route('/api/auth/login', methods=['POST'])
 @limiter.limit("10 per minute")
@@ -10015,6 +10165,181 @@ def update_admin_user(user_id):
         print(f"Update admin user error: {e}")
         import traceback
         traceback.print_exc()
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/admin/failed-orders', methods=['GET'])
+@token_required
+@admin_required
+def get_failed_orders():
+    """Get all failed orders that need attention"""
+    try:
+        # Get pagination parameters
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('limit', 20, type=int)
+        
+        # Query failed orders (not refunded yet)
+        query = Order.query.filter(
+            Order.delivery_status == 'failed',
+            Order.status != 'refunded'
+        )
+        
+        pagination = query.order_by(Order.created_at.desc()).paginate(
+            page=page, per_page=per_page, error_out=False
+        )
+        
+        failed_orders = []
+        for order in pagination.items:
+            # Get user info
+            user = User.query.get(order.user_id) if order.user_id else None
+            
+            failed_orders.append({
+                'id': order.id,
+                'order_id': order.order_id,
+                'user_id': order.user_id,
+                'username': user.username if user else 'Guest',
+                'email': user.email if user else 'guest@store.roamsmart.shop',
+                'phone': user.phone if user else order.phone_number,
+                'amount': float(order.amount),
+                'cost': float(order.cost) if order.cost else 0,
+                'network': order.network,
+                'size_gb': order.size_gb,
+                'quantity': order.quantity,
+                'phone_number': order.phone_number,
+                'error_message': order.last_delivery_error or 'Unknown error',
+                'created_at': order.created_at.isoformat() if order.created_at else None,
+                'delivery_status': order.delivery_status
+            })
+        
+        # Get summary stats
+        total_failed = query.count()
+        total_refund_amount = db.session.query(db.func.sum(Order.amount)).filter(
+            Order.delivery_status == 'failed',
+            Order.status != 'refunded'
+        ).scalar() or 0
+        
+        return jsonify({
+            'success': True,
+            'data': failed_orders,
+            'pagination': {
+                'page': page,
+                'per_page': per_page,
+                'total': pagination.total,
+                'pages': pagination.pages
+            },
+            'summary': {
+                'total_failed': total_failed,
+                'total_refund_amount': float(total_refund_amount)
+            }
+        })
+        
+    except Exception as e:
+        print(f"Get failed orders error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/admin/resolve-failed-order/<int:order_id>', methods=['POST'])
+@token_required
+@admin_required
+def resolve_failed_order(order_id):
+    """Admin: Resolve failed order - retry delivery or refund"""
+    try:
+        data = request.get_json()
+        action = data.get('action')  # 'retry' or 'refund'
+        
+        order = Order.query.get(order_id)
+        if not order:
+            return jsonify({'success': False, 'error': 'Order not found'}), 404
+        
+        if order.delivery_status != 'failed':
+            return jsonify({'success': False, 'error': f'Order status is {order.delivery_status}, not failed'}), 400
+        
+        user = None
+        if order.user_id:
+            user = User.query.get(order.user_id)
+        
+        if action == 'retry':
+            # Retry delivery via Digimall
+            try:
+                from services.digimall_service import DigimallService
+                digimall = DigimallService()
+                
+                # Clean phone number
+                phone = ''.join(filter(str.isdigit, order.phone_number))
+                if phone.startswith('0'):
+                    phone = '233' + phone[1:]
+                elif not phone.startswith('233'):
+                    phone = '233' + phone
+                
+                result = digimall.deliver_data(
+                    network=order.network,
+                    phone_number=phone,
+                    volume=order.size_gb
+                )
+                
+                if result and result.get('success'):
+                    order.delivery_status = 'delivered'
+                    order.status = 'completed'
+                    order.provider = 'digimall'
+                    order.provider_order_id = result.get('orderId')
+                    order.provider_reference = result.get('reference')
+                    order.completed_at = datetime.utcnow()
+                    order.last_delivery_error = None
+                    db.session.commit()
+                    
+                    return jsonify({
+                        'success': True,
+                        'message': f'Order {order.order_id} retried and delivered successfully!'
+                    })
+                else:
+                    error_msg = result.get('error') if result else 'Retry failed'
+                    return jsonify({
+                        'success': False,
+                        'error': f'Retry failed: {error_msg}'
+                    }), 500
+                    
+            except Exception as e:
+                print(f"Retry error: {e}")
+                return jsonify({'success': False, 'error': f'Retry error: {str(e)}'}), 500
+                
+        elif action == 'refund':
+            if not user:
+                return jsonify({'success': False, 'error': 'User not found for refund'}), 404
+            
+            old_balance = user.wallet_balance
+            user.wallet_balance += order.amount
+            
+            # Create refund transaction
+            refund_transaction = Transaction(
+                user_id=user.id,
+                type='refund',
+                amount=order.amount,
+                balance_before=old_balance,
+                balance_after=user.wallet_balance,
+                description=f'Refund for failed order {order.order_id}',
+                reference=f"REF-{order.order_id}",
+                status='completed',
+                meta_data={'original_order_id': order.id}
+            )
+            db.session.add(refund_transaction)
+            
+            # Update order status
+            order.delivery_status = 'refunded'
+            order.status = 'refunded'
+            order.last_delivery_error = f'Refunded by admin due to delivery failure. Amount ₵{order.amount} returned.'
+            db.session.commit()
+            
+            return jsonify({
+                'success': True,
+                'message': f'Refunded ₵{order.amount:.2f} to user {user.username}'
+            })
+        else:
+            return jsonify({'success': False, 'error': 'Invalid action. Use "retry" or "refund"'}), 400
+            
+    except Exception as e:
+        print(f"Resolve failed order error: {e}")
         db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
 
