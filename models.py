@@ -558,6 +558,37 @@ class Transaction(db.Model):
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None  # Add this line
         }
+
+# models.py - Add AdminLog model
+
+class AdminLog(db.Model):
+    __tablename__ = 'admin_logs'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    admin_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    action = db.Column(db.String(50), nullable=False)  # 'update_user', 'delete_user', 'approve_agent', etc.
+    target_id = db.Column(db.Integer, nullable=True)
+    target_type = db.Column(db.String(50), nullable=True)  # 'user', 'agent', 'order', etc.
+    details = db.Column(db.Text, nullable=True)
+    ip_address = db.Column(db.String(45), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    # Relationship
+    admin = db.relationship('User', foreign_keys=[admin_id], backref='admin_logs')
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'admin_id': self.admin_id,
+            'admin_name': self.admin.username if self.admin else None,
+            'action': self.action,
+            'target_id': self.target_id,
+            'target_type': self.target_type,
+            'details': self.details,
+            'ip_address': self.ip_address,
+            'created_at': self.created_at.isoformat() if self.created_at else None
+        }
+
 # ========== AGENT REQUEST MODEL ==========
 class AgentRequest(db.Model):
     __tablename__ = 'agent_requests'
