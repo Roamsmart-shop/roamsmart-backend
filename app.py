@@ -59,7 +59,7 @@ from werkzeug.utils import secure_filename
 from flask_session import Session
 import secrets
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError, DataError
-
+from sqlalchemy import inspect
 # ========== LOCAL IMPORTS ==========
 from config import config
 from models import *
@@ -1509,10 +1509,7 @@ def init_db():
                 
                 # ===== ORDERS TABLE MIGRATION =====
                 print("\n📋 Checking Orders table columns...")
-                
-                
-                
-                
+            
                 conn.commit()
                 print("✅ Database migration completed")
         except Exception as e:
@@ -1542,18 +1539,6 @@ def init_db():
             admin.set_password('Roamsmart123@$')
             db.session.commit()
             print("✅ Super Admin password updated to: Roamsmart123@$")
-        
-        # Create PendingTransaction table if it doesn't exist (ensure it's created)
-        # This is handled by db.create_all() above, but let's verify
-        from sqlalchemy import inspect
-        inspector = inspect(db.engine)
-        if 'pending_transactions' not in inspector.get_table_names():
-            print("⚠️ pending_transactions table not found, creating...")
-            # Create table directly if model exists
-            PendingTransaction.__table__.create(db.engine)
-            print("✅ pending_transactions table created")
-        else:
-            print("✅ pending_transactions table already exists")
         
         # Create default price settings if none exist
         if PriceSetting.query.count() == 0:
@@ -1862,9 +1847,6 @@ def initialize_paystack_payment():
         print(f"Initialize Paystack payment error: {e}")
         db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
-
-
-
 
 @app.route('/api/payment/momo/initialize', methods=['POST'])
 @token_required
@@ -10174,9 +10156,15 @@ def update_admin_user(user_id):
 def get_failed_orders():
     """Get all failed orders that need attention"""
     try:
+        print(f"\n{'='*80}")
+        print(f"📋 GET FAILED ORDERS")
+        print(f"{'='*80}")
+        
         # Get pagination parameters
         page = request.args.get('page', 1, type=int)
         per_page = request.args.get('limit', 20, type=int)
+        
+        print(f"📄 Page: {page}, Per page: {per_page}")
         
         # Query failed orders (not refunded yet)
         query = Order.query.filter(
@@ -10184,14 +10172,27 @@ def get_failed_orders():
             Order.status != 'refunded'
         )
         
+        total_count = query.count()
+        print(f"📊 Total failed orders found: {total_count}")
+        
         pagination = query.order_by(Order.created_at.desc()).paginate(
             page=page, per_page=per_page, error_out=False
         )
+        
+        print(f"📄 Pagination - Total: {pagination.total}, Pages: {pagination.pages}")
         
         failed_orders = []
         for order in pagination.items:
             # Get user info
             user = User.query.get(order.user_id) if order.user_id else None
+            
+            print(f"\n📦 Order {order.id}:")
+            print(f"   - Order ID: {order.order_id}")
+            print(f"   - User ID: {order.user_id}")
+            print(f"   - Username: {user.username if user else 'Guest'}")
+            print(f"   - Amount: ₵{order.amount}")
+            print(f"   - Delivery Status: {order.delivery_status}")
+            print(f"   - Error: {order.last_delivery_error}")
             
             failed_orders.append({
                 'id': order.id,
@@ -10218,6 +10219,11 @@ def get_failed_orders():
             Order.status != 'refunded'
         ).scalar() or 0
         
+        print(f"\n📊 Summary:")
+        print(f"   - Total Failed: {total_failed}")
+        print(f"   - Total Refund Amount: ₵{total_refund_amount}")
+        print(f"{'='*80}\n")
+        
         return jsonify({
             'success': True,
             'data': failed_orders,
@@ -10234,11 +10240,10 @@ def get_failed_orders():
         })
         
     except Exception as e:
-        print(f"Get failed orders error: {e}")
+        print(f"❌ Get failed orders error: {e}")
         import traceback
         traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
-
 
 @app.route('/api/admin/resolve-failed-order/<int:order_id>', methods=['POST'])
 @token_required
@@ -10249,35 +10254,72 @@ def resolve_failed_order(order_id):
         data = request.get_json()
         action = data.get('action')  # 'retry' or 'refund'
         
+        print(f"\n{'='*80}")
+        print(f"🔧 RESOLVE FAILED ORDER")
+        print(f"{'='*80}")
+        print(f"Order ID: {order_id}")
+        print(f"Action: {action}")
+        print(f"Admin: {g.current_user.username} (ID: {g.current_user.id})")
+        
         order = Order.query.get(order_id)
         if not order:
+            print(f"❌ Order not found: {order_id}")
             return jsonify({'success': False, 'error': 'Order not found'}), 404
         
+        print(f"\n📦 Order Details:")
+        print(f"   - Order ID: {order.order_id}")
+        print(f"   - Network: {order.network}")
+        print(f"   - Size: {order.size_gb}GB")
+        print(f"   - Phone: {order.phone_number}")
+        print(f"   - Amount: ₵{order.amount}")
+        print(f"   - Delivery Status: {order.delivery_status}")
+        print(f"   - Current Status: {order.status}")
+        print(f"   - Error: {order.last_delivery_error}")
+        
         if order.delivery_status != 'failed':
+            print(f"❌ Order status is {order.delivery_status}, not failed")
             return jsonify({'success': False, 'error': f'Order status is {order.delivery_status}, not failed'}), 400
         
         user = None
         if order.user_id:
             user = User.query.get(order.user_id)
+            if user:
+                print(f"\n👤 User Details:")
+                print(f"   - Username: {user.username}")
+                print(f"   - Email: {user.email}")
+                print(f"   - Current Balance: ₵{user.wallet_balance}")
+            else:
+                print(f"⚠️ User not found for ID: {order.user_id}")
+        else:
+            print(f"👤 Guest order (no user account)")
         
         if action == 'retry':
+            print(f"\n🔄 Retrying delivery...")
+            
             # Retry delivery via Digimall
             try:
                 from services.digimall_service import DigimallService
                 digimall = DigimallService()
                 
                 # Clean phone number
-                phone = ''.join(filter(str.isdigit, order.phone_number))
+                original_phone = order.phone_number
+                phone = ''.join(filter(str.isdigit, original_phone))
                 if phone.startswith('0'):
                     phone = '233' + phone[1:]
                 elif not phone.startswith('233'):
                     phone = '233' + phone
+                
+                print(f"📞 Phone: {original_phone} -> {phone}")
+                print(f"📡 Network: {order.network}")
+                print(f"💾 Volume: {order.size_gb}GB")
                 
                 result = digimall.deliver_data(
                     network=order.network,
                     phone_number=phone,
                     volume=order.size_gb
                 )
+                
+                print(f"📡 Digimall Response: {result}")
                 
                 if result and result.get('success'):
                     order.delivery_status = 'delivered'
@@ -10289,33 +10331,57 @@ def resolve_failed_order(order_id):
                     order.last_delivery_error = None
                     db.session.commit()
                     
+                    print(f"✅ Order retried and delivered successfully!")
+                    print(f"   Provider Order ID: {result.get('orderId')}")
+                    print(f"{'='*80}\n")
+                    
                     return jsonify({
                         'success': True,
-                        'message': f'Order {order.order_id} retried and delivered successfully!'
+                        'message': f'Order {order.order_id} retried and delivered successfully!',
+                        'data': {
+                            'provider_order_id': result.get('orderId'),
+                            'delivery_status': order.delivery_status
+                        }
                     })
                 else:
                     error_msg = result.get('error') if result else 'Retry failed'
+                    print(f"❌ Retry failed: {error_msg}")
+                    print(f"{'='*80}\n")
                     return jsonify({
                         'success': False,
                         'error': f'Retry failed: {error_msg}'
                     }), 500
                     
             except Exception as e:
-                print(f"Retry error: {e}")
+                print(f"❌ Retry exception: {e}")
+                import traceback
+                traceback.print_exc()
+                print(f"{'='*80}\n")
                 return jsonify({'success': False, 'error': f'Retry error: {str(e)}'}), 500
                 
         elif action == 'refund':
+            print(f"\n💰 Processing refund...")
+            
             if not user:
+                print(f"❌ User not found for refund")
                 return jsonify({'success': False, 'error': 'User not found for refund'}), 404
             
             old_balance = user.wallet_balance
-            user.wallet_balance += order.amount
+            refund_amount = order.amount
+            
+            print(f"💰 User: {user.username}")
+            print(f"   Old Balance: ₵{old_balance}")
+            print(f"   Refund Amount: ₵{refund_amount}")
+            
+            user.wallet_balance += refund_amount
+            
+            print(f"   New Balance: ₵{user.wallet_balance}")
             
             # Create refund transaction
             refund_transaction = Transaction(
                 user_id=user.id,
                 type='refund',
-                amount=order.amount,
+                amount=refund_amount,
                 balance_before=old_balance,
                 balance_after=user.wallet_balance,
                 description=f'Refund for failed order {order.order_id}',
@@ -10324,23 +10390,109 @@ def resolve_failed_order(order_id):
                 meta_data={'original_order_id': order.id}
             )
             db.session.add(refund_transaction)
+            print(f"✅ Refund transaction created")
             
             # Update order status
             order.delivery_status = 'refunded'
             order.status = 'refunded'
-            order.last_delivery_error = f'Refunded by admin due to delivery failure. Amount ₵{order.amount} returned.'
+            order.last_delivery_error = f'Refunded by admin {g.current_user.username} due to delivery failure. Amount ₵{refund_amount} returned.'
             db.session.commit()
+            
+            print(f"✅ Order marked as refunded")
+            print(f"{'='*80}\n")
             
             return jsonify({
                 'success': True,
-                'message': f'Refunded ₵{order.amount:.2f} to user {user.username}'
+                'message': f'Refunded ₵{refund_amount:.2f} to user {user.username}',
+                'data': {
+                    'user_id': user.id,
+                    'username': user.username,
+                    'refund_amount': refund_amount,
+                    'new_balance': user.wallet_balance
+                }
             })
         else:
+            print(f"❌ Invalid action: {action}")
             return jsonify({'success': False, 'error': 'Invalid action. Use "retry" or "refund"'}), 400
             
     except Exception as e:
-        print(f"Resolve failed order error: {e}")
+        print(f"❌ Resolve failed order error: {e}")
+        import traceback
+        traceback.print_exc()
         db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/admin/failed-orders/summary', methods=['GET'])
+@token_required
+@admin_required
+def get_failed_orders_summary():
+    """Get summary of failed orders"""
+    try:
+        print(f"\n{'='*80}")
+        print(f"📊 FAILED ORDERS SUMMARY")
+        print(f"{'='*80}")
+        
+        # Today's failed orders
+        today = datetime.utcnow().date()
+        today_start = datetime.combine(today, datetime.min.time())
+        
+        today_failed = Order.query.filter(
+            Order.delivery_status == 'failed',
+            Order.status != 'refunded',
+            Order.created_at >= today_start
+        ).count()
+        
+        # This week's failed orders
+        week_start = today - timedelta(days=today.weekday())
+        week_start_dt = datetime.combine(week_start, datetime.min.time())
+        week_failed = Order.query.filter(
+            Order.delivery_status == 'failed',
+            Order.status != 'refunded',
+            Order.created_at >= week_start_dt
+        ).count()
+        
+        # Total pending refund amount
+        pending_refund_amount = db.session.query(db.func.sum(Order.amount)).filter(
+            Order.delivery_status == 'failed',
+            Order.status != 'refunded'
+        ).scalar() or 0
+        
+        # Failed by network
+        failed_by_network = db.session.query(
+            Order.network,
+            db.func.count(Order.id).label('count'),
+            db.func.sum(Order.amount).label('total_amount')
+        ).filter(
+            Order.delivery_status == 'failed',
+            Order.status != 'refunded'
+        ).group_by(Order.network).all()
+        
+        network_breakdown = []
+        for network, count, total in failed_by_network:
+            network_breakdown.append({
+                'network': network,
+                'count': count,
+                'total_amount': float(total) if total else 0
+            })
+        
+        print(f"📊 Summary:")
+        print(f"   - Today Failed: {today_failed}")
+        print(f"   - This Week Failed: {week_failed}")
+        print(f"   - Pending Refund Amount: ₵{pending_refund_amount}")
+        print(f"{'='*80}\n")
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'today_failed': today_failed,
+                'week_failed': week_failed,
+                'pending_refund_amount': float(pending_refund_amount),
+                'network_breakdown': network_breakdown
+            }
+        })
+        
+    except Exception as e:
+        print(f"Failed orders summary error: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/admin/prices/toggle-availability', methods=['POST'])
