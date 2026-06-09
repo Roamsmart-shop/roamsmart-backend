@@ -10298,7 +10298,7 @@ def resolve_failed_order(order_id):
             
             # Retry delivery via Digimall
             try:
-                from services.digimall_service import DigimallService
+                
                 digimall = DigimallService()
                 
                 # Clean phone number
