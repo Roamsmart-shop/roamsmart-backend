@@ -356,6 +356,14 @@ def validate_network(network):
     valid_networks = ['mtn', 'telecel', 'airteltigo', 'vodafone']
     return network and network.lower() in valid_networks
 
+POINTS_CONFIG = {
+    'REFERRAL_POINTS': 1,  # 1 point per referral
+    'POINTS_TO_GHS_RATE': 10,  # 10 points = ₵1
+    'MIN_REDEMPTION_POINTS': 50,  # Minimum 50 points (₵5) to redeem
+    'MAX_REDEMPTION_POINTS': 1000,  # Max 1000 points per redemption
+}
+
+
 class PhoneVerificationService:
     """Handle phone number verification - SMS first, Email only if SMS fails or resend requested"""
     
@@ -1648,7 +1656,14 @@ def init_database_endpoint():
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
-    
+
+
+delivery_estimates_cache = {
+    'data': None,
+    'last_updated': None,
+    'ttl': 30  # Cache for 30 seconds
+} 
+
 @app.route('/api/user/avatar', methods=['POST'])
 @token_required
 def upload_avatar():
@@ -2886,15 +2901,32 @@ def get_user_stats():
             Order.status == 'completed'
         ).scalar() or 0
         
-        # Get referral stats
-        referrals = Referral.query.filter_by(
+        # Get referral stats using the new Referral model
+        # Total referrals (all statuses)
+        total_referrals = Referral.query.filter_by(
             referrer_id=user.id
         ).count()
         
-        referral_earnings = db.session.query(db.func.sum(Referral.reward_amount)).filter(
+        # Completed referrals
+        completed_referrals = Referral.query.filter_by(
+            referrer_id=user.id,
+            status='completed'
+        ).count()
+        
+        # Pending referrals
+        pending_referrals = Referral.query.filter_by(
+            referrer_id=user.id,
+            status='pending'
+        ).count()
+        
+        # Points earned from completed referrals
+        referral_points = db.session.query(db.func.sum(Referral.points_earned)).filter(
             Referral.referrer_id == user.id, 
             Referral.status == 'completed'
         ).scalar() or 0
+        
+        # Get user's points balance
+        points_balance = user.points_balance or 0
         
         return jsonify({
             'success': True,
@@ -2903,8 +2935,11 @@ def get_user_stats():
                 'total_orders': completed_orders,
                 'total_spent': float(total_spent),
                 'referral_code': user.referral_code,
-                'referral_count': referrals,
-                'referral_earnings': float(referral_earnings),
+                'referral_count': total_referrals,
+                'completed_referrals': completed_referrals,
+                'pending_referrals': pending_referrals,
+                'referral_points': int(referral_points),
+                'points_balance': int(points_balance),
                 'is_agent': user.is_agent and user.agent_approved if hasattr(user, 'agent_approved') else user.is_agent,
                 'username': user.username,
                 'phone': user.phone,
@@ -2915,6 +2950,8 @@ def get_user_stats():
         
     except Exception as e:
         print(f"User stats error: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': 'Failed to fetch stats'}), 500
 
 @app.route('/api/user/profile', methods=['PUT'])
@@ -3845,7 +3882,7 @@ def verify_registration_code():
                     'error': 'Email already verified. Please login.'
                 }), 400
         
-        # Create new user
+        # ========== CREATE NEW USER FIRST ==========
         print(f"\n🆕 Creating new user:")
         user_ref_code = f"REF{uuid.uuid4().hex[:8].upper()}"
         
@@ -3866,29 +3903,41 @@ def verify_registration_code():
         print(f"   Phone: {new_user.phone}")
         print(f"   Referral code: {user_ref_code}")
         
-        # Handle referral
-        if temp_user.get('referral_code'):
-            print(f"   Referral code provided: {temp_user['referral_code']}")
-            referrer = User.query.filter_by(referral_code=temp_user['referral_code']).first()
+        # Handle referral - CHECK if referral code was provided
+        referral_code_used = temp_user.get('referral_code')
+        referrer = None
+        
+        if referral_code_used:
+            print(f"   Referral code provided: {referral_code_used}")
+            referrer = User.query.filter_by(referral_code=referral_code_used).first()
             if referrer:
                 new_user.referred_by = referrer.id
                 print(f"   Referrer found: {referrer.username} (ID: {referrer.id})")
-                
-                referral = Referral(
-                    referrer_id=referrer.id,
-                    referred_id=new_user.id,
-                    status='pending',
-                    reward_amount=5.00
-                )
-                db.session.add(referral)
-                print(f"   Referral record created")
             else:
-                print(f"   ⚠️ Referrer not found for code: {temp_user['referral_code']}")
+                print(f"   ⚠️ Referrer not found for code: {referral_code_used}")
         
+        # Add user to database FIRST to get the ID
         db.session.add(new_user)
+        db.session.flush()  # This assigns the ID without committing the transaction
+        
+        print(f"✅ User created with ID: {new_user.id}")
+        
+        # ========== NOW CREATE REFERRAL (with the actual user ID) ==========
+        if referral_code_used and referrer:
+            referral = Referral(
+                referrer_id=referrer.id,
+                referred_user_id=new_user.id,  # Now this has a valid value!
+                referral_code=referral_code_used,
+                status='pending',
+                points_earned=1
+            )
+            db.session.add(referral)
+            print(f"   ✅ Referral record created (pending)")
+        
+        # Now commit everything
         db.session.commit()
         
-        print(f"✅ User created successfully with ID: {new_user.id}")
+        print(f"✅ All changes committed successfully!")
         
         # Clean up Redis
         delete_temp_data(redis_key)
@@ -3922,7 +3971,7 @@ def verify_registration_code():
         print(f"{'='*80}\n")
         db.session.rollback()
         return jsonify({'success': False, 'error': 'An error occurred during verification. Please try again.'}), 500
-
+    
 @app.route('/api/auth/login', methods=['POST'])
 @limiter.limit("10 per minute")
 def login():
@@ -4186,44 +4235,109 @@ def verify_login_code():
         user_code = data.get('code')
         user_id = data.get('user_id')
         
+        print(f"\n{'='*60}")
+        print(f"[VERIFY LOGIN CODE]")
+        print(f"  User ID: {user_id}")
+        print(f"  Code provided: {user_code}")
+        print(f"{'='*60}")
+        
         if not user_id:
             return jsonify({'success': False, 'error': 'User ID required'}), 400
         
+        if not user_code:
+            return jsonify({'success': False, 'error': 'Verification code required'}), 400
+        
         # Get verification data from Redis
-        verify_data = get_temp_data(f"verify_{user_id}")
+        redis_key = f"verify_{user_id}"
+        verify_data = get_temp_data(redis_key)
+        
+        print(f"[DEBUG] Redis key: {redis_key}")
+        print(f"[DEBUG] Redis data: {verify_data}")
         
         if not verify_data:
             return jsonify({
                 'success': False,
-                'error': 'No verification found. Please login again.'
+                'error': 'No verification found. Please login again to receive a new code.'
             }), 400
         
-        expires_at = datetime.fromisoformat(verify_data['expires'])
-        if datetime.utcnow() > expires_at:
-            delete_temp_data(f"verify_{user_id}")
+        # Check if data has required fields
+        if 'expires' not in verify_data:
+            print(f"[ERROR] Missing 'expires' field in Redis data: {verify_data}")
+            delete_temp_data(redis_key)
             return jsonify({
                 'success': False,
-                'error': 'Verification code expired. Please login again.'
+                'error': 'Invalid verification data. Please login again.'
             }), 400
         
-        if user_code != verify_data.get('code'):
-            return jsonify({'success': False, 'error': 'Invalid verification code'}), 400
+        if 'code' not in verify_data:
+            print(f"[ERROR] Missing 'code' field in Redis data: {verify_data}")
+            delete_temp_data(redis_key)
+            return jsonify({
+                'success': False,
+                'error': 'Invalid verification data. Please login again.'
+            }), 400
         
+        # Check expiry
+        try:
+            expires_at = datetime.fromisoformat(verify_data['expires'])
+            print(f"[DEBUG] Expires at: {expires_at}")
+            print(f"[DEBUG] Current time: {datetime.utcnow()}")
+            
+            if datetime.utcnow() > expires_at:
+                print(f"[ERROR] Code expired")
+                delete_temp_data(redis_key)
+                return jsonify({
+                    'success': False,
+                    'error': 'Verification code expired. Please login again to receive a new code.'
+                }), 400
+        except ValueError as e:
+            print(f"[ERROR] Invalid expiry format: {verify_data.get('expires')}")
+            delete_temp_data(redis_key)
+            return jsonify({
+                'success': False,
+                'error': 'Invalid verification data. Please login again.'
+            }), 400
+        
+        # Check code
+        stored_code = str(verify_data.get('code'))
+        input_code = str(user_code).strip()
+        
+        print(f"[DEBUG] Stored code: {stored_code}")
+        print(f"[DEBUG] Input code: {input_code}")
+        print(f"[DEBUG] Codes match: {stored_code == input_code}")
+        
+        if stored_code != input_code:
+            # Don't delete the data on wrong code, allow retries
+            return jsonify({
+                'success': False, 
+                'error': 'Invalid verification code. Please try again.',
+                'attempts_remaining': 3  # Optional: track attempts
+            }), 400
+        
+        # Get user
         user = User.query.get(user_id)
         
         if not user:
-            delete_temp_data(f"verify_{user_id}")
+            print(f"[ERROR] User not found: {user_id}")
+            delete_temp_data(redis_key)
             return jsonify({'success': False, 'error': 'User not found'}), 404
         
+        print(f"[SUCCESS] User found: {user.email}")
+        
+        # Mark email as verified
         user.email_verified = True
         user.email_verified_at = datetime.utcnow()
         db.session.commit()
         
-        # Clean up Redis
-        delete_temp_data(f"verify_{user_id}")
+        print(f"[SUCCESS] Email verified for user: {user.email}")
         
+        # Clean up Redis
+        delete_temp_data(redis_key)
+        
+        # Generate token
         token = user.generate_token()
         
+        # Determine redirect URL
         if user.role == 'super_admin':
             redirect_url = '/admin'
         elif user.role == 'admin':
@@ -4242,10 +4356,11 @@ def verify_login_code():
         })
         
     except Exception as e:
-        print(f"Verify login code error: {e}")
+        print(f"[ERROR] Verify login code error: {e}")
         import traceback
         traceback.print_exc()
-        return jsonify({'success': False, 'error': str(e)}), 500
+        return jsonify({'success': False, 'error': 'An error occurred during verification'}), 500
+
 
 
 @app.route('/api/auth/check-verification', methods=['GET'])
@@ -4341,262 +4456,1633 @@ def send_order_confirmation_email(user, order_id, network, size_gb, phone, amoun
     except Exception as e:
         print(f"Send order confirmation email error: {e}")
 
+# ========== CORRECTED HubtelService CLASS ==========
 
-# ========== HUBTEL BILL PAYMENT SERVICE ==========
 class HubtelService:
     def __init__(self):
         self.client_id = os.environ.get('HUBTEL_CLIENT_ID')
         self.client_secret = os.environ.get('HUBTEL_CLIENT_SECRET')
-        self.base_url = os.environ.get('HUBTEL_BASE_URL', 'https://api.hubtel.com/v1')
+        self.disbursement_account = os.environ.get('HUBTEL_DISBURSEMENT_ACCOUNT', '2025520')
+        self.collection_account = os.environ.get('HUBTEL_COLLECTION_ACCOUNT', '2039545')
+        self.bill_payment_url = "https://cs.hubtel.com"
+        self.balance_url = "https://trnf.hubtel.com"
+        self.refund_url = "https://refund-api.hubtel.com"
+        self.status_check_url = "https://api-txnstatus.hubtel.com"
         
         if not self.client_id or not self.client_secret:
             print("[Hubtel] Warning: API credentials not configured")
         
         # Generate Basic Auth token
-        auth_string = f"{self.client_id}:{self.client_secret}"
-        self.auth_token = base64.b64encode(auth_string.encode()).decode()
+        if self.client_id and self.client_secret:
+            auth_string = f"{self.client_id}:{self.client_secret}"
+            self.auth_token = base64.b64encode(auth_string.encode()).decode()
+            self.headers = {
+                'Authorization': f'Basic {self.auth_token}',
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+            }
+    
+    def is_configured(self):
+        return all([self.client_id, self.client_secret, self.disbursement_account, self.collection_account])
+    
+    def _format_phone(self, phone):
+        """Format phone number to Hubtel format (233XXXXXXXXX)"""
+        if not phone:
+            return None
+        phone = ''.join(filter(str.isdigit, str(phone)))
+        if phone.startswith('0'):
+            phone = '233' + phone[1:]
+        elif not phone.startswith('233'):
+            phone = '233' + phone
+        # Ensure exactly 12 digits
+        if len(phone) > 12:
+            phone = phone[:12]
+        return phone
+    
+    # ========== DSTV ==========
+    def query_dstv(self, smartcard_number):
+        """Query DSTV account details"""
+        if not self.is_configured():
+            return {'success': False, 'error': 'Hubtel not configured'}
         
-        self.headers = {
-            'Authorization': f'Basic {self.auth_token}',
-            'Content-Type': 'application/json',
-            'Accept': 'application/json'
-        }
-    
-    def validate_bill_account(self, biller_code, account_number):
-        """Validate customer account for bill payment"""
         try:
-            response = requests.post(
-                f"{self.base_url}/bill/validate",
-                json={
-                    'billerCode': biller_code,
-                    'accountNumber': account_number
-                },
-                headers=self.headers,
-                timeout=30
-            )
+            url = f"{self.bill_payment_url}/commissionservices/{self.disbursement_account}/297a96656b5846ad8b00d5d41b256ea7"
+            params = {'destination': smartcard_number}
+            
+            response = requests.get(url, headers=self.headers, params=params, timeout=30)
             
             if response.status_code == 200:
                 data = response.json()
-                return {
-                    'success': True,
-                    'customer_name': data.get('customerName'),
-                    'customer_phone': data.get('customerPhone'),
-                    'customer_email': data.get('customerEmail'),
-                    'biller_name': data.get('billerName'),
-                    'amount_due': data.get('amountDue', 0),
-                    'minimum_amount': data.get('minimumAmount', 0)
-                }
-            else:
-                return {
-                    'success': False,
-                    'error': f'Validation failed: {response.text}'
-                }
-        except requests.exceptions.Timeout:
-            return {'success': False, 'error': 'Hubtel API timeout'}
+                if data.get('ResponseCode') == '0000':
+                    result = {}
+                    for item in data.get('Data', []):
+                        result[item.get('Display')] = item.get('Value')
+                    return {'success': True, 'data': result, 'raw': data}
+            return {'success': False, 'error': 'DSTV account not found', 'status_code': response.status_code}
         except Exception as e:
             return {'success': False, 'error': str(e)}
     
-    def get_bill_amount(self, biller_code, account_number):
-        """Get bill amount due"""
+    def pay_dstv(self, smartcard_number, amount, client_reference, callback_url):
+        """Pay DSTV bill"""
+        if not self.is_configured():
+            return {'success': False, 'error': 'Hubtel not configured'}
+        
         try:
-            response = requests.post(
-                f"{self.base_url}/bill/inquiry",
-                json={
-                    'billerCode': biller_code,
-                    'accountNumber': account_number
-                },
-                headers=self.headers,
-                timeout=30
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                return {
-                    'success': True,
-                    'amount': data.get('amount', 0),
-                    'due_date': data.get('dueDate'),
-                    'reference': data.get('reference')
-                }
-            else:
-                return {
-                    'success': False,
-                    'error': f'Inquiry failed: {response.text}'
-                }
-        except Exception as e:
-            return {'success': False, 'error': str(e)}
-    
-    def pay_bill(self, biller_code, account_number, amount, customer_name, customer_phone, customer_email=None, reference=None):
-        """Process bill payment"""
-        try:
-            import uuid
-            if not reference:
-                reference = f"HUBTEL-{uuid.uuid4().hex[:12].upper()}"
+            url = f"{self.bill_payment_url}/commissionservices/{self.disbursement_account}/297a96656b5846ad8b00d5d41b256ea7"
             
             payload = {
-                'billerCode': biller_code,
-                'accountNumber': account_number,
-                'amount': amount,
-                'customerName': customer_name,
-                'customerPhone': customer_phone,
-                'reference': reference,
-                'callbackUrl': f"{os.environ.get('BASE_URL', 'https://roamsmart-backend-production.up.railway.app')}/api/webhooks/hubtel"
+                'Destination': smartcard_number,
+                'Amount': float(amount),
+                'CallbackUrl': callback_url,
+                'ClientReference': client_reference
             }
             
-            if customer_email:
-                payload['customerEmail'] = customer_email
+            response = requests.post(url, json=payload, headers=self.headers, timeout=60)
             
-            response = requests.post(
-                f"{self.base_url}/bill/pay",
-                json=payload,
-                headers=self.headers,
-                timeout=30
-            )
-            
-            if response.status_code in [200, 201]:
+            if response.status_code == 200:
                 data = response.json()
-                return {
-                    'success': True,
-                    'transaction_id': data.get('transactionId'),
-                    'reference': reference,
-                    'status': data.get('status', 'completed')
-                }
-            else:
-                return {
-                    'success': False,
-                    'error': f'Payment failed: {response.text}'
-                }
+                response_code = data.get('ResponseCode')
+                if response_code in ['0000', '0001']:
+                    return {
+                        'success': True,
+                        'response_code': response_code,
+                        'message': data.get('Message'),
+                        'client_reference': data.get('Data', {}).get('ClientReference'),
+                        'amount': data.get('Data', {}).get('Amount'),
+                        'transaction_id': data.get('Data', {}).get('TransactionId'),
+                        'commission': data.get('Data', {}).get('Meta', {}).get('Commission')
+                    }
+                else:
+                    return {
+                        'success': False,
+                        'error': data.get('Message', 'Payment failed'),
+                        'response_code': response_code
+                    }
+            return {'success': False, 'error': f'Payment failed: {response.text}', 'status_code': response.status_code}
         except Exception as e:
             return {'success': False, 'error': str(e)}
     
-    def check_transaction_status(self, transaction_id):
-        """Check transaction status"""
+    # ========== GoTV ==========
+    def query_gotv(self, iuc_number):
+        """Query GoTV account details"""
+        if not self.is_configured():
+            return {'success': False, 'error': 'Hubtel not configured'}
+        
         try:
-            response = requests.get(
-                f"{self.base_url}/bill/status/{transaction_id}",
-                headers=self.headers,
-                timeout=30
-            )
+            url = f"{self.bill_payment_url}/commissionservices/{self.disbursement_account}/e6ceac7f3880435cb30b048e9617eb41"
+            params = {'destination': iuc_number}
+            
+            response = requests.get(url, headers=self.headers, params=params, timeout=30)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('ResponseCode') == '0000':
+                    result = {}
+                    for item in data.get('Data', []):
+                        result[item.get('Display')] = item.get('Value')
+                    return {'success': True, 'data': result}
+            return {'success': False, 'error': 'GoTV account not found'}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    def pay_gotv(self, iuc_number, amount, client_reference, callback_url):
+        """Pay GoTV bill"""
+        if not self.is_configured():
+            return {'success': False, 'error': 'Hubtel not configured'}
+        
+        try:
+            url = f"{self.bill_payment_url}/commissionservices/{self.disbursement_account}/e6ceac7f3880435cb30b048e9617eb41"
+            
+            payload = {
+                'Destination': iuc_number,
+                'Amount': float(amount),
+                'CallbackUrl': callback_url,
+                'ClientReference': client_reference
+            }
+            
+            response = requests.post(url, json=payload, headers=self.headers, timeout=60)
+            
+            if response.status_code == 200:
+                data = response.json()
+                response_code = data.get('ResponseCode')
+                if response_code in ['0000', '0001']:
+                    return {
+                        'success': True,
+                        'response_code': response_code,
+                        'message': data.get('Message'),
+                        'client_reference': data.get('Data', {}).get('ClientReference'),
+                        'amount': data.get('Data', {}).get('Amount'),
+                        'transaction_id': data.get('Data', {}).get('TransactionId'),
+                        'commission': data.get('Data', {}).get('Meta', {}).get('Commission')
+                    }
+                else:
+                    return {
+                        'success': False,
+                        'error': data.get('Message', 'Payment failed'),
+                        'response_code': response_code
+                    }
+            return {'success': False, 'error': f'Payment failed: {response.text}'}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    # ========== StarTimes ==========
+    def query_startimes(self, smartcard_number):
+        """Query StarTimes account details"""
+        if not self.is_configured():
+            return {'success': False, 'error': 'Hubtel not configured'}
+        
+        try:
+            url = f"{self.bill_payment_url}/commissionservices/{self.disbursement_account}/6598652d34ea4112949c93c079c501ce"
+            params = {'destination': smartcard_number}
+            
+            response = requests.get(url, headers=self.headers, params=params, timeout=30)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('ResponseCode') == '0000':
+                    result = {}
+                    for item in data.get('Data', []):
+                        result[item.get('Display')] = item.get('Value')
+                    return {'success': True, 'data': result}
+            return {'success': False, 'error': 'StarTimes account not found'}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    def pay_startimes(self, smartcard_number, amount, client_reference, callback_url):
+        """Pay StarTimes bill"""
+        if not self.is_configured():
+            return {'success': False, 'error': 'Hubtel not configured'}
+        
+        try:
+            url = f"{self.bill_payment_url}/commissionservices/{self.disbursement_account}/6598652d34ea4112949c93c079c501ce"
+            
+            payload = {
+                'Destination': smartcard_number,
+                'Amount': float(amount),
+                'CallbackUrl': callback_url,
+                'ClientReference': client_reference
+            }
+            
+            response = requests.post(url, json=payload, headers=self.headers, timeout=60)
+            
+            if response.status_code == 200:
+                data = response.json()
+                response_code = data.get('ResponseCode')
+                if response_code in ['0000', '0001']:
+                    return {
+                        'success': True,
+                        'response_code': response_code,
+                        'message': data.get('Message'),
+                        'client_reference': data.get('Data', {}).get('ClientReference'),
+                        'amount': data.get('Data', {}).get('Amount'),
+                        'transaction_id': data.get('Data', {}).get('TransactionId'),
+                        'commission': data.get('Data', {}).get('Meta', {}).get('Commission')
+                    }
+                else:
+                    return {
+                        'success': False,
+                        'error': data.get('Message', 'Payment failed'),
+                        'response_code': response_code
+                    }
+            return {'success': False, 'error': f'Payment failed: {response.text}'}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    # ========== ECG ==========
+    def query_ecg_meters(self, phone_number):
+        """Query ECG meters by phone number"""
+        if not self.is_configured():
+            return {'success': False, 'error': 'Hubtel not configured'}
+        
+        try:
+            # Format phone number for ECG (must be 233XXXXXXXXX format)
+            formatted_phone = self._format_phone(phone_number)
+            if not formatted_phone:
+                return {'success': False, 'error': 'Invalid phone number format'}
+            
+            print(f"[Hubtel] Querying ECG meters for phone: {formatted_phone}")
+            
+            url = f"{self.bill_payment_url}/commissionservices/{self.disbursement_account}/e6d6bac062b5499cb1ece1ac3d742a84"
+            params = {'destination': formatted_phone}
+            
+            response = requests.get(url, headers=self.headers, params=params, timeout=30)
+            
+            if response.status_code == 200:
+                data = response.json()
+                print(f"[Hubtel] ECG Response: {data}")
+                
+                if data.get('ResponseCode') == '0000':
+                    meters = []
+                    for item in data.get('Data', []):
+                        # Parse amount (could be negative for credits)
+                        amount = float(item.get('Amount', 0))
+                        if amount < 0:
+                            amount = 0  # Credit balance, no payment due
+                        
+                        meters.append({
+                            'customer_name': item.get('Display', '').strip(),
+                            'meter_number': item.get('Value', '').strip(),
+                            'amount_due': amount
+                        })
+                    
+                    if not meters:
+                        return {'success': False, 'error': 'No ECG meters found for this phone number'}
+                    
+                    return {'success': True, 'meters': meters, 'raw': data}
+                else:
+                    return {'success': False, 'error': data.get('Message', 'Failed to fetch ECG meters')}
+            else:
+                return {'success': False, 'error': f'HTTP {response.status_code}: {response.text[:100]}'}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    def query_ecg_by_meter(self, meter_number):
+        """Query ECG by meter number directly"""
+        if not self.is_configured():
+            return {'success': False, 'error': 'Hubtel not configured'}
+    
+        try:
+        # Clean meter number
+            meter = ''.join(filter(str.isdigit, str(meter_number))).strip()
+            if not meter:
+                return {'success': False, 'error': 'Invalid meter number'}
+        
+            print(f"[Hubtel] Querying ECG meter directly: {meter}")
+        
+        # For ECG, we need to use a phone number in the destination
+        # If we have a default phone, use it, otherwise use a generic one
+        # The ECG API requires a phone number even when querying by meter
+        # We'll use a default phone number (the disbursement account owner's phone)
+            default_phone = os.environ.get('HUBTEL_DEFAULT_PHONE', '233557013982')
+        
+            url = f"{self.bill_payment_url}/commissionservices/{self.disbursement_account}/e6d6bac062b5499cb1ece1ac3d742a84"
+            params = {'destination': default_phone}
+        
+            response = requests.get(url, headers=self.headers, params=params, timeout=30)
+        
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('ResponseCode') == '0000':
+                    meters = []
+                    for item in data.get('Data', []):
+                    # Check if the meter number matches the one we're looking for
+                        item_value = item.get('Value', '').strip()
+                        if meter in item_value or item_value in meter:
+                            amount = float(item.get('Amount', 0))
+                            if amount < 0:
+                                amount = 0
+                            meters.append({
+                                'customer_name': item.get('Display', '').strip(),
+                                'meter_number': item_value,
+                                'amount_due': amount
+                            })
+                
+                    if meters:
+                        return {'success': True, 'meters': meters, 'raw': data}
+                
+                # If no specific meter found, return all meters with a note
+                    all_meters = []
+                    for item in data.get('Data', []):
+                        amount = float(item.get('Amount', 0))
+                        if amount < 0:
+                            amount = 0
+                        all_meters.append({
+                            'customer_name': item.get('Display', '').strip(),
+                            'meter_number': item.get('Value', '').strip(),
+                            'amount_due': amount
+                        })
+                
+                    if all_meters:
+                    # Return all meters and let the user select
+                        return {
+                            'success': True, 
+                            'meters': all_meters, 
+                            'raw': data,
+                            'message': f'Found {len(all_meters)} meters. Please select your meter.'
+                        }
+            
+                return {'success': False, 'error': 'Meter not found. Please verify the meter number.'}
+            
+            return {'success': False, 'error': f'HTTP {response.status_code}: {response.text[:100]}'}
+        
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    def pay_ecg(self, phone_number, meter_number, amount, client_reference, callback_url):
+        """Pay ECG bill"""
+        if not self.is_configured():
+            return {'success': False, 'error': 'Hubtel not configured'}
+        
+        try:
+            # Format phone number
+            formatted_phone = self._format_phone(phone_number)
+            if not formatted_phone:
+                return {'success': False, 'error': 'Invalid phone number format'}
+            
+            # Clean meter number
+            meter = ''.join(filter(str.isdigit, str(meter_number))).strip()
+            if not meter:
+                return {'success': False, 'error': 'Invalid meter number'}
+            
+            print(f"[Hubtel] Paying ECG bill - Phone: {formatted_phone}, Meter: {meter}, Amount: {amount}")
+            
+            url = f"{self.bill_payment_url}/commissionservices/{self.disbursement_account}/e6d6bac062b5499cb1ece1ac3d742a84"
+            
+            payload = {
+                'Destination': formatted_phone,
+                'Amount': float(amount),
+                'CallbackUrl': callback_url,
+                'ClientReference': client_reference,
+                'Extradata': {
+                    'bundle': meter
+                }
+            }
+            
+            response = requests.post(url, json=payload, headers=self.headers, timeout=60)
+            
+            if response.status_code == 200:
+                data = response.json()
+                response_code = data.get('ResponseCode')
+                if response_code in ['0000', '0001']:
+                    return {
+                        'success': True,
+                        'response_code': response_code,
+                        'message': data.get('Message'),
+                        'client_reference': data.get('Data', {}).get('ClientReference'),
+                        'amount': data.get('Data', {}).get('Amount'),
+                        'transaction_id': data.get('Data', {}).get('TransactionId'),
+                        'commission': data.get('Data', {}).get('Meta', {}).get('Commission')
+                    }
+                else:
+                    return {
+                        'success': False,
+                        'error': data.get('Message', 'Payment failed'),
+                        'response_code': response_code
+                    }
+            return {'success': False, 'error': f'Payment failed: {response.text}'}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    # ========== Ghana Water (GWCL) ==========
+    def query_water(self, meter_number, phone_number):
+        """Query Ghana Water account details"""
+        if not self.is_configured():
+            return {'success': False, 'error': 'Hubtel not configured'}
+        
+        try:
+            # Format phone number
+            formatted_phone = self._format_phone(phone_number)
+            if not formatted_phone:
+                return {'success': False, 'error': 'Invalid phone number format'}
+            
+            # Clean meter number
+            meter = ''.join(filter(str.isdigit, str(meter_number))).strip()
+            if not meter:
+                return {'success': False, 'error': 'Invalid meter number'}
+            
+            print(f"[Hubtel] Querying Water - Meter: {meter}, Phone: {formatted_phone}")
+            
+            url = f"{self.bill_payment_url}/commissionservices/{self.disbursement_account}/6c1e8a82d2e84feeb8bfd6be2790d71d"
+            params = {
+                'destination': meter,
+                'mobile': formatted_phone
+            }
+            
+            response = requests.get(url, headers=self.headers, params=params, timeout=30)
+            
+            if response.status_code == 200:
+                data = response.json()
+                print(f"[Hubtel] Water Response: {data}")
+                
+                if data.get('ResponseCode') == '0000':
+                    result = {}
+                    for item in data.get('Data', []):
+                        result[item.get('Display')] = item.get('Value')
+                    
+                    return {
+                        'success': True,
+                        'customer_name': result.get('name', ''),
+                        'amount_due': float(result.get('amountDue', 0)),
+                        'session_id': result.get('sessionId', ''),
+                        'raw': data
+                    }
+                else:
+                    return {'success': False, 'error': data.get('Message', 'Water account not found')}
+            else:
+                return {'success': False, 'error': f'HTTP {response.status_code}: {response.text[:100]}'}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    def pay_water(self, meter_number, phone_number, email, session_id, amount, client_reference, callback_url):
+        """Pay Ghana Water bill"""
+        if not self.is_configured():
+            return {'success': False, 'error': 'Hubtel not configured'}
+        
+        try:
+            # Format phone number
+            formatted_phone = self._format_phone(phone_number)
+            if not formatted_phone:
+                return {'success': False, 'error': 'Invalid phone number format'}
+            
+            # Clean meter number
+            meter = ''.join(filter(str.isdigit, str(meter_number))).strip()
+            if not meter:
+                return {'success': False, 'error': 'Invalid meter number'}
+            
+            if not session_id:
+                return {'success': False, 'error': 'Session ID is required for water payment'}
+            
+            print(f"[Hubtel] Paying Water - Meter: {meter}, Phone: {formatted_phone}, Amount: {amount}")
+            
+            url = f"{self.bill_payment_url}/commissionservices/{self.disbursement_account}/6c1e8a82d2e84feeb8bfd6be2790d71d"
+            
+            payload = {
+                'Destination': formatted_phone,
+                'Amount': float(amount),
+                'CallbackUrl': callback_url,
+                'ClientReference': client_reference,
+                'Extradata': {
+                    'bundle': meter,
+                    'Email': email or '',
+                    'SessionId': session_id
+                }
+            }
+            
+            response = requests.post(url, json=payload, headers=self.headers, timeout=60)
+            
+            if response.status_code == 200:
+                data = response.json()
+                response_code = data.get('ResponseCode')
+                if response_code in ['0000', '0001']:
+                    return {
+                        'success': True,
+                        'response_code': response_code,
+                        'message': data.get('Message'),
+                        'client_reference': data.get('Data', {}).get('ClientReference'),
+                        'amount': data.get('Data', {}).get('Amount'),
+                        'transaction_id': data.get('Data', {}).get('TransactionId'),
+                        'commission': data.get('Data', {}).get('Meta', {}).get('Commission')
+                    }
+                else:
+                    return {
+                        'success': False,
+                        'error': data.get('Message', 'Payment failed'),
+                        'response_code': response_code
+                    }
+            return {'success': False, 'error': f'Payment failed: {response.text}'}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    # ========== Balance Methods ==========
+    def get_collection_balance(self):
+        """Get collection account balance"""
+        if not self.is_configured():
+            return {'success': False, 'error': 'Hubtel not configured'}
+        
+        try:
+            url = f"{self.balance_url}/api/inter-transfers/{self.collection_account}"
+            response = requests.get(url, headers=self.headers, timeout=30)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('responseCode') == '0000':
+                    return {
+                        'success': True,
+                        'balance': data.get('data', {}).get('amount', 0),
+                        'account': self.collection_account,
+                        'type': 'collection'
+                    }
+            return {'success': False, 'error': 'Failed to fetch collection balance'}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    def get_disbursement_balance(self):
+        """Get disbursement account balance"""
+        if not self.is_configured():
+            return {'success': False, 'error': 'Hubtel not configured'}
+        
+        try:
+            url = f"{self.balance_url}/api/inter-transfers/prepaid/{self.disbursement_account}"
+            response = requests.get(url, headers=self.headers, timeout=30)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('responseCode') == '0000':
+                    return {
+                        'success': True,
+                        'balance': data.get('data', {}).get('amount', 0),
+                        'account': self.disbursement_account,
+                        'type': 'disbursement'
+                    }
+            return {'success': False, 'error': 'Failed to fetch disbursement balance'}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    # ========== Transaction Status Check ==========
+    def check_transaction_status(self, client_reference=None, transaction_id=None, network_transaction_id=None):
+        """
+        Check transaction status using one of the identifiers
+        Prefer client_reference
+        """
+        if not self.is_configured():
+            return {'success': False, 'error': 'Hubtel not configured'}
+        
+        try:
+            params = {}
+            if client_reference:
+                params['clientReference'] = client_reference
+            elif transaction_id:
+                params['hubtelTransactionId'] = transaction_id
+            elif network_transaction_id:
+                params['networkTransactionId'] = network_transaction_id
+            else:
+                return {'success': False, 'error': 'At least one identifier is required'}
+            
+            url = f"{self.status_check_url}/transactions/{self.collection_account}/status"
+            response = requests.get(url, headers=self.headers, params=params, timeout=30)
             
             if response.status_code == 200:
                 data = response.json()
                 return {
                     'success': True,
-                    'status': data.get('status'),
-                    'amount': data.get('amount'),
-                    'reference': data.get('reference')
+                    'data': data
                 }
-            else:
-                return {'success': False, 'error': f'Status check failed: {response.text}'}
+            return {'success': False, 'error': f'HTTP {response.status_code}'}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    # ========== Refund Method ==========
+    def process_refund(self, order_id, callback_url):
+        """Process refund for a transaction"""
+        if not self.is_configured():
+            return {'success': False, 'error': 'Hubtel not configured'}
+        
+        try:
+            url = f"{self.refund_url}/refund/{self.collection_account}/order/{order_id}"
+            payload = {'callbackUrl': callback_url}
+            
+            response = requests.post(url, json=payload, headers=self.headers, timeout=60)
+            
+            if response.status_code == 200:
+                data = response.json()
+                response_code = data.get('responseCode')
+                
+                if response_code in ['0000', '0001']:
+                    return {
+                        'success': True,
+                        'status': 'pending' if response_code == '0001' else 'completed',
+                        'message': data.get('message'),
+                        'order_id': data.get('data', {}).get('orderId'),
+                        'response_code': response_code
+                    }
+                else:
+                    return {
+                        'success': False,
+                        'error': data.get('message', 'Refund failed'),
+                        'response_code': response_code
+                    }
+            return {'success': False, 'error': f'HTTP {response.status_code}: {response.text}'}
         except Exception as e:
             return {'success': False, 'error': str(e)}
 
-# ========== HUBTEL BILL PAYMENT ENDPOINTS ==========
+# commission_service.py - Updated version
 
-@app.route('/api/user/bills/history', methods=['GET'])
+class CommissionService:
+    """Handle commission calculations and distributions for bill payments"""
+    
+    # Commission rates for different services
+    COMMISSION_RATES = {
+        'DSTV': 1.00,
+        'GOTV': 1.00,
+        'STARTIMES': 0.95,
+        'ECG_PREPAID': 1.90,
+        'ECG_POSTPAID': 1.90,
+        'GWCL': 1.95,
+        'WAEC': 8.00
+    }
+    
+    # Split percentages (30% admin, 70% initiator)
+    ADMIN_SHARE = 30.00
+    INITIATOR_SHARE = 70.00
+    
+    def get_commission_rate(self, service_type):
+        """Get Hubtel's commission rate for a service"""
+        return self.COMMISSION_RATES.get(service_type, 1.00)
+    
+    def calculate_commission(self, amount, service_type):
+        """
+        Calculate total commission and split
+        Returns: dict with commission details
+        """
+        hubtel_rate = self.get_commission_rate(service_type)
+        
+        # Total commission from Hubtel
+        total_commission = amount * (hubtel_rate / 100)
+        
+        # Split the commission
+        admin_commission = total_commission * (self.ADMIN_SHARE / 100)
+        initiator_commission = total_commission * (self.INITIATOR_SHARE / 100)
+        
+        return {
+            'service_type': service_type,
+            'amount': amount,
+            'hubtel_rate': hubtel_rate,
+            'total_commission': total_commission,
+            'admin_commission': admin_commission,
+            'initiator_commission': initiator_commission,
+            'admin_percentage': self.ADMIN_SHARE,
+            'initiator_percentage': self.INITIATOR_SHARE
+        }
+    
+    def get_service_type(self, biller_code, is_prepaid=True):
+        """Map biller code to service type"""
+        mapping = {
+            'DSTV': 'DSTV',
+            'GOTV': 'GOTV',
+            'STARTIMES': 'STARTIMES',
+            'ECG': 'ECG_PREPAID' if is_prepaid else 'ECG_POSTPAID',
+            'GWCL': 'GWCL',
+            'WAEC': 'WAEC'
+        }
+        return mapping.get(biller_code, 'DSTV')
+    
+    def get_admin_user(self):
+        """Find the admin user using multiple methods"""
+        from models import User
+        
+        # Try different methods to find admin
+        admin = None
+        
+        # Method 1: Check for is_admin attribute
+        if hasattr(User, 'is_admin'):
+            try:
+                admin = User.query.filter_by(is_admin=True).first()
+                if admin:
+                    return admin
+            except:
+                pass
+        
+        # Method 2: Check for role = 'admin'
+        if hasattr(User, 'role'):
+            try:
+                admin = User.query.filter_by(role='admin').first()
+                if admin:
+                    return admin
+            except:
+                pass
+        
+        # Method 3: Check for user_type = 'admin'
+        if hasattr(User, 'user_type'):
+            try:
+                admin = User.query.filter_by(user_type='admin').first()
+                if admin:
+                    return admin
+            except:
+                pass
+        
+        # Method 4: Get user with ID 1 (first user)
+        admin = User.query.get(1)
+        if admin:
+            return admin
+        
+        # Method 5: Get any user with admin in username
+        admin = User.query.filter(User.username.ilike('%admin%')).first()
+        if admin:
+            return admin
+        
+        # Method 6: Get the first user (assume they're admin)
+        admin = User.query.first()
+        
+        return admin
+    
+    def distribute_commission(self, order_id, commission_data, initiator_id, initiator_type='user'):
+        """
+        Distribute commission to admin and initiator
+        Returns: dict with distribution details
+        """
+        from models import User, db, CommissionTransaction
+        from datetime import datetime
+        
+        # Find admin user
+        admin = self.get_admin_user()
+        
+        # Record commission transaction
+        commission_record = CommissionTransaction(
+            order_id=order_id,
+            transaction_type='bill_payment',
+            amount=commission_data['amount'],
+            hubtel_commission_rate=commission_data['hubtel_rate'],
+            total_commission=commission_data['total_commission'],
+            admin_commission=commission_data['admin_commission'],
+            initiator_commission=commission_data['initiator_commission'],
+            initiator_type=initiator_type,
+            initiator_id=initiator_id,
+            admin_id=admin.id if admin else None,
+            status='completed',
+            created_at=datetime.utcnow()
+        )
+        db.session.add(commission_record)
+        
+        # Credit admin commission
+        if admin and commission_data['admin_commission'] > 0:
+            admin.wallet_balance = (admin.wallet_balance or 0) + commission_data['admin_commission']
+            if hasattr(admin, 'total_commission_earned'):
+                admin.total_commission_earned = (admin.total_commission_earned or 0) + commission_data['admin_commission']
+            print(f"[Commission] Credited Admin ({admin.username}): GHS {commission_data['admin_commission']:.4f}")
+        else:
+            print(f"[Commission] WARNING: Admin commission GHS {commission_data['admin_commission']:.4f} - Admin not found or amount is 0")
+        
+        # Credit initiator commission
+        initiator = User.query.get(initiator_id)
+        if initiator and commission_data['initiator_commission'] > 0:
+            initiator.wallet_balance = (initiator.wallet_balance or 0) + commission_data['initiator_commission']
+            if hasattr(initiator, 'total_commission_earned'):
+                initiator.total_commission_earned = (initiator.total_commission_earned or 0) + commission_data['initiator_commission']
+            print(f"[Commission] Credited {initiator_type} ({initiator.username}): GHS {commission_data['initiator_commission']:.4f}")
+        
+        db.session.commit()
+        
+        return {
+            'admin_credited': float(commission_data['admin_commission']),
+            'initiator_credited': float(commission_data['initiator_commission']),
+            'admin_name': admin.username if admin else 'Admin (Not Found)',
+            'initiator_name': initiator.username if initiator else 'Unknown',
+            'admin_found': admin is not None
+        }
+
+# ========== REFUND ENDPOINT ==========
+
+@app.route('/api/refund/request', methods=['POST'])
 @token_required
-def get_user_bill_history():
-    """Get user's bill payment history"""
+@admin_required
+def request_refund():
+    """Request a refund for a previous transaction"""
+    try:
+        data = request.get_json()
+        order_id = data.get('order_id')  # Hubtel Order ID from original payment
+        reason = data.get('reason', 'Customer request')
+        
+        if not order_id:
+            return jsonify({'success': False, 'error': 'Order ID required'}), 400
+        
+        hubtel = HubtelService()
+        
+        if not hubtel.is_configured():
+            return jsonify({'success': False, 'error': 'Hubtel not configured'}), 503
+        
+        callback_url = f"{os.environ.get('BASE_URL', 'https://roamsmart-backend-production.up.railway.app')}/api/webhooks/refund"
+        
+        result = hubtel.process_refund(order_id, callback_url)
+        
+        if result.get('success'):
+            # Store refund request in database
+            refund = RefundRequest(
+                user_id=g.current_user.id,
+                order_id=result.get('order_id', order_id),
+                reason=reason,
+                status=result.get('status', 'pending'),
+                response_code=result.get('response_code'),
+                created_at=datetime.utcnow()
+            )
+            db.session.add(refund)
+            db.session.commit()
+            
+            return jsonify({
+                'success': True,
+                'message': result.get('message'),
+                'data': {
+                    'order_id': result.get('order_id'),
+                    'status': result.get('status'),
+                    'response_code': result.get('response_code')
+                }
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'error': result.get('error', 'Refund failed')
+            }), 400
+        
+    except Exception as e:
+        print(f"Refund request error: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/refund/status/<order_id>', methods=['GET'])
+@token_required
+@admin_required
+def get_refund_status(order_id):
+    """Get status of a refund request"""
+    try:
+        refund = RefundRequest.query.filter_by(order_id=order_id).first()
+        
+        if not refund:
+            return jsonify({'success': False, 'error': 'Refund request not found'}), 404
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'order_id': refund.order_id,
+                'amount': refund.amount,
+                'charges': refund.charges,
+                'status': refund.status,
+                'reason': refund.reason,
+                'created_at': refund.created_at.isoformat(),
+                'completed_at': refund.completed_at.isoformat() if refund.completed_at else None,
+                'error_message': refund.error_message
+            }
+        })
+        
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+
+# ========== HUBTEL BALANCE ENDPOINT ==========
+@app.route('/api/admin/hubtel-balance', methods=['GET'])
+@token_required
+@admin_required
+def get_hubtel_balance():
+    """
+    GET /api/admin/hubtel-balance
+    Get Hubtel wallet balance (collection + disbursement)
+    """
+    try:
+        hubtel = HubtelService()
+        
+        # Get both balances
+        collection_result = hubtel.get_collection_balance()
+        disbursement_result = hubtel.get_disbursement_balance()
+        
+        # Calculate total balance
+        total_balance = 0
+        collection_balance = 0
+        disbursement_balance = 0
+        
+        if collection_result.get('success'):
+            collection_balance = collection_result.get('balance', 0)
+            total_balance += collection_balance
+        
+        if disbursement_result.get('success'):
+            disbursement_balance = disbursement_result.get('balance', 0)
+            total_balance += disbursement_balance
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'total_balance': total_balance,
+                'collection_balance': collection_balance,
+                'disbursement_balance': disbursement_balance,
+                'collection_account': hubtel.collection_account,
+                'disbursement_account': hubtel.disbursement_account,
+                'currency': 'GHS',
+                'wallet_balance': total_balance,
+                'account_balance': total_balance
+            }
+        })
+        
+    except Exception as e:
+        print(f"Hubtel balance error: {e}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+# ========== BILL COMMISSION STATS ENDPOINT ==========
+@app.route('/api/admin/bill-commission-stats', methods=['GET'])
+@token_required
+@admin_required
+def get_bill_commission_stats():
+    """
+    GET /api/admin/bill-commission-stats
+    Get bill commission statistics
+    """
+    try:
+        from sqlalchemy import func
+        
+        # Get all bill payment transactions with commission
+        # Try CommissionTransaction table first
+        total_commission = 0
+        total_volume = 0
+        total_bills = 0
+        
+        # Check if CommissionTransaction table exists
+        try:
+            commission_query = CommissionTransaction.query.filter_by(
+                transaction_type='bill_payment',
+                status='completed'
+            )
+            
+            total_commission = commission_query.with_entities(
+                func.sum(CommissionTransaction.initiator_commission)
+            ).scalar() or 0
+            
+            total_volume = commission_query.with_entities(
+                func.sum(CommissionTransaction.amount)
+            ).scalar() or 0
+            
+            total_bills = commission_query.count()
+        except:
+            # Fallback to Order table
+            bill_orders = Order.query.filter(
+                Order.type == 'bill_payment',
+                Order.status == 'completed'
+            )
+            
+            total_commission = bill_orders.with_entities(
+                func.sum(Order.initiator_commission)
+            ).scalar() or 0
+            
+            total_volume = bill_orders.with_entities(
+                func.sum(Order.amount)
+            ).scalar() or 0
+            
+            total_bills = bill_orders.count()
+        
+        # Monthly commission
+        month_start = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        
+        try:
+            monthly_commission = CommissionTransaction.query.filter(
+                CommissionTransaction.transaction_type == 'bill_payment',
+                CommissionTransaction.status == 'completed',
+                CommissionTransaction.created_at >= month_start
+            ).with_entities(
+                func.sum(CommissionTransaction.initiator_commission)
+            ).scalar() or 0
+        except:
+            monthly_commission = Order.query.filter(
+                Order.type == 'bill_payment',
+                Order.status == 'completed',
+                Order.created_at >= month_start
+            ).with_entities(
+                func.sum(Order.initiator_commission)
+            ).scalar() or 0
+        
+        # Pending commission (from Order table where status is pending)
+        pending_commission = Order.query.filter(
+            Order.type == 'bill_payment',
+            Order.status == 'pending'
+        ).with_entities(
+            func.sum(Order.initiator_commission)
+        ).scalar() or 0
+        
+        # Commission by biller
+        biller_commissions = {}
+        biller_data = db.session.query(
+            Order.biller_name,
+            func.count(Order.id).label('count'),
+            func.sum(Order.initiator_commission).label('commission')
+        ).filter(
+            Order.type == 'bill_payment',
+            Order.status == 'completed',
+            Order.initiator_commission > 0
+        ).group_by(Order.biller_name).all()
+        
+        for row in biller_data:
+            if row.biller_name:
+                biller_commissions[row.biller_name] = {
+                    'count': row.count or 0,
+                    'commission': float(row.commission or 0)
+                }
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'total_bill_commission': float(total_commission),
+                'total_bill_volume': float(total_volume),
+                'total_bills_paid': total_bills,
+                'commission_by_biller': biller_commissions,
+                'monthly_commission': float(monthly_commission),
+                'pending_commission': float(pending_commission)
+            }
+        })
+        
+    except Exception as e:
+        print(f"Bill commission stats error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+# ========== FAILED BILL PAYMENTS LIST ENDPOINT ==========
+@app.route('/api/admin/failed-bill-payments', methods=['GET'])
+@token_required
+@admin_required
+def get_failed_bill_payments():
+    """
+    GET /api/admin/failed-bill-payments
+    Get list of failed bill payments with pagination
+    """
     try:
         page = request.args.get('page', 1, type=int)
-        per_page = request.args.get('limit', 20, type=int)
+        limit = request.args.get('limit', 20, type=int)
         
-        bills = Order.query.filter_by(
-            user_id=g.current_user.id,
-            type='bill_payment'
-        ).order_by(Order.created_at.desc()).paginate(
-            page=page, per_page=per_page, error_out=False
+        # Get failed bill payments from Order table
+        query = Order.query.filter(
+            Order.type == 'bill_payment',
+            Order.status == 'failed'
+        ).order_by(Order.created_at.desc())
+        
+        # Get total count for summary
+        total_failed = query.count()
+        total_amount = query.with_entities(
+            db.func.sum(Order.amount)
+        ).scalar() or 0
+        
+        # Paginate
+        paginated = query.paginate(page=page, per_page=limit, error_out=False)
+        
+        # Build response data
+        failed_bills = []
+        for order in paginated.items:
+            # Get user details
+            user = User.query.get(order.user_id) if order.user_id else None
+            
+            failed_bills.append({
+                'id': order.id,
+                'order_id': order.order_id,
+                'biller_code': order.biller_code,
+                'biller_name': order.biller_name or 'Unknown',
+                'account_number': order.account_number,
+                'amount': float(order.amount or 0),
+                'customer_name': order.customer_name or (user.username if user else 'Unknown'),
+                'customer_phone': order.customer_phone or (user.phone if user else 'N/A'),
+                'error_message': order.error_message or 'Unknown error',
+                'status': order.status,
+                'created_at': order.created_at.isoformat() if order.created_at else None,
+                'initiator_commission': float(order.initiator_commission or 0),
+                'user_id': order.user_id,
+                'username': user.username if user else 'Unknown'
+            })
+        
+        # Pending resolution count (failed bills that haven't been resolved)
+        pending_resolution = Order.query.filter(
+            Order.type == 'bill_payment',
+            Order.status == 'failed',
+            Order.resolved_at.is_(None)
+        ).count()
+        
+        return jsonify({
+            'success': True,
+            'data': failed_bills,
+            'summary': {
+                'total_failed': total_failed,
+                'total_amount': float(total_amount),
+                'pending_resolution': pending_resolution
+            },
+            'pagination': {
+                'page': page,
+                'total': paginated.total,
+                'pages': paginated.pages,
+                'has_prev': paginated.has_prev,
+                'has_next': paginated.has_next
+            }
+        })
+        
+    except Exception as e:
+        print(f"Failed bill payments error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+# ========== RESOLVE FAILED BILL PAYMENT ENDPOINT ==========
+@app.route('/api/admin/resolve-failed-bill/<int:bill_id>', methods=['POST'])
+@token_required
+@admin_required
+def resolve_failed_bill(bill_id):
+    """
+    POST /api/admin/resolve-failed-bill/:id
+    Retry or refund a failed bill payment
+    Body: { "action": "retry" | "refund" }
+    """
+    try:
+        data = request.get_json()
+        action = data.get('action')
+        
+        if action not in ['retry', 'refund']:
+            return jsonify({
+                'success': False,
+                'error': 'Invalid action. Use "retry" or "refund"'
+            }), 400
+        
+        # Get the failed bill
+        order = Order.query.get(bill_id)
+        if not order:
+            return jsonify({'success': False, 'error': 'Bill payment not found'}), 404
+        
+        if order.type != 'bill_payment':
+            return jsonify({'success': False, 'error': 'Not a bill payment'}), 400
+        
+        if order.status != 'failed':
+            return jsonify({'success': False, 'error': 'Bill payment is not failed'}), 400
+        
+        if action == 'retry':
+            return retry_bill_payment(order)
+        else:
+            return refund_bill_payment(order)
+            
+    except Exception as e:
+        print(f"Resolve failed bill error: {e}")
+        import traceback
+        traceback.print_exc()
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+def retry_bill_payment(order):
+    """
+    Retry a failed bill payment
+    """
+    try:
+        # Re-initialize Hubtel service
+        hubtel = HubtelService()
+        commission_service = CommissionService()
+        
+        # Get the biller code and details
+        biller_code = order.biller_code
+        account_number = order.account_number
+        amount = order.amount
+        
+        # Generate new client reference
+        import uuid
+        client_reference = f"RETRY-{uuid.uuid4().hex[:12].upper()}"
+        callback_url = f"{os.environ.get('BASE_URL', 'https://roamsmart-backend-production.up.railway.app')}/api/webhooks/hubtel"
+        
+        # Process payment based on biller type
+        payment_result = None
+        
+        try:
+            if biller_code == 'DSTV':
+                payment_result = hubtel.pay_dstv(account_number, amount, client_reference, callback_url)
+            elif biller_code == 'GOTV':
+                payment_result = hubtel.pay_gotv(account_number, amount, client_reference, callback_url)
+            elif biller_code == 'STARTIMES':
+                payment_result = hubtel.pay_startimes(account_number, amount, client_reference, callback_url)
+            elif biller_code == 'ECG':
+                meter_number = getattr(order, 'meter_number', account_number)
+                phone = order.customer_phone or '0557388622'
+                payment_result = hubtel.pay_ecg(phone, meter_number, amount, client_reference, callback_url)
+            elif biller_code == 'GWCL':
+                meter_number = getattr(order, 'meter_number', account_number)
+                phone = order.customer_phone or '0557388622'
+                session_id = getattr(order, 'session_id', '')
+                email = getattr(order, 'customer_email', '')
+                payment_result = hubtel.pay_water(meter_number, phone, email, session_id, amount, client_reference, callback_url)
+            else:
+                return jsonify({
+                    'success': False,
+                    'error': f'Unsupported biller: {biller_code}'
+                }), 400
+                
+        except Exception as hubtel_error:
+            print(f"Hubtel retry error: {hubtel_error}")
+            return jsonify({
+                'success': False,
+                'error': f'Hubtel payment failed: {str(hubtel_error)}'
+            }), 400
+        
+        if not payment_result or not payment_result.get('success'):
+            error_msg = payment_result.get('error', 'Payment failed') if payment_result else 'Unknown error'
+            
+            # Update order with new error
+            order.error_message = error_msg
+            order.retry_count = (getattr(order, 'retry_count', 0) or 0) + 1
+            order.last_retry_at = datetime.utcnow()
+            db.session.commit()
+            
+            return jsonify({
+                'success': False,
+                'error': error_msg
+            }), 400
+        
+        # Payment successful - update order
+        order.status = 'completed'
+        order.payment_reference = client_reference
+        order.provider_reference = payment_result.get('client_reference')
+        order.provider_order_id = payment_result.get('transaction_id')
+        order.completed_at = datetime.utcnow()
+        order.retry_count = (getattr(order, 'retry_count', 0) or 0) + 1
+        order.last_retry_at = datetime.utcnow()
+        order.error_message = None
+        
+        # Calculate and distribute commission
+        service_type = commission_service.get_service_type(biller_code)
+        commission = commission_service.calculate_commission(amount, service_type)
+        
+        order.hubtel_commission_rate = commission['hubtel_rate']
+        order.total_commission = commission['total_commission']
+        order.admin_commission = commission['admin_commission']
+        order.initiator_commission = commission['initiator_commission']
+        
+        db.session.commit()
+        
+        # Distribute commission
+        commission_service.distribute_commission(
+            order_id=order.order_id,
+            commission_data=commission,
+            initiator_id=order.user_id,
+            initiator_type='user'
         )
         
         return jsonify({
             'success': True,
-            'data': [{
-                'id': b.id,
-                'order_id': b.order_id,
-                'biller_code': b.biller_code,
-                'biller_name': b.biller_name,
-                'account_number': b.account_number,
-                'amount': float(b.amount),
-                'status': b.status,
-                'reference': b.provider_reference,
-                'created_at': b.created_at.isoformat()
-            } for b in bills.items],
-            'total': bills.total,
-            'page': page,
-            'total_pages': bills.pages
+            'message': 'Bill payment retried successfully!',
+            'data': {
+                'order_id': order.order_id,
+                'status': order.status,
+                'reference': client_reference,
+                'amount': amount,
+                'biller_name': order.biller_name
+            }
         })
         
     except Exception as e:
-        print(f"Error fetching bill history: {e}")
+        print(f"Retry bill error: {e}")
+        import traceback
+        traceback.print_exc()
+        db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
+def refund_bill_payment(order):
+    """
+    Refund a failed bill payment (credit user's wallet)
+    """
+    try:
+        # Get user
+        user = User.query.get(order.user_id)
+        if not user:
+            return jsonify({'success': False, 'error': 'User not found'}), 404
+        
+        # Calculate refund amount (full amount)
+        refund_amount = order.amount
+        
+        # Check if already refunded
+        if hasattr(order, 'refunded_at') and order.refunded_at:
+            return jsonify({
+                'success': False,
+                'error': 'Bill payment already refunded'
+            }), 400
+        
+        # Credit user's wallet
+        balance_before = user.wallet_balance or 0
+        user.wallet_balance = balance_before + refund_amount
+        
+        # Update order
+        order.status = 'refunded'
+        order.refunded_at = datetime.utcnow()
+        order.refund_amount = refund_amount
+        order.error_message = f"Refunded by admin: {refund_amount} GHS credited to wallet"
+        
+        # Create transaction record
+        transaction = Transaction(
+            user_id=user.id,
+            type='refund',
+            amount=refund_amount,
+            balance_before=balance_before,
+            balance_after=user.wallet_balance,
+            description=f'Refund for failed bill payment: {order.order_id}',
+            reference=f'REFUND-{order.order_id}',
+            status='completed',
+            created_at=datetime.utcnow()
+        )
+        db.session.add(transaction)
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': f'Refund of ₵{refund_amount:.2f} processed successfully!',
+            'data': {
+                'order_id': order.order_id,
+                'amount': refund_amount,
+                'new_balance': user.wallet_balance,
+                'status': order.status
+            }
+        })
+        
+    except Exception as e:
+        print(f"Refund bill error: {e}")
+        import traceback
+        traceback.print_exc()
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ========== HUBTEL COLLECTION BALANCE ENDPOINT ==========
+@app.route('/api/hubtel/collection-balance', methods=['GET'])
+@token_required
+@admin_required
+def get_hubtel_collection_balance():
+    """Get Hubtel collection account balance"""
+    try:
+        hubtel = HubtelService()
+        result = hubtel.get_collection_balance()
+        
+        if result.get('success'):
+            return jsonify({
+                'success': True,
+                'data': {
+                    'balance': result.get('balance'),
+                    'account': result.get('account'),
+                    'type': result.get('type')
+                }
+            })
+        else:
+            return jsonify({'success': False, 'error': result.get('error')}), 500
+    except Exception as e:
+        print(f"Hubtel collection balance error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ========== REFUND WEBHOOK ENDPOINT ==========
+@app.route('/api/webhooks/refund', methods=['POST'])
+def refund_webhook():
+    """Handle Hubtel refund webhook notifications"""
+    try:
+        data = request.get_json()
+        print(f"[Refund Webhook] Received: {data}")
+        
+        response_code = data.get('responseCode')
+        message = data.get('message')
+        refund_data = data.get('data', {})
+        order_id = refund_data.get('orderId')
+        amount = refund_data.get('amount', 0)
+        charges = refund_data.get('charges', 0)
+        external_transaction_id = refund_data.get('externalTransactionId')
+        
+        if order_id:
+            refund = RefundRequest.query.filter_by(order_id=order_id).first()
+            if refund:
+                if response_code == '0000':
+                    refund.status = 'completed'
+                    refund.completed_at = datetime.utcnow()
+                    refund.amount = amount
+                    refund.charges = charges
+                    refund.external_transaction_id = external_transaction_id
+                elif response_code == '3000':
+                    refund.status = 'not_found'
+                    refund.error_message = message
+                elif response_code == '4000':
+                    refund.status = 'failed'
+                    refund.error_message = 'Amount less than 1 cedi'
+                elif response_code == '4509':
+                    refund.status = 'not_eligible'
+                    refund.error_message = 'Order not eligible for refund'
+                elif response_code == '4515':
+                    refund.status = 'processing'
+                    refund.error_message = 'Refund already being processed'
+                else:
+                    refund.status = 'failed'
+                    refund.error_message = message
+                
+                db.session.commit()
+        
+        return jsonify({'success': True}), 200
+        
+    except Exception as e:
+        print(f"[Refund Webhook Error] {e}")
+        return jsonify({'success': False, 'error': str(e)}), 200
+
+@app.route('/api/hubtel/disbursement-balance', methods=['GET'])
+@token_required
+@admin_required
+def get_hubtel_disbursement_balance():
+    """Get Hubtel disbursement account balance"""
+    try:
+        hubtel = HubtelService()
+        result = hubtel.get_disbursement_balance()
+        
+        if result.get('success'):
+            return jsonify({
+                'success': True,
+                'data': {
+                    'balance': result.get('balance'),
+                    'account': result.get('account'),
+                    'type': result.get('type')
+                }
+            })
+        else:
+            return jsonify({'success': False, 'error': result.get('error')}), 500
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+# ========== HUBTEL BILL PAYMENT ENDPOINTS (UPDATED) ==========
+
+# app.py - Bill Validation Endpoint
+
 @app.route('/api/bills/validate', methods=['POST'])
 @token_required
-def validate_bill_account():
+def validate_bill():
     """Validate bill account with Hubtel API"""
     try:
         data = request.get_json()
         biller_code = data.get('biller_code')
         account_number = data.get('account_number')
+        phone_number = data.get('phone_number')
+        meter_number = data.get('meter_number')
         
         if not biller_code or not account_number:
             return jsonify({'success': False, 'error': 'Biller code and account number required'}), 400
         
         hubtel = HubtelService()
-        result = hubtel.validate_bill_account(biller_code, account_number)
+        result = None
         
-        if result.get('success'):
-            return jsonify({
-                'success': True,
-                'data': {
-                    'customer_name': result.get('customer_name'),
-                    'customer_phone': result.get('customer_phone'),
-                    'customer_email': result.get('customer_email'),
-                    'biller_name': result.get('biller_name'),
-                    'amount_due': result.get('amount_due'),
-                    'minimum_amount': result.get('minimum_amount')
-                }
-            })
+        if biller_code == 'DSTV':
+            result = hubtel.query_dstv(account_number)
+            if result and result.get('success'):
+                return jsonify({
+                    'success': True,
+                    'data': {
+                        'customer_name': result.get('data', {}).get('name'),
+                        'account_number': account_number,
+                        'biller_name': 'DSTV',
+                        'amount_due': abs(float(result.get('data', {}).get('amountDue', 0)))
+                    }
+                })
+        
+        elif biller_code == 'GOTV':
+            result = hubtel.query_gotv(account_number)
+            if result and result.get('success'):
+                return jsonify({
+                    'success': True,
+                    'data': {
+                        'customer_name': result.get('data', {}).get('name'),
+                        'account_number': account_number,
+                        'biller_name': 'GoTV',
+                        'amount_due': abs(float(result.get('data', {}).get('amountDue', 0)))
+                    }
+                })
+        
+        elif biller_code == 'STARTIMES':
+            result = hubtel.query_startimes(account_number)
+            if result and result.get('success'):
+                return jsonify({
+                    'success': True,
+                    'data': {
+                        'customer_name': result.get('data', {}).get('Name'),
+                        'account_number': account_number,
+                        'bouquet': result.get('data', {}).get('Bouquet'),
+                        'biller_name': 'StarTimes',
+                        'amount_due': 0
+                    }
+                })
+        
+        elif biller_code == 'ECG':
+            if not phone_number:
+                return jsonify({'success': False, 'error': 'Phone number required for ECG'}), 400
+            result = hubtel.query_ecg_meters(phone_number)
+            if result and result.get('success'):
+                meters = result.get('meters', [])
+                return jsonify({
+                    'success': True,
+                    'data': {
+                        'meters': meters,
+                        'biller_name': 'ECG Electricity',
+                        'message': f'Found {len(meters)} meter(s) linked to this phone number'
+                    }
+                })
+        
+        elif biller_code == 'GWCL':
+            if not phone_number or not meter_number:
+                return jsonify({'success': False, 'error': 'Meter number and phone number required for Ghana Water'}), 400
+            result = hubtel.query_water(meter_number, phone_number)
+            if result and result.get('success'):
+                amount_due = abs(float(result.get('amount_due', 0)))
+                return jsonify({
+                    'success': True,
+                    'data': {
+                        'customer_name': result.get('customer_name'),
+                        'amount_due': amount_due,
+                        'session_id': result.get('session_id'),
+                        'account_number': meter_number,
+                        'biller_name': 'Ghana Water'
+                    }
+                })
+        
         else:
-            return jsonify({
-                'success': False,
-                'error': result.get('error', 'Account validation failed')
-            }), 400
+            return jsonify({'success': False, 'error': f'Unsupported biller: {biller_code}'}), 400
+        
+        error_msg = result.get('error', 'Account validation failed') if result else 'Unknown error'
+        return jsonify({'success': False, 'error': error_msg}), 400
         
     except Exception as e:
         print(f"Bill validation error: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
-
 
 @app.route('/api/bills/inquiry', methods=['POST'])
 @token_required
 def bill_inquiry():
-    """Get bill amount due from Hubtel"""
+    """Get bill amount due from Hubtel - Specifically for amount queries"""
     try:
         data = request.get_json()
         biller_code = data.get('biller_code')
         account_number = data.get('account_number')
+        phone_number = data.get('phone_number')
+        meter_number = data.get('meter_number')
         
         if not biller_code or not account_number:
             return jsonify({'success': False, 'error': 'Biller code and account number required'}), 400
         
         hubtel = HubtelService()
-        result = hubtel.get_bill_amount(biller_code, account_number)
+        result = None
+        amount_due = 0
+        customer_name = None
         
-        if result.get('success'):
+        if biller_code == 'DSTV':
+            result = hubtel.query_dstv(account_number)
+            if result.get('success'):
+                amount_due = float(result.get('data', {}).get('amountDue', 0))
+                customer_name = result.get('data', {}).get('name')
+        
+        elif biller_code == 'GOTV':
+            result = hubtel.query_gotv(account_number)
+            if result.get('success'):
+                amount_due = float(result.get('data', {}).get('amountDue', 0))
+                customer_name = result.get('data', {}).get('name')
+        
+        elif biller_code == 'ECG':
+            if not phone_number:
+                return jsonify({'success': False, 'error': 'Phone number required for ECG'}), 400
+            result = hubtel.query_ecg_meters(phone_number)
+            if result.get('success'):
+                meters = result.get('meters', [])
+                if meters:
+                    # Return first meter's amount due
+                    amount_due = float(meters[0].get('amount_due', 0))
+                    customer_name = meters[0].get('customer_name')
+        
+        elif biller_code == 'GWCL':
+            if not meter_number or not phone_number:
+                return jsonify({'success': False, 'error': 'Meter number and phone required for Water'}), 400
+            result = hubtel.query_water(meter_number, phone_number)
+            if result.get('success'):
+                amount_due = float(result.get('amount_due', 0))
+                customer_name = result.get('data', {}).get('name')
+        
+        if result and result.get('success'):
             return jsonify({
                 'success': True,
                 'data': {
-                    'amount': result.get('amount'),
-                    'due_date': result.get('due_date'),
-                    'reference': result.get('reference')
+                    'amount': amount_due,
+                    'customer_name': customer_name,
+                    'account_number': account_number,
+                    'biller_code': biller_code
                 }
             })
         else:
-            return jsonify({
-                'success': False,
-                'error': result.get('error', 'Could not fetch bill amount')
-            }), 400
+            error_msg = result.get('error', 'Could not fetch bill amount') if result else 'Unknown error'
+            return jsonify({'success': False, 'error': error_msg}), 400
         
     except Exception as e:
         print(f"Bill inquiry error: {e}")
@@ -4606,63 +6092,139 @@ def bill_inquiry():
 @app.route('/api/bills/pay', methods=['POST'])
 @token_required
 def pay_bill():
-    """Process bill payment via Hubtel"""
+    """Process bill payment for regular user (user gets commission)"""
     try:
         import uuid
         data = request.get_json()
+        
         biller_code = data.get('biller_code')
         account_number = data.get('account_number')
         amount = data.get('amount')
-        customer_name = data.get('customer_name')
+        customer_name = data.get('customer_name', g.current_user.username)
         customer_phone = data.get('customer_phone')
-        customer_email = data.get('customer_email')
+        customer_email = data.get('customer_email', g.current_user.email)
+        meter_number = data.get('meter_number')
+        session_id = data.get('session_id')
         
-        if not all([biller_code, account_number, amount, customer_name, customer_phone]):
-            return jsonify({'success': False, 'error': 'Missing required fields'}), 400
+        # Validate required fields (customer_phone is now optional for users too)
+        missing_fields = []
+        if not biller_code:
+            missing_fields.append('biller_code')
+        if not account_number:
+            missing_fields.append('account_number')
+        if not amount:
+            missing_fields.append('amount')
+        
+        if missing_fields:
+            return jsonify({
+                'success': False, 
+                'error': f'Missing required fields: {", ".join(missing_fields)}'
+            }), 400
         
         amount = float(amount)
         
+        # Make customer_phone optional - use user's own phone as fallback
+        if not customer_phone:
+            customer_phone = g.current_user.phone or '0557388622'
+            print(f"⚠️ customer_phone not provided, using user's phone: {customer_phone}")
+        
+        # For ECG, require meter_number
+        if biller_code == 'ECG' and not meter_number:
+            meter_number = account_number
+            if not meter_number:
+                return jsonify({'success': False, 'error': 'Meter number required for ECG. Please select a meter.'}), 400
+        
+        # For GWCL, require meter_number and session_id
+        if biller_code == 'GWCL':
+            if not meter_number:
+                meter_number = account_number
+            if not session_id:
+                return jsonify({'success': False, 'error': 'Session ID required for Water bill. Please validate first.'}), 400
+        
         # Check wallet balance
-        if g.current_user.wallet_balance < amount:
-            return jsonify({
-                'success': False,
-                'error': f'Insufficient balance. Need GHS {amount:.2f}. Your balance: GHS {g.current_user.wallet_balance:.2f}'
-            }), 400
-        
-        # Call Hubtel to process payment
-        hubtel = HubtelService()
-        payment_result = hubtel.pay_bill(
-            biller_code=biller_code,
-            account_number=account_number,
-            amount=amount,
-            customer_name=customer_name,
-            customer_phone=customer_phone,
-            customer_email=customer_email
-        )
-        
-        if not payment_result.get('success'):
-            return jsonify({
-                'success': False,
-                'error': payment_result.get('error', 'Payment failed')
-            }), 400
-        
-        # Deduct from wallet
         balance_before = g.current_user.wallet_balance
+        if balance_before < amount:
+            return jsonify({
+                'success': False,
+                'error': f'Insufficient balance. Need GHS {amount:.2f}. Your balance: GHS {balance_before:.2f}'
+            }), 400
+        
+        # Calculate commission
+        commission_service = CommissionService()
+        service_type = commission_service.get_service_type(biller_code)
+        commission = commission_service.calculate_commission(amount, service_type)
+        
+        print(f"\n{'='*50}")
+        print(f"💰 BILL PAYMENT - USER VERSION")
+        print(f"{'='*50}")
+        print(f"User: {g.current_user.username} (ID: {g.current_user.id})")
+        print(f"Customer: {customer_name} ({customer_phone})")
+        print(f"Service: {service_type}")
+        print(f"Amount: GHS {amount}")
+        print(f"Meter Number: {meter_number}")
+        print(f"Session ID: {session_id}")
+        print(f"Hubtel Commission Rate: {commission['hubtel_rate']}%")
+        print(f"Total Commission: GHS {commission['total_commission']:.4f}")
+        print(f"Admin gets: GHS {commission['admin_commission']:.4f} (30%)")
+        print(f"User gets: GHS {commission['initiator_commission']:.4f} (70%)")
+        
+        # Process payment via Hubtel
+        hubtel = HubtelService()
+        callback_url = f"{os.environ.get('BASE_URL')}/api/webhooks/hubtel"
+        client_reference = f"USER-{uuid.uuid4().hex[:12].upper()}"
+        
+        payment_result = None
+        
+        try:
+            if biller_code == 'DSTV':
+                payment_result = hubtel.pay_dstv(account_number, amount, client_reference, callback_url)
+            elif biller_code == 'GOTV':
+                payment_result = hubtel.pay_gotv(account_number, amount, client_reference, callback_url)
+            elif biller_code == 'STARTIMES':
+                payment_result = hubtel.pay_startimes(account_number, amount, client_reference, callback_url)
+            elif biller_code == 'ECG':
+                if not meter_number:
+                    return jsonify({'success': False, 'error': 'Meter number required for ECG'}), 400
+                payment_result = hubtel.pay_ecg(customer_phone, meter_number, amount, client_reference, callback_url)
+            elif biller_code == 'GWCL':
+                if not meter_number or not session_id:
+                    return jsonify({'success': False, 'error': 'Meter number and session ID required for Water'}), 400
+                payment_result = hubtel.pay_water(meter_number, customer_phone, customer_email, session_id, amount, client_reference, callback_url)
+            else:
+                return jsonify({'success': False, 'error': f'Unsupported biller: {biller_code}'}), 400
+        except Exception as hubtel_error:
+            print(f"❌ Hubtel payment error: {hubtel_error}")
+            return jsonify({'success': False, 'error': f'Hubtel payment failed: {str(hubtel_error)}'}), 400
+        
+        if not payment_result or not payment_result.get('success'):
+            error_msg = payment_result.get('error', 'Payment failed') if payment_result else 'Unknown error'
+            return jsonify({'success': False, 'error': error_msg}), 400
+        
+        # Determine status based on response code
+        response_code = payment_result.get('response_code')
+        if response_code == '0000':
+            status = 'completed'
+        elif response_code == '0001':
+            status = 'pending'
+        else:
+            status = 'failed'
+        
+        # Deduct from user wallet
         g.current_user.wallet_balance -= amount
+        balance_after = g.current_user.wallet_balance
         
         # Generate order ID
         order_id = f"BILL-{uuid.uuid4().hex[:8].upper()}"
         
-        # Map biller codes to names
         biller_names = {
-            'ECG': 'ECG Electricity',
-            'GWCL': 'Ghana Water',
             'DSTV': 'DSTV',
             'GOTV': 'GoTV',
-            'STARTIMES': 'StarTimes'
+            'STARTIMES': 'StarTimes',
+            'ECG': 'ECG Electricity',
+            'GWCL': 'Ghana Water'
         }
         
-        # Create order record
+        # Create order record with status from Hubtel response
         order = Order(
             user_id=g.current_user.id,
             order_id=order_id,
@@ -4673,71 +6235,229 @@ def pay_bill():
             customer_name=customer_name,
             phone_number=customer_phone,
             amount=amount,
-            status='completed',
+            status=status,
             payment_method='wallet',
             provider='hubtel',
-            provider_reference=payment_result.get('reference'),
+            provider_reference=payment_result.get('client_reference'),
             provider_order_id=payment_result.get('transaction_id'),
-            completed_at=datetime.utcnow(),
+            hubtel_commission_rate=commission['hubtel_rate'],
+            total_commission=commission['total_commission'],
+            admin_commission=commission['admin_commission'],
+            initiator_commission=commission['initiator_commission'],
+            initiator_type='user',
+            initiator_id=g.current_user.id,
+            completed_at=datetime.utcnow() if status == 'completed' else None,
             created_at=datetime.utcnow()
         )
         db.session.add(order)
         
-        # Create transaction record
+        # Create transaction record with commission in meta_data
         transaction = Transaction(
             user_id=g.current_user.id,
             type='bill_payment',
             amount=amount,
             balance_before=balance_before,
-            balance_after=g.current_user.wallet_balance,
+            balance_after=balance_after,
             description=f'Bill payment: {biller_names.get(biller_code, biller_code)} - {account_number}',
             reference=order_id,
-            status='completed'
+            status=status,
+            meta_data={
+                'biller_code': biller_code,
+                'biller_name': biller_names.get(biller_code, biller_code),
+                'account_number': account_number,
+                'meter_number': meter_number,
+                'customer_name': customer_name,
+                'customer_phone': customer_phone,
+                'response_code': response_code,
+                'commission': {
+                    'hubtel_rate': commission['hubtel_rate'],
+                    'total': commission['total_commission'],
+                    'admin': commission['admin_commission'],
+                    'user_earned': commission['initiator_commission'],
+                    'admin_percentage': commission['admin_percentage'],
+                    'user_percentage': commission['initiator_percentage']
+                },
+                'hubtel_reference': payment_result.get('client_reference'),
+                'hubtel_order_id': payment_result.get('transaction_id')
+            }
         )
         db.session.add(transaction)
         
         db.session.commit()
         
-        return jsonify({
+        # ========== CHECK REFERRAL COMPLETION ==========
+        # Check if this is the user's first completed order (bill payment counts)
+        if status == 'completed':
+            previous_orders = Order.query.filter(
+                Order.user_id == g.current_user.id,
+                Order.status == 'completed'
+            ).count()
+            
+            print(f"\n[REFERRAL CHECK - USER BILL PAYMENT]")
+            print(f"  User: {g.current_user.username} (ID: {g.current_user.id})")
+            print(f"  Previous completed orders: {previous_orders}")
+            print(f"  Referred by: {g.current_user.referred_by}")
+            
+            # If this is the first purchase and user was referred
+            if previous_orders == 1 and g.current_user.referred_by:  # previous_orders == 1 because we just added this order
+                referrer = User.query.get(g.current_user.referred_by)
+                if referrer:
+                    referral = Referral.query.filter_by(
+                        referrer_id=referrer.id,
+                        referred_user_id=g.current_user.id,
+                        status='pending'
+                    ).first()
+                    
+                    if referral:
+                        # Complete the referral
+                        referral.status = 'completed'
+                        referral.completed_at = datetime.utcnow()
+                        
+                        # Award points to referrer
+                        points_awarded = POINTS_CONFIG['REFERRAL_POINTS']  # 1 point
+                        referrer.points_balance = (referrer.points_balance or 0) + points_awarded
+                        referrer.total_points_earned = (referrer.total_points_earned or 0) + points_awarded
+                        
+                        # Create points transaction for referrer
+                        points_trans = PointsTransaction(
+                            user_id=referrer.id,
+                            points=points_awarded,
+                            type='referral_bonus',
+                            description=f'Referral bonus for {g.current_user.username}\'s first bill payment',
+                            reference=referral.referral_code,
+                            balance_after=referrer.points_balance
+                        )
+                        db.session.add(points_trans)
+                        
+                        db.session.commit()
+                        print(f"✅ Referral completed! {referrer.username} earned {points_awarded} point(s)")
+        
+        # Distribute commission (only if completed)
+        if status == 'completed':
+            distribution = commission_service.distribute_commission(
+                order_id=order_id,
+                commission_data=commission,
+                initiator_id=g.current_user.id,
+                initiator_type='user'
+            )
+            # Refresh user balance after commission credit
+            db.session.refresh(g.current_user)
+            balance_after_with_commission = g.current_user.wallet_balance
+        else:
+            print(f"ℹ️ Commission will be distributed when payment is completed")
+            balance_after_with_commission = balance_after
+        
+        # Prepare response
+        response_data = {
             'success': True,
-            'message': f'✅ Bill payment of GHS {amount:.2f} successful!',
+            'message': f'✅ Bill payment successful! You earned GHS {commission["initiator_commission"]:.4f} commission!' if status == 'completed' else f'⏳ Bill payment pending. You will earn commission when completed.',
             'data': {
                 'order_id': order_id,
-                'reference': payment_result.get('reference'),
+                'reference': payment_result.get('client_reference'),
                 'transaction_id': payment_result.get('transaction_id'),
-                'new_balance': g.current_user.wallet_balance
+                'amount': amount,
+                'biller_name': biller_names.get(biller_code, biller_code),
+                'account_number': account_number,
+                'meter_number': meter_number,
+                'customer_name': customer_name,
+                'customer_phone': customer_phone,
+                'status': status,
+                'response_code': response_code,
+                'commission': {
+                    'hubtel_rate': commission['hubtel_rate'],
+                    'total': commission['total_commission'],
+                    'admin': commission['admin_commission'],
+                    'you_earned': commission['initiator_commission'],
+                    'admin_percentage': commission['admin_percentage'],
+                    'your_percentage': commission['initiator_percentage']
+                },
+                'balance_before': float(balance_before),
+                'amount_paid': float(amount),
+                'commission_credited': float(commission['initiator_commission']) if status == 'completed' else 0,
+                'new_balance': float(balance_after_with_commission),
+                'distribution': distribution if status == 'completed' else None
             }
-        })
+        }
+        
+        return jsonify(response_data), 200
         
     except Exception as e:
         print(f"Bill payment error: {e}")
+        import traceback
+        traceback.print_exc()
         db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
 
-
 @app.route('/api/webhooks/hubtel', methods=['POST'])
 def hubtel_webhook():
-    """Handle Hubtel webhook notifications"""
+    """Handle Hubtel webhook notifications for final transaction status"""
     try:
         data = request.get_json()
         print(f"[Hubtel Webhook] Received: {data}")
         
-        transaction_id = data.get('transactionId')
-        status = data.get('status')
-        reference = data.get('reference')
+        response_code = data.get('ResponseCode')
+        transaction_data = data.get('Data', {})
+        client_reference = transaction_data.get('ClientReference')
+        transaction_id = transaction_data.get('TransactionId')
+        amount = transaction_data.get('Amount')
+        description = transaction_data.get('Description')
+        commission = transaction_data.get('Meta', {}).get('Commission')
+        external_transaction_id = transaction_data.get('ExternalTransactionId')
         
-        if reference:
-            order = Order.query.filter_by(provider_reference=reference).first()
+        print(f"[Hubtel] Processing callback for reference: {client_reference}")
+        print(f"[Hubtel] Status: {'SUCCESS' if response_code == '0000' else 'PENDING/FAILED'}")
+        print(f"[Hubtel] Amount: GHS {amount}, Commission: GHS {commission}")
+        
+        if client_reference:
+            # Find the order by provider_reference
+            order = Order.query.filter_by(provider_reference=client_reference).first()
+            
             if order:
-                order.status = 'completed' if status == 'success' else 'failed'
-                if status == 'success':
+                print(f"[Hubtel] Found order: {order.order_id}")
+                
+                if response_code == '0000':  # Success
+                    order.status = 'completed'
                     order.completed_at = datetime.utcnow()
+                    order.delivery_status = 'delivered'
+                    order.provider_order_id = transaction_id
+                    order.provider_reference = external_transaction_id
+                    
+                    # Update the transaction record
+                    transaction = Transaction.query.filter_by(reference=order.order_id).first()
+                    if transaction:
+                        transaction.status = 'completed'
+                        transaction.meta_data = {
+                            'hubtel_transaction_id': transaction_id,
+                            'external_transaction_id': external_transaction_id,
+                            'commission': commission
+                        }
+                    
+                    print(f"[Hubtel] ✅ Order {order.order_id} marked as completed")
+                    
+                elif response_code == '0001':  # Pending
+                    order.status = 'processing'
+                    print(f"[Hubtel] ⏳ Order {order.order_id} is pending")
+                    
+                else:  # Failed
+                    order.status = 'failed'
+                    order.last_delivery_error = description or f'Payment failed with code {response_code}'
+                    print(f"[Hubtel] ❌ Order {order.order_id} failed: {description}")
+                
                 db.session.commit()
-                print(f"[Hubtel] Updated order {order.id} status to {status}")
+                print(f"[Hubtel] Database updated successfully")
+                
+            else:
+                print(f"[Hubtel] ⚠️ Order not found for reference: {client_reference}")
+        else:
+            print(f"[Hubtel] ⚠️ No client reference in webhook data")
         
-        return jsonify({'success': True}), 200
+        return jsonify({'success': True, 'message': 'Webhook processed'}), 200
+        
     except Exception as e:
         print(f"[Hubtel Webhook Error] {e}")
+        import traceback
+        traceback.print_exc()
+        db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
 
 # ========== RECURRING BILLS ENDPOINTS ==========
@@ -4892,43 +6612,13 @@ class DigimallService:
     def __init__(self):
         self.api_key = os.environ.get('DIGIMALL_API_KEY')
         self.base_url = os.environ.get('DIGIMALL_BASE_URL', 'https://www.digi-mall.app/api/v1')
-        self.webhook_url = os.environ.get('DIGIMALL_WEBHOOK_URL', 'https://roamsmart-backend-production.up.railway.app/api/webhooks/digimall')
+        self.webhook_url = os.environ.get('DIGIMALL_WEBHOOK_URL', f"{os.environ.get('BASE_URL', 'https://roamsmart-backend-production.up.railway.app')}/api/webhooks/digimall")
         
-    def get_offer_slug(self, network, volume):
-        """Get the correct offer slug for network and volume"""
-        offers = self.get_offers()
-        
-        if not offers.get('success'):
-            return None
-        
-        isp_map = {
-            'mtn': 'MTN',
-            'airteltigo': 'AirtelTigo',
-            'telecel': 'Telecel'
-        }
-        
-        isp_name = isp_map.get(network.lower(), network.capitalize())
-        
-        for offer in offers.get('offers', []):
-            if offer.get('isp') == isp_name and offer.get('type') == 'Data':
-                if volume in offer.get('volumes', []):
-                    return offer.get('offerSlug')
-        
-        for offer in offers.get('offers', []):
-            if offer.get('isp') == isp_name and offer.get('type') == 'Data':
-                return offer.get('offerSlug')
-        
-        # Fallback slugs
-        if network.lower() == 'mtn':
-            return 'mtn_master_bundle'
-        elif network.lower() == 'airteltigo':
-            return 'airteltigo_ishare'
-        elif network.lower() == 'telecel':
-            return 'telecel'
-        return None
+        if not self.api_key:
+            print("[Digimall] Warning: API key not configured")
     
     def get_offers(self):
-        """Get all available offers"""
+        """Get all available offers from Digimall"""
         try:
             response = requests.get(
                 f"{self.base_url}/offers",
@@ -4936,20 +6626,69 @@ class DigimallService:
                 timeout=10
             )
             if response.status_code == 200:
-                return response.json()
+                result = response.json()
+                return {
+                    'success': True,
+                    'offers': result.get('offers', [])
+                }
             return {'success': False, 'error': f'HTTP {response.status_code}'}
         except Exception as e:
             print(f"[Digimall] Error fetching offers: {e}")
             return {'success': False, 'error': str(e)}
     
-    def deliver_data(self, network, phone_number, volume):
-        """
-        Deliver data bundle to customer (delivery only, no pricing)
-        """
+    def get_offer_slug(self, network, volume):
+        """Get the correct offer slug for network and volume - CRITICAL METHOD"""
+        offers_result = self.get_offers()
+        
+        if not offers_result.get('success'):
+            # Fallback to hardcoded slugs if API fails
+            return self.get_fallback_offer_slug(network, volume)
+        
+        offers = offers_result.get('offers', [])
+        
+        # Map network names to Digimall ISP names
+        isp_map = {
+            'mtn': 'MTN',
+            'airteltigo': 'AirtelTigo',
+            'telecel': 'Telecel',
+            'vodafone': 'Vodafone'
+        }
+        
+        isp_name = isp_map.get(network.lower(), network.capitalize())
+        
+        # Try to find matching offer
+        for offer in offers:
+            if offer.get('isp') == isp_name and offer.get('type') == 'Data':
+                volumes = offer.get('volumes', [])
+                if volume in volumes:
+                    return offer.get('offerSlug')
+        
+        # If no exact match, return first data offer for the network
+        for offer in offers:
+            if offer.get('isp') == isp_name and offer.get('type') == 'Data':
+                return offer.get('offerSlug')
+        
+        # Fallback to hardcoded slugs
+        return self.get_fallback_offer_slug(network, volume)
+    
+    def get_fallback_offer_slug(self, network, volume):
+        """Fallback offer slugs when API is unavailable"""
+        fallback_slugs = {
+            'mtn': 'mtn_master_bundle',
+            'airteltigo': 'airteltigo_ishare',
+            'telecel': 'telecel'
+        }
+        return fallback_slugs.get(network.lower(), 'mtn_master_bundle')
+    
+    def deliver_data(self, network, phone_number, volume, offer_slug=None):
+        """Deliver data bundle to customer"""
         try:
             phone = self._format_phone(phone_number)
             
-            offer_slug = self.get_offer_slug(network, volume)
+            # Get offer slug if not provided
+            if not offer_slug:
+                offer_slug = self.get_offer_slug(network, volume)
+            
             if not offer_slug:
                 return {'success': False, 'error': f'No offer found for {network} {volume}GB'}
             
@@ -4983,7 +6722,7 @@ class DigimallService:
             
             if response.status_code in [200, 201]:
                 result = response.json()
-                print(f"[Digimall] Delivery initiated: {result.get('orderId')} - Status: {result.get('status')}")
+                print(f"[Digimall] Delivery initiated: {result.get('orderId')}")
                 return result
             else:
                 print(f"[Digimall] Delivery error: {response.status_code} - {response.text}")
@@ -4993,7 +6732,94 @@ class DigimallService:
             print(f"[Digimall] Error: {e}")
             return {'success': False, 'error': str(e)}
     
-    def check_delivery_status(self, order_id):
+    def get_bundle_options(self, network, size_gb):
+        """Get all available bundle options with delivery estimates"""
+        offers_result = self.get_offers()
+        
+        # Default options structure
+        options = []
+        
+        # Define bundle types with their characteristics
+        bundle_types = [
+            {
+                'type': 'express',
+                'name': f'{network.upper()} Express Bundle',
+                'offer_slug': f'{network}_express_bundle',
+                'icon': '⚡',
+                'color': '#ffc107',
+                'description': 'Fastest delivery - Priority processing',
+                'delivery_time': {'min': 1, 'max': 3, 'avg': 2},
+                'priority': 1,
+                'volumes': [1, 2, 5, 10]
+            },
+            {
+                'type': 'standard',
+                'name': f'{network.upper()} Master Bundle',
+                'offer_slug': f'{network}_master_bundle',
+                'icon': '📱',
+                'color': '#3498db',
+                'description': 'Standard delivery - Best value',
+                'delivery_time': {'min': 3, 'max': 10, 'avg': 6},
+                'priority': 2,
+                'volumes': [1, 2, 5, 10, 20]
+            },
+            {
+                'type': 'mashup',
+                'name': f'{network.upper()} Mashup Bundle',
+                'offer_slug': f'{network}_mashup_bundle',
+                'icon': '🎵',
+                'color': '#9b59b6',
+                'description': 'Voice + Data combo',
+                'delivery_time': {'min': 5, 'max': 20, 'avg': 12},
+                'priority': 3,
+                'volumes': [5, 10, 20]
+            }
+        ]
+        
+        # Try to get real offer slugs from Digimall if possible
+        if offers_result.get('success'):
+            offers = offers_result.get('offers', [])
+            isp_map = {
+                'mtn': 'MTN',
+                'airteltigo': 'AirtelTigo',
+                'telecel': 'Telecel'
+            }
+            isp_name = isp_map.get(network.lower(), network.capitalize())
+            
+            for offer in offers:
+                if offer.get('isp') == isp_name:
+                    offer_name = offer.get('name', '').lower()
+                    offer_slug = offer.get('offerSlug')
+                    
+                    if 'express' in offer_name:
+                        bundle_types[0]['offer_slug'] = offer_slug
+                        bundle_types[0]['volumes'] = offer.get('volumes', [1, 2, 5])
+                    elif 'master' in offer_name or 'data' in offer_name:
+                        bundle_types[1]['offer_slug'] = offer_slug
+                        bundle_types[1]['volumes'] = offer.get('volumes', [1, 2, 5, 10, 20])
+        
+        # Build options list
+        for bundle in bundle_types:
+            if size_gb in bundle['volumes']:
+                options.append({
+                    'type': bundle['type'],
+                    'name': bundle['name'],
+                    'offer_slug': bundle['offer_slug'],
+                    'available_volumes': bundle['volumes'],
+                    'delivery_time': bundle['delivery_time'],
+                    'priority': bundle['priority'],
+                    'recommended': bundle['type'] == 'express',
+                    'icon': bundle['icon'],
+                    'color': bundle['color'],
+                    'description': bundle['description']
+                })
+        
+        # Sort by delivery time
+        options.sort(key=lambda x: x['delivery_time']['avg'])
+        
+        return options
+    
+    def check_order_status(self, order_id):
         """Check delivery status of an order"""
         try:
             response = requests.get(
@@ -5003,9 +6829,188 @@ class DigimallService:
             )
             
             if response.status_code == 200:
+                result = response.json()
+                return result
+            return {'success': False, 'error': f'HTTP {response.status_code}'}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    def bulk_check_order_status(self, identifiers):
+        """Check status of multiple orders from Digimall"""
+        try:
+            if not identifiers:
+                return {'success': True, 'orders': [], 'total': 0}
+            
+            # Limit to 100 identifiers per request (Digimall limit)
+            if len(identifiers) > 100:
+                identifiers = identifiers[:100]
+            
+            response = requests.post(
+                f"{self.base_url}/order/status/bulk",
+                json={'identifiers': identifiers},
+                headers={
+                    'x-api-key': self.api_key,
+                    'Content-Type': 'application/json'
+                },
+                timeout=15
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                print(f"[Digimall] Bulk status check: {result.get('found')} found, {result.get('notFound')} not found")
+                return {
+                    'success': True,
+                    'total': result.get('total', 0),
+                    'found': result.get('found', 0),
+                    'notFound': result.get('notFound', 0),
+                    'orders': result.get('orders', [])
+                }
+            else:
+                print(f"[Digimall] Bulk status error: {response.status_code}")
+                return {'success': False, 'error': f'HTTP {response.status_code}'}
+                
+        except Exception as e:
+            print(f"[Digimall] Bulk status error: {e}")
+            return {'success': False, 'error': str(e)}
+    
+    def get_queue_status(self, network='mtn'):
+        """Get real-time queue status from Digimall by checking pending orders"""
+        try:
+            # Get pending orders from database that have Digimall references
+            from models import Order
+            from datetime import datetime, timedelta
+            
+            # Get recent pending orders (last 2 hours)
+            pending_orders_db = Order.query.filter(
+                Order.network == network,
+                Order.delivery_status.in_(['pending', 'queued', 'processing']),
+                Order.created_at >= datetime.now() - timedelta(hours=2),
+                Order.provider_order_id.isnot(None)
+            ).all()
+            
+            if not pending_orders_db:
+                return self._get_local_queue_status(network)
+            
+            # Collect identifiers for bulk check
+            identifiers = []
+            for order in pending_orders_db:
+                if order.provider_order_id:
+                    identifiers.append(order.provider_order_id)
+                elif order.provider_reference:
+                    identifiers.append(order.provider_reference)
+            
+            if not identifiers:
+                return self._get_local_queue_status(network)
+            
+            # Call bulk status to check which are still pending at Digimall
+            bulk_result = self.bulk_check_order_status(identifiers)
+            
+            if bulk_result.get('success'):
+                # Count orders still pending/processing at Digimall
+                still_pending = 0
+                for order_status in bulk_result.get('orders', []):
+                    if order_status.get('found') and order_status.get('status') in ['pending', 'processing']:
+                        still_pending += 1
+                
+                # Get average processing time from recent delivered orders
+                recent_delivered = Order.query.filter(
+                    Order.network == network,
+                    Order.delivery_status == 'delivered',
+                    Order.completed_at >= datetime.now() - timedelta(hours=1)
+                ).all()
+                
+                avg_time = 2
+                if recent_delivered:
+                    total_time = sum((o.completed_at - o.created_at).total_seconds() / 60 for o in recent_delivered)
+                    avg_time = total_time / len(recent_delivered)
+                
+                # Determine congestion
+                if still_pending > 20:
+                    congestion = 'high'
+                elif still_pending > 10:
+                    congestion = 'medium'
+                else:
+                    congestion = 'low'
+                
+                return {
+                    'success': True,
+                    'data': {
+                        'pending_orders': still_pending,
+                        'processing_orders': 0,
+                        'avg_processing_time': round(avg_time, 1),
+                        'estimated_wait': round(still_pending * avg_time, 1),
+                        'congestion': congestion,
+                        'last_updated': datetime.now().isoformat(),
+                        'source': 'digimall_bulk_check'
+                    }
+                }
+            else:
+                return self._get_local_queue_status(network)
+                
+        except Exception as e:
+            print(f"[Digimall] Error fetching queue status: {e}")
+            return self._get_local_queue_status(network)
+    
+    def _get_local_queue_status(self, network='mtn'):
+        """Fallback: Calculate queue status from local database"""
+        from models import Order
+        from datetime import datetime, timedelta
+        
+        # Get pending orders
+        pending_orders = Order.query.filter(
+            Order.network == network,
+            Order.delivery_status.in_(['pending', 'queued', 'processing']),
+            Order.created_at >= datetime.now() - timedelta(hours=2)
+        ).count()
+        
+        # Get average processing time from recent orders
+        recent_orders = Order.query.filter(
+            Order.network == network,
+            Order.delivery_status == 'delivered',
+            Order.completed_at >= datetime.now() - timedelta(hours=1)
+        ).all()
+        
+        avg_time = 2  # default 2 minutes
+        if recent_orders:
+            total_time = sum((o.completed_at - o.created_at).total_seconds() / 60 for o in recent_orders)
+            avg_time = total_time / len(recent_orders)
+        
+        # Determine congestion
+        if pending_orders > 20:
+            congestion = 'high'
+        elif pending_orders > 10:
+            congestion = 'medium'
+        else:
+            congestion = 'low'
+        
+        return {
+            'success': True,
+            'data': {
+                'pending_orders': pending_orders,
+                'processing_orders': 0,
+                'avg_processing_time': round(avg_time, 1),
+                'estimated_wait': round(pending_orders * avg_time, 1),
+                'congestion': congestion,
+                'last_updated': datetime.now().isoformat(),
+                'source': 'local'
+            }
+        }
+    
+    def get_recent_order_statuses(self, limit=50):
+        """Get recent order statuses from Digimall for queue calculation"""
+        try:
+            response = requests.get(
+                f"{self.base_url}/orders/recent",
+                headers={'x-api-key': self.api_key},
+                params={'limit': limit},
+                timeout=10
+            )
+            
+            if response.status_code == 200:
                 return response.json()
             return {'success': False, 'error': f'HTTP {response.status_code}'}
         except Exception as e:
+            print(f"[Digimall] Error fetching recent orders: {e}")
             return {'success': False, 'error': str(e)}
     
     def _format_phone(self, phone):
@@ -5018,181 +7023,1267 @@ class DigimallService:
             phone = '233' + phone
         return phone
 
+class QueueService:
+    @staticmethod
+    def get_queue_status(network='mtn'):
+        """Get current queue status for a network"""
+        
+        # Get orders pending in last 2 hours
+        pending_orders = Order.query.filter(
+            Order.network == network,
+            Order.delivery_status.in_(['pending', 'queued', 'processing']),
+            Order.created_at >= datetime.now() - timedelta(hours=2)
+        ).count()
+        
+        # Get average processing time
+        recent_orders = Order.query.filter(
+            Order.network == network,
+            Order.delivery_status == 'delivered',
+            Order.completed_at >= datetime.now() - timedelta(hours=1)
+        ).all()
+        
+        avg_time = 0
+        if recent_orders:
+            total_time = sum((o.completed_at - o.created_at).total_seconds() / 60 for o in recent_orders)
+            avg_time = total_time / len(recent_orders)
+        
+        # Estimate wait time
+        estimated_wait = pending_orders * max(2, avg_time)
+        
+        return {
+            'pending_count': pending_orders,
+            'avg_processing_time': round(avg_time, 1),
+            'estimated_wait': round(estimated_wait, 1),
+            'congestion': 'high' if pending_orders > 20 else 'medium' if pending_orders > 10 else 'low'
+        }
+
+# ========== DELIVERY ANALYTICS CLASS ==========
+
+class DeliveryAnalytics:
+    """
+    Analyze delivery performance from Digimall orders
+    to provide accurate time estimates
+    """
+    
+    @staticmethod
+    def analyze_delivery_performance(network='mtn', lookback_hours=24):
+        """
+        Analyze delivery performance from recent Digimall orders
+        Returns:
+            - Average delivery time by delivery type
+            - Current pending count
+            - Estimated wait time
+            - Congestion level
+        """
+        try:
+            # STEP 1: Get recent orders from database
+            recent_orders = Order.query.filter(
+                Order.network == network,
+                Order.delivery_status.in_(['delivered', 'failed', 'pending', 'processing']),
+                Order.created_at >= datetime.now() - timedelta(hours=lookback_hours),
+                Order.provider_order_id.isnot(None)
+            ).all()
+            
+            if not recent_orders:
+                return DeliveryAnalytics._get_default_estimates()
+            
+            # STEP 2: Get real-time status from Digimall for pending orders
+            pending_identifiers = []
+            for order in recent_orders:
+                if order.delivery_status in ['pending', 'processing'] and order.provider_order_id:
+                    pending_identifiers.append(order.provider_order_id)
+            
+            # Check which orders are still pending at Digimall
+            digimall = DigimallService()
+            realtime_status = {}
+            
+            if pending_identifiers:
+                bulk_result = digimall.bulk_check_order_status(pending_identifiers)
+                if bulk_result.get('success'):
+                    for status_info in bulk_result.get('orders', []):
+                        if status_info.get('found'):
+                            identifier = status_info.get('identifier') or status_info.get('orderId')
+                            realtime_status[identifier] = status_info.get('status')
+            
+            # STEP 3: Calculate delivery times by delivery type
+            delivery_times_by_type = {}
+            total_orders = 0
+            total_time = 0
+            
+            for order in recent_orders:
+                if order.delivery_status == 'delivered' and order.completed_at and order.created_at:
+                    delivery_type = order.delivery_type or 'standard'
+                    delivery_time = (order.completed_at - order.created_at).total_seconds() / 60
+                    
+                    if delivery_type not in delivery_times_by_type:
+                        delivery_times_by_type[delivery_type] = {
+                            'times': [],
+                            'count': 0,
+                            'total': 0
+                        }
+                    
+                    delivery_times_by_type[delivery_type]['times'].append(delivery_time)
+                    delivery_times_by_type[delivery_type]['count'] += 1
+                    delivery_times_by_type[delivery_type]['total'] += delivery_time
+                    
+                    total_orders += 1
+                    total_time += delivery_time
+            
+            # STEP 4: Calculate averages
+            averages_by_type = {}
+            for delivery_type, data in delivery_times_by_type.items():
+                if data['count'] > 0:
+                    avg_time = data['total'] / data['count']
+                    sorted_times = sorted(data['times'])
+                    median_time = sorted_times[len(sorted_times)//2] if sorted_times else avg_time
+                    
+                    averages_by_type[delivery_type] = {
+                        'avg': round(avg_time, 1),
+                        'median': round(median_time, 1),
+                        'min': round(min(data['times']), 1) if data['times'] else 0,
+                        'max': round(max(data['times']), 1) if data['times'] else 0,
+                        'count': data['count'],
+                        'total_delivered': data['count']
+                    }
+            
+            # STEP 5: Count pending orders (using Digimall real-time status)
+            pending_count = 0
+            processing_count = 0
+            
+            for order in recent_orders:
+                if order.provider_order_id and order.provider_order_id in realtime_status:
+                    status = realtime_status[order.provider_order_id]
+                    if status in ['pending', 'queued']:
+                        pending_count += 1
+                    elif status == 'processing':
+                        processing_count += 1
+                elif order.delivery_status in ['pending', 'queued']:
+                    pending_count += 1
+                elif order.delivery_status == 'processing':
+                    processing_count += 1
+            
+            # STEP 6: Calculate estimated wait time for each delivery type
+            estimated_wait_by_type = {}
+            
+            for delivery_type in ['express', 'master', 'standard', 'mashup']:
+                avg_data = averages_by_type.get(delivery_type, {})
+                avg_time = avg_data.get('avg', 5)
+                
+                if delivery_type == 'express':
+                    queue_factor = 0.2
+                elif delivery_type == 'master':
+                    queue_factor = 0.3
+                else:
+                    queue_factor = 0.5
+                
+                estimated_wait = avg_time + (pending_count * queue_factor)
+                
+                estimated_wait_by_type[delivery_type] = {
+                    'base_time': avg_time,
+                    'pending_count': pending_count,
+                    'queue_factor': queue_factor,
+                    'estimated_minutes': round(estimated_wait, 1),
+                    'estimated_display': f"{round(estimated_wait)} min"
+                }
+            
+            # STEP 7: Determine congestion level
+            if pending_count > 20:
+                congestion = 'high'
+                congestion_color = '#dc3545'
+                congestion_message = '⚠️ Heavy traffic - Expect longer delivery times'
+            elif pending_count > 10:
+                congestion = 'medium'
+                congestion_color = '#ffc107'
+                congestion_message = '🟡 Moderate traffic - Normal delays expected'
+            else:
+                congestion = 'low'
+                congestion_color = '#28a745'
+                congestion_message = '✅ Light traffic - Fast delivery expected'
+            
+            return {
+                'success': True,
+                'data': {
+                    'averages_by_type': averages_by_type,
+                    'estimated_wait_by_type': estimated_wait_by_type,
+                    'pending_count': pending_count,
+                    'processing_count': processing_count,
+                    'congestion': congestion,
+                    'congestion_color': congestion_color,
+                    'congestion_message': congestion_message,
+                    'total_analyzed': len(recent_orders),
+                    'lookback_hours': lookback_hours,
+                    'last_updated': datetime.now().isoformat(),
+                    'delivery_summary': {
+                        delivery_type: {
+                            'avg_time': data.get('avg', 0),
+                            'median_time': data.get('median', 0),
+                            'min_time': data.get('min', 0),
+                            'max_time': data.get('max', 0),
+                            'orders_delivered': data.get('total_delivered', 0)
+                        }
+                        for delivery_type, data in averages_by_type.items()
+                    }
+                }
+            }
+            
+        except Exception as e:
+            print(f"Delivery analytics error: {e}")
+            return DeliveryAnalytics._get_default_estimates()
+    
+    @staticmethod
+    def _get_default_estimates():
+        """Fallback default estimates"""
+        return {
+            'success': True,
+            'data': {
+                'averages_by_type': {},
+                'estimated_wait_by_type': {
+                    'express': {'estimated_minutes': 3, 'estimated_display': '3 min'},
+                    'master': {'estimated_minutes': 5, 'estimated_display': '5 min'},
+                    'standard': {'estimated_minutes': 8, 'estimated_display': '8 min'},
+                    'mashup': {'estimated_minutes': 15, 'estimated_display': '15 min'}
+                },
+                'pending_count': 0,
+                'processing_count': 0,
+                'congestion': 'low',
+                'congestion_color': '#28a745',
+                'congestion_message': '✅ Normal delivery times',
+                'total_analyzed': 0,
+                'lookback_hours': 24,
+                'last_updated': datetime.now().isoformat(),
+                'delivery_summary': {}
+            }
+        }
 
 
-@app.route('/api/referral/balance', methods=['GET'])
+# ========== DELIVERY OPTIONS ENDPOINT ==========
+
+class DeliveryOptionsCache:
+    """Simple in-memory cache for delivery options"""
+    
+    def __init__(self, ttl_seconds=60):
+        self.cache = {}
+        self.ttl = ttl_seconds
+        self.hits = 0
+        self.misses = 0
+    
+    def get_key(self, network, size_gb, category):
+        """Generate cache key"""
+        return f"{network}_{size_gb}_{category}"
+    
+    def get(self, network, size_gb, category):
+        """Get cached data if valid"""
+        key = self.get_key(network, size_gb, category)
+        
+        if key in self.cache:
+            entry = self.cache[key]
+            cache_age = (datetime.now() - entry['timestamp']).total_seconds()
+            
+            if cache_age < self.ttl:
+                self.hits += 1
+                print(f"✅ CACHE HIT: {key} (age: {int(cache_age)}s)")
+                return entry['data']
+            else:
+                # Expired
+                del self.cache[key]
+                print(f"⏰ CACHE EXPIRED: {key}")
+        
+        self.misses += 1
+        return None
+    
+    def set(self, network, size_gb, category, data):
+        """Store data in cache"""
+        key = self.get_key(network, size_gb, category)
+        self.cache[key] = {
+            'data': data,
+            'timestamp': datetime.now()
+        }
+        print(f"💾 CACHE SET: {key}")
+    
+    def clear(self):
+        """Clear all cache"""
+        self.cache.clear()
+        self.hits = 0
+        self.misses = 0
+        print("🗑️ CACHE CLEARED")
+    
+    def get_stats(self):
+        """Get cache statistics"""
+        total = self.hits + self.misses
+        hit_rate = (self.hits / total * 100) if total > 0 else 0
+        return {
+            'hits': self.hits,
+            'misses': self.misses,
+            'total': total,
+            'hit_rate': f"{hit_rate:.1f}%",
+            'cache_size': len(self.cache),
+            'ttl_seconds': self.ttl
+        }
+    
+    def get_all_keys(self):
+        """Get all cache keys"""
+        return list(self.cache.keys())
+
+# Initialize cache
+delivery_cache = DeliveryOptionsCache(ttl_seconds=60)  # 60 second TTL
+
+
+# ========== UPDATED DELIVERY OPTIONS ENDPOINT WITH CACHE ==========
+
+@app.route('/api/delivery/options', methods=['GET'])
 @token_required
-def get_referral_balance():
-    """Get user's referral data balance"""
+@limiter.limit("100 per hour")
+def get_delivery_network_options():
+    """Get all delivery options with caching"""
     try:
-        user = g.current_user
+        network = request.args.get('network', 'mtn')
+        size_gb = request.args.get('size_gb', 1, type=int)
         
-        # Get completed referrals count
-        completed_count = Referral.query.filter_by(
-            referrer_id=user.id,
-            status='completed'
-        ).count()
+        print("\n" + "="*60)
+        print("📡 DELIVERY OPTIONS API CALLED")
+        print("="*60)
+        print(f"Network: {network}")
+        print(f"Size: {size_gb}GB")
         
-        # Get pending referrals
-        pending_count = Referral.query.filter_by(
-            referrer_id=user.id,
-            status='pending'
-        ).count()
+        from models import PriceSetting, DeliverySetting
         
-        # Calculate how many more referrals needed for next reward
-        next_reward_at = 10 - (completed_count % 10)
-        if completed_count % 10 == 0 and completed_count > 0:
-            next_reward_at = 10
+        is_agent = g.current_user.is_agent and getattr(g.current_user, 'agent_approved', False)
+        price_category = 'agent_price' if is_agent else 'user_price'
+        
+        print(f"👤 User type: {'Agent' if is_agent else 'User'}")
+        print(f"💰 Price category: {price_category}")
+        
+        # STEP 1: Try to get from cache FIRST
+        cache_key = f"{network}_{size_gb}_{price_category}"
+        cached_data = delivery_cache.get(network, size_gb, price_category)
+        
+        if cached_data:
+            print(f"📦 Returning cached data (age: {int((datetime.now() - delivery_cache.cache[cache_key]['timestamp']).total_seconds())}s)")
+            return jsonify({
+                'success': True,
+                'data': cached_data,
+                'cached': True,
+                'cache_stats': delivery_cache.get_stats()
+            })
+        
+        print("📦 Cache miss - fetching fresh data...")
+        
+        # STEP 2: Get prices from database (only on cache miss)
+        all_prices = PriceSetting.query.filter_by(
+            category=price_category,
+            network=network,
+            is_available=True
+        ).filter(
+            PriceSetting.delivery_type.isnot(None)
+        ).all()
+        
+        if not all_prices:
+            return jsonify({
+                'success': False, 
+                'error': f'No delivery prices found for {network}'
+            }), 404
+        
+        print(f"\n📦 Found {len(all_prices)} delivery price records in database")
+        
+        # Get delivery settings
+        delivery_settings = DeliverySetting.query.filter_by(
+            network=network,
+            is_active=True
+        ).all()
+        
+        # Group prices by delivery_type
+        prices_by_type = {}
+        for price_record in all_prices:
+            delivery_type = price_record.delivery_type
+            size = price_record.size_gb
+            price = float(price_record.price)
+            
+            if delivery_type not in prices_by_type:
+                prices_by_type[delivery_type] = {}
+            prices_by_type[delivery_type][size] = price
+        
+        # STEP 3: Get REAL-TIME delivery analytics from Digimall (only on cache miss)
+        analytics = DeliveryAnalytics.analyze_delivery_performance(network, lookback_hours=24)
+        analytics_data = analytics.get('data', {})
+        
+        print(f"\n📊 Delivery Analytics from Digimall:")
+        print(f"  Analyzed: {analytics_data.get('total_analyzed', 0)} orders")
+        print(f"  Pending: {analytics_data.get('pending_count', 0)}")
+        print(f"  Processing: {analytics_data.get('processing_count', 0)}")
+        print(f"  Congestion: {analytics_data.get('congestion', 'low')}")
+        
+        for delivery_type, summary in analytics_data.get('delivery_summary', {}).items():
+            print(f"  {delivery_type}: avg {summary.get('avg_time', 0)}min, {summary.get('orders_delivered', 0)} orders")
+        
+        # STEP 4: Build options with prices + real-time estimates
+        options = []
+        
+        name_map = {
+            'express': 'MTN EXPRESS BUNDLE',
+            'master': 'MTN Master Bundle',
+            'standard': 'Standard Delivery',
+            'mashup_voice': 'MTN MASHUP (VOICE + DATA)',
+            'mashup_data': 'MTN MASHUP (DATA ONLY)'
+        }
+        
+        icon_map = {
+            'express': '⚡',
+            'master': '👑',
+            'standard': '📱',
+            'mashup_voice': '🎵',
+            'mashup_data': '📦'
+        }
+        
+        color_map = {
+            'express': '#f39c12',
+            'master': '#8B0000',
+            'standard': '#3498db',
+            'mashup_voice': '#9b59b6',
+            'mashup_data': '#dc3545'
+        }
+        
+        for delivery_type, size_prices in prices_by_type.items():
+            delivery_setting = next(
+                (ds for ds in delivery_settings if ds.delivery_type == delivery_type), 
+                None
+            )
+            
+            # Get REAL-TIME delivery time from analytics
+            estimated_wait = analytics_data.get('estimated_wait_by_type', {}).get(delivery_type, {})
+            
+            if estimated_wait and estimated_wait.get('estimated_minutes'):
+                avg_time = estimated_wait.get('estimated_minutes', 5)
+                delivery_summary = analytics_data.get('delivery_summary', {}).get(delivery_type, {})
+                min_time = delivery_summary.get('min_time', max(1, avg_time - 2))
+                max_time = delivery_summary.get('max_time', avg_time + 3)
+                
+                if min_time <= 0:
+                    min_time = max(1, avg_time - 2)
+                if max_time <= min_time:
+                    max_time = avg_time + 3
+                
+                print(f"  ✅ Using real data for {delivery_type}: avg={avg_time}min, min={min_time}min, max={max_time}min")
+            else:
+                avg_time = 5
+                min_time = 2
+                max_time = 8
+                print(f"  ⚠️ Using defaults for {delivery_type}: avg={avg_time}min")
+            
+            price_for_size = size_prices.get(size_gb, 0)
+            base_price = size_prices.get(1, list(size_prices.values())[0] if size_prices else 0)
+            
+            now = datetime.now()
+            delivery_window = {
+                'start': (now + timedelta(minutes=min_time)).strftime('%I:%M %p'),
+                'end': (now + timedelta(minutes=max_time)).strftime('%I:%M %p')
+            }
+            
+            option = {
+                'type': delivery_type,
+                'name': name_map.get(delivery_type, delivery_type.upper()),
+                'icon': icon_map.get(delivery_type, '📱'),
+                'color': color_map.get(delivery_type, '#3498db'),
+                'description': f'{delivery_type.upper()} delivery option',
+                'offer_slug': getattr(delivery_setting, 'offer_slug', None) or f'{network}_{delivery_type}_bundle',
+                'prices': size_prices,
+                'base_price': round(base_price, 2),
+                'price': round(price_for_size, 2) if price_for_size > 0 else round(base_price, 2),
+                'final_price': round(price_for_size, 2) if price_for_size > 0 else round(base_price, 2),
+                'delivery_time': {
+                    'min': int(min_time),
+                    'max': int(max_time),
+                    'avg': int(avg_time),
+                    'unit': 'minutes'
+                },
+                'delivery_window': delivery_window,
+                'queue_length': analytics_data.get('pending_count', 0),
+                'processing_count': analytics_data.get('processing_count', 0),
+                'congestion': analytics_data.get('congestion', 'low'),
+                'congestion_message': analytics_data.get('congestion_message', ''),
+                'status': 'active' if avg_time < 15 else 'delayed' if avg_time < 30 else 'very_delayed',
+                'recommended': delivery_type == 'master',
+                'analytics': {
+                    'orders_delivered': analytics_data.get('delivery_summary', {}).get(delivery_type, {}).get('orders_delivered', 0),
+                    'avg_time_historical': analytics_data.get('delivery_summary', {}).get(delivery_type, {}).get('avg_time', 0)
+                }
+            }
+            options.append(option)
+        
+        options.sort(key=lambda x: x['delivery_time']['avg'])
+        
+        # Build response data
+        response_data = {
+            'network': network,
+            'size_gb': size_gb,
+            'timestamp': datetime.now().isoformat(),
+            'analytics': analytics_data,
+            'fastest_network': 'mtn',
+            'fastest_estimate': options[0]['delivery_time']['avg'] if options else 5,
+            'options': options
+        }
+        
+        # STEP 5: Store in cache
+        delivery_cache.set(network, size_gb, price_category, response_data)
+        
+        print(f"\n📤 FINAL RESPONSE:")
+        for opt in options:
+            price_count = len(opt['prices'])
+            price_range = f"₵{min(opt['prices'].values()):.2f} - ₵{max(opt['prices'].values()):.2f}"
+            print(f"  {opt['name']}: {price_count} sizes, {price_range}, avg {opt['delivery_time']['avg']}min")
+        print("="*60 + "\n")
+        
+        return jsonify({
+            'success': True,
+            'data': response_data,
+            'cached': False,
+            'cache_stats': delivery_cache.get_stats()
+        })
+        
+    except Exception as e:
+        print(f"\n❌ Error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ========== CACHE MANAGEMENT ENDPOINTS ==========
+
+@app.route('/api/admin/cache/stats', methods=['GET'])
+@token_required
+@admin_required
+def get_cache_stats():
+    """Get cache statistics"""
+    try:
+        return jsonify({
+            'success': True,
+            'data': delivery_cache.get_stats()
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/admin/cache/clear', methods=['POST'])
+@token_required
+@admin_required
+def clear_cache():
+    """Clear all cache"""
+    try:
+        delivery_cache.clear()
+        return jsonify({
+            'success': True,
+            'message': 'Cache cleared successfully'
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/admin/cache/keys', methods=['GET'])
+@token_required
+@admin_required
+def get_cache_keys():
+    """Get all cache keys"""
+    try:
+        return jsonify({
+            'success': True,
+            'data': {
+                'keys': delivery_cache.get_all_keys(),
+                'total': len(delivery_cache.get_all_keys())
+            }
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ========== DELIVERY STATUS ENDPOINT ==========
+
+@app.route('/api/delivery/status', methods=['GET'])
+@token_required
+def get_delivery_status():
+    """Get real-time delivery status using Digimall analytics"""
+    try:
+        network = request.args.get('network', 'mtn')
+        
+        if network != 'mtn':
+            return jsonify({
+                'success': True,
+                'data': {
+                    'network': network,
+                    'message': 'Delivery status only available for MTN'
+                }
+            })
+        
+        # Get REAL-TIME analytics from Digimall
+        analytics = DeliveryAnalytics.analyze_delivery_performance(network, lookback_hours=24)
+        analytics_data = analytics.get('data', {})
+        
+        pending_orders = analytics_data.get('pending_count', 0)
+        processing_count = analytics_data.get('processing_count', 0)
+        congestion = analytics_data.get('congestion', 'low')
+        congestion_message = analytics_data.get('congestion_message', '')
+        
+        current_hour = datetime.now().hour
+        is_peak_hour = (8 <= current_hour <= 11) or (17 <= current_hour <= 20)
+        
+        from models import DeliverySetting
+        delivery_settings = DeliverySetting.query.filter_by(
+            network=network,
+            is_active=True
+        ).all()
+        
+        if not delivery_settings:
+            default_options = [
+                {
+                    'type': 'express',
+                    'name': 'MTN EXPRESS BUNDLE',
+                    'icon': '⚡',
+                    'color': '#f39c12',
+                    'delivery_time': {'min': 3, 'max': 8, 'avg': 5},
+                    'price_multiplier': 1.15,
+                    'fixed_premium': 0.50,
+                    'queue_length': pending_orders,
+                    'queue_wait': f'{int(pending_orders * 0.2)} min',
+                    'delivery_window': get_delivery_window(5),
+                    'congestion': congestion,
+                    'congestion_message': congestion_message,
+                    'status': 'active'
+                },
+                {
+                    'type': 'master',
+                    'name': 'MTN Master Bundle',
+                    'icon': '👑',
+                    'color': '#8B0000',
+                    'delivery_time': {'min': 2, 'max': 6, 'avg': 4},
+                    'price_multiplier': 1.05,
+                    'fixed_premium': 0,
+                    'queue_length': pending_orders,
+                    'queue_wait': f'{int(pending_orders * 0.3)} min',
+                    'delivery_window': get_delivery_window(4),
+                    'congestion': congestion,
+                    'congestion_message': congestion_message,
+                    'status': 'active',
+                    'recommended': True
+                },
+                {
+                    'type': 'mashup',
+                    'name': 'MTN MASHUP (BUNDLE ONLY)',
+                    'icon': '📦',
+                    'color': '#dc3545',
+                    'delivery_time': {'min': 10, 'max': 60, 'avg': 30},
+                    'price_multiplier': 0.95,
+                    'fixed_premium': 0,
+                    'queue_length': pending_orders,
+                    'queue_wait': f'{int(pending_orders * 0.5)} min',
+                    'delivery_window': get_delivery_window(30),
+                    'congestion': congestion,
+                    'congestion_message': congestion_message,
+                    'status': 'delayed'
+                }
+            ]
+            
+            return jsonify({
+                'success': True,
+                'data': {
+                    'network': network,
+                    'timestamp': datetime.now().isoformat(),
+                    'pending_orders': pending_orders,
+                    'processing_orders': processing_count,
+                    'avg_delivery_time': analytics_data.get('averages_by_type', {}).get('master', {}).get('avg', 5),
+                    'congestion': congestion,
+                    'congestion_message': congestion_message,
+                    'is_peak_hour': is_peak_hour,
+                    'fastest_network': 'mtn',
+                    'fastest_estimate': analytics_data.get('estimated_wait_by_type', {}).get('express', {}).get('estimated_minutes', 4),
+                    'analytics': analytics_data,
+                    'options': default_options
+                }
+            })
+        
+        options = []
+        for setting in delivery_settings:
+            delivery_type = getattr(setting, 'delivery_type', 'standard')
+            
+            estimated_wait = analytics_data.get('estimated_wait_by_type', {}).get(delivery_type, {})
+            
+            if estimated_wait and estimated_wait.get('estimated_minutes'):
+                avg_time = estimated_wait.get('estimated_minutes', 5)
+                delivery_summary = analytics_data.get('delivery_summary', {}).get(delivery_type, {})
+                min_time = delivery_summary.get('min_time', max(1, avg_time - 2))
+                max_time = delivery_summary.get('max_time', avg_time + 3)
+                
+                if min_time <= 0:
+                    min_time = max(1, avg_time - 2)
+                if max_time <= min_time:
+                    max_time = avg_time + 3
+            else:
+                min_time = getattr(setting, 'min_time', 3)
+                max_time = getattr(setting, 'max_time', 8)
+                avg_time = getattr(setting, 'avg_time', 5)
+            
+            now = datetime.now()
+            delivery_window = {
+                'start': (now + timedelta(minutes=int(min_time))).strftime('%I:%M %p'),
+                'end': (now + timedelta(minutes=int(max_time))).strftime('%I:%M %p')
+            }
+            
+            name = get_name_for_type(delivery_type)
+            icon = get_icon_for_type(delivery_type)
+            color = get_color_for_type(delivery_type)
+            
+            options.append({
+                'type': delivery_type,
+                'name': name,
+                'icon': icon,
+                'color': color,
+                'delivery_time': {
+                    'min': int(min_time),
+                    'max': int(max_time),
+                    'avg': int(avg_time),
+                    'unit': 'minutes'
+                },
+                'delivery_window': delivery_window,
+                'price_multiplier': float(getattr(setting, 'multiplier', 1.0)),
+                'fixed_premium': float(getattr(setting, 'fixed_premium', 0)),
+                'queue_length': pending_orders,
+                'queue_wait': f'{int(pending_orders * 0.3)} min',
+                'congestion': congestion,
+                'congestion_message': congestion_message,
+                'status': 'active' if avg_time < 15 else 'delayed' if avg_time < 30 else 'very_delayed',
+                'recommended': delivery_type == 'master',
+                'orders_delivered': analytics_data.get('delivery_summary', {}).get(delivery_type, {}).get('orders_delivered', 0)
+            })
+        
+        options.sort(key=lambda x: x['delivery_time']['avg'])
+        fastest = options[0] if options else None
         
         return jsonify({
             'success': True,
             'data': {
-                'referral_data_balance': float(user.referral_data_balance or 0),
-                'total_referrals': completed_count,
-                'pending_referrals': pending_count,
-                'referrals_needed_for_next': next_reward_at,
-                'reward_amount': '10MB Data',
-                'max_redeemable': 50,  # Max 50MB can be redeemed
-                'redeemable_data': min(float(user.referral_data_balance or 0), 50)
+                'network': network,
+                'timestamp': datetime.now().isoformat(),
+                'pending_orders': pending_orders,
+                'processing_orders': processing_count,
+                'avg_delivery_time': analytics_data.get('averages_by_type', {}).get('master', {}).get('avg', 5),
+                'congestion': congestion,
+                'congestion_message': congestion_message,
+                'is_peak_hour': is_peak_hour,
+                'fastest_network': 'mtn' if fastest else None,
+                'fastest_estimate': fastest['delivery_time']['avg'] if fastest else None,
+                'analytics': analytics_data,
+                'options': options
             }
         })
         
     except Exception as e:
-        print(f"Get referral balance error: {e}")
+        print(f"Error getting delivery status: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
-@app.route('/api/referral/redeem', methods=['POST'])
+
+# ========== DIGIMALL PENDING STATUS ENDPOINT ==========
+
+@app.route('/api/delivery/digimall-status', methods=['GET'])
 @token_required
-def redeem_referral_data():
-    """Redeem referral data for actual data bundle (max 50MB total)"""
+def get_digimall_pending_status():
+    """Fetch real-time pending/delivering status directly from Digimall"""
     try:
-        data = request.get_json()
-        network = data.get('network')
-        mb_amount = data.get('mb', 10)
-        phone = data.get('phone')
+        network = request.args.get('network', 'mtn')
         
-        if not phone:
-            return jsonify({'success': False, 'error': 'Phone number required'}), 400
+        # Use analytics which already combines Digimall + local data
+        analytics = DeliveryAnalytics.analyze_delivery_performance(network, lookback_hours=24)
+        analytics_data = analytics.get('data', {})
         
-        if mb_amount not in [10, 20, 30, 40, 50]:
-            return jsonify({'success': False, 'error': 'Redeem 10, 20, 30, 40, or 50 MB only'}), 400
+        return jsonify({
+            'success': True,
+            'data': {
+                'pending_count': analytics_data.get('pending_count', 0),
+                'processing_count': analytics_data.get('processing_count', 0),
+                'congestion': analytics_data.get('congestion', 'low'),
+                'congestion_color': analytics_data.get('congestion_color', '#28a745'),
+                'message': analytics_data.get('congestion_message', ''),
+                'avg_processing_time': analytics_data.get('averages_by_type', {}).get('master', {}).get('avg', 2),
+                'estimated_wait': analytics_data.get('estimated_wait_by_type', {}).get('master', {}).get('estimated_minutes', 0),
+                'is_peak_hour': (8 <= datetime.now().hour <= 11) or (17 <= datetime.now().hour <= 20),
+                'timestamp': datetime.now().isoformat(),
+                'total_analyzed': analytics_data.get('total_analyzed', 0),
+                'lookback_hours': analytics_data.get('lookback_hours', 24)
+            }
+        })
         
-        user = g.current_user
+    except Exception as e:
+        print(f"Error fetching Digimall status: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ========== DIGIMALL QUEUE DEPTH ENDPOINT ==========
+
+@app.route('/api/delivery/digimall-queue-depth', methods=['GET'])
+@token_required
+def get_digimall_queue_depth():
+    """Get current queue depth from Digimall by checking recent orders"""
+    try:
+        network = request.args.get('network', 'mtn')
         
-        # Check if user has enough referral data
-        if (user.referral_data_balance or 0) < mb_amount:
-            return jsonify({'success': False, 'error': f'Insufficient referral data. You have {user.referral_data_balance or 0} MB'}), 400
+        analytics = DeliveryAnalytics.analyze_delivery_performance(network, lookback_hours=24)
+        analytics_data = analytics.get('data', {})
         
+        pending_count = analytics_data.get('pending_count', 0)
         
-        if not hasattr(user, 'redeemed_referral_data'):
-            user.redeemed_referral_data = 0
+        # Estimated wait time
+        estimated_wait = analytics_data.get('estimated_wait_by_type', {}).get('master', {}).get('estimated_minutes', 0)
         
-        if (user.redeemed_referral_data or 0) + mb_amount > 50:
-            return jsonify({'success': False, 'error': f'Maximum redeemable is 50MB total. You have already redeemed {user.redeemed_referral_data or 0} MB'}), 400
+        return jsonify({
+            'success': True,
+            'data': {
+                'queue_depth': pending_count,
+                'queue_position': pending_count,
+                'estimated_wait_minutes': round(estimated_wait, 1),
+                'avg_processing_time': analytics_data.get('averages_by_type', {}).get('master', {}).get('avg', 2),
+                'timestamp': datetime.now().isoformat()
+            }
+        })
         
-        # Convert MB to GB
-        gb_amount = mb_amount / 1000
+    except Exception as e:
+        print(f"Error getting queue depth: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ========== DELIVERY ANALYTICS ENDPOINT ==========
+
+@app.route('/api/delivery/analytics', methods=['GET'])
+@token_required
+def get_delivery_analytics():
+    """
+    GET /api/delivery/analytics?network=mtn&hours=24
+    Get detailed delivery analytics from Digimall orders (with caching)
+    """
+    try:
+        network = request.args.get('network', 'mtn')
+        hours = request.args.get('hours', 24, type=int)
         
-        # Deduct from referral balance
-        user.referral_data_balance -= mb_amount
-        user.redeemed_referral_data = (user.redeemed_referral_data or 0) + mb_amount
+        # Try cache first
+        cache_key = f"analytics_{network}_{hours}"
+        cached_data = analytics_cache.get(network, hours, 'analytics')
         
-        # Create order record
-        order = Order(
-            user_id=user.id,
-            type='data',
-            network=network,
-            size_gb=gb_amount,
-            phone_number=phone,
-            amount=0,
-            quantity=1,
-            status='completed',
-            payment_method='referral',
-            description=f'Redeemed {mb_amount}MB referral data for {network} data',
-            completed_at=datetime.utcnow(),
-            created_at=datetime.utcnow()
-        )
-        db.session.add(order)
+        if cached_data:
+            return jsonify({
+                'success': True,
+                'data': cached_data,
+                'cached': True,
+                'cache_stats': analytics_cache.get_stats()
+            })
+        
+        analytics = DeliveryAnalytics.analyze_delivery_performance(network, lookback_hours=hours)
+        
+        if analytics.get('success'):
+            analytics_data = analytics.get('data', {})
+            
+            # Store in cache
+            analytics_cache.set(network, hours, 'analytics', analytics_data)
+            
+            return jsonify({
+                'success': True,
+                'data': analytics_data,
+                'cached': False
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'error': 'Failed to analyze delivery performance'
+            }), 500
+            
+    except Exception as e:
+        print(f"Delivery analytics error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+# ========== CHECK PENDING DIGIMALL ORDERS ==========
+
+@app.route('/api/delivery/check-pending-digimall', methods=['GET'])
+@token_required
+def check_pending_digimall_orders():
+    """Check pending orders directly from Digimall without relying on database"""
+    try:
+        digimall = DigimallService()
+        
+        recent_orders = Order.query.filter(
+            Order.provider_order_id.isnot(None),
+            Order.created_at >= datetime.now() - timedelta(days=7)
+        ).all()
+        
+        if not recent_orders:
+            return jsonify({
+                'success': False,
+                'message': 'No orders with Digimall IDs found in database'
+            }), 404
+        
+        identifiers = [order.provider_order_id for order in recent_orders if order.provider_order_id]
+        
+        bulk_result = digimall.bulk_check_order_status(identifiers)
+        
+        if not bulk_result.get('success'):
+            return jsonify({
+                'success': False,
+                'error': bulk_result.get('error', 'Failed to fetch from Digimall')
+            }), 500
+        
+        pending_orders = []
+        delivered_orders = []
+        
+        for order_status in bulk_result.get('orders', []):
+            if order_status.get('found'):
+                order_info = {
+                    'order_id': order_status.get('orderId'),
+                    'reference': order_status.get('reference'),
+                    'status': order_status.get('status'),
+                    'recipient': order_status.get('recipient'),
+                    'volume': order_status.get('volume'),
+                    'timestamp': order_status.get('timestamp')
+                }
+                
+                if order_status.get('status') in ['pending', 'processing']:
+                    pending_orders.append(order_info)
+                else:
+                    delivered_orders.append(order_info)
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'total_checked': len(identifiers),
+                'pending_count': len(pending_orders),
+                'pending_orders': pending_orders,
+                'delivered_count': len(delivered_orders),
+                'delivered_orders': delivered_orders,
+                'timestamp': datetime.now().isoformat()
+            }
+        })
+        
+    except Exception as e:
+        print(f"Error checking Digimall orders: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ========== SYNC DIGIMALL ORDERS ==========
+
+@app.route('/api/delivery/sync-digimall-orders', methods=['POST'])
+@token_required
+@admin_required
+def sync_digimall_orders():
+    """Sync pending orders from Digimall to update local database status"""
+    try:
+        digimall = DigimallService()
+        
+        recent_orders = Order.query.filter(
+            Order.provider_order_id.isnot(None),
+            Order.created_at >= datetime.now() - timedelta(days=7)
+        ).all()
+        
+        if not recent_orders:
+            return jsonify({
+                'success': False,
+                'message': 'No orders with Digimall IDs found in database'
+            }), 404
+        
+        identifiers = []
+        order_map = {}
+        for order in recent_orders:
+            if order.provider_order_id:
+                identifiers.append(order.provider_order_id)
+                order_map[order.provider_order_id] = order
+        
+        print(f"📊 Checking {len(identifiers)} orders with Digimall...")
+        
+        bulk_result = digimall.bulk_check_order_status(identifiers)
+        
+        if not bulk_result.get('success'):
+            return jsonify({
+                'success': False,
+                'error': bulk_result.get('error', 'Failed to fetch from Digimall')
+            }), 500
+        
+        updated_orders = []
+        for digimall_order in bulk_result.get('orders', []):
+            if digimall_order.get('found'):
+                digimall_id = digimall_order.get('identifier') or digimall_order.get('orderId')
+                digimall_status = digimall_order.get('status')
+                
+                if digimall_id in order_map:
+                    local_order = order_map[digimall_id]
+                    old_status = local_order.delivery_status
+                    
+                    status_map = {
+                        'pending': 'pending',
+                        'processing': 'processing',
+                        'delivered': 'delivered',
+                        'failed': 'failed',
+                        'cancelled': 'cancelled'
+                    }
+                    
+                    new_status = status_map.get(digimall_status, old_status)
+                    
+                    if old_status != new_status:
+                        local_order.delivery_status = new_status
+                        local_order.delivery_status_updated_at = datetime.utcnow()
+                        
+                        if new_status == 'delivered':
+                            local_order.completed_at = datetime.utcnow()
+                        
+                        updated_orders.append({
+                            'order_id': local_order.order_id,
+                            'old_status': old_status,
+                            'new_status': new_status,
+                            'digimall_status': digimall_status
+                        })
+                        
+                        print(f"  Updated {local_order.order_id}: {old_status} -> {new_status}")
         
         db.session.commit()
         
-        # Send data to network provider
-        send_data_delivery_to_provider(phone, f"✅ Your {mb_amount}MB {network.upper()} data (earned from referrals on {COMPANY_NAME}) has been delivered!")
-        
-        # Send email confirmation
-        send_email(
-            user.email,
-            f"Referral Data Redeemed - {mb_amount}MB - {COMPANY_NAME}",
-            f"""
-            <div style="font-family: Arial, sans-serif;">
-                <h2 style="color: #8B0000;">Referral Data Redeemed Successfully!</h2>
-                <p>Dear {user.username},</p>
-                <p>You have successfully redeemed <strong>{mb_amount}MB</strong> of referral data for:</p>
-                <h3>{network.upper()} Data</h3>
-                <p><strong>Phone Number:</strong> {phone}</p>
-                <p><strong>Remaining Referral Data:</strong> {user.referral_data_balance} MB</p>
-                <p><strong>Total Redeemed:</strong> {user.redeemed_referral_data} MB (Max 50MB)</p>
-                <p>Your data has been sent to your phone number!</p>
-                <a href="{COMPANY_WEBSITE}/referrals" style="background: #8B0000; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">View Referrals</a>
-            </div>
-            """
-        )
-        
         return jsonify({
             'success': True,
-            'message': f'Successfully redeemed {mb_amount}MB for {network} data',
+            'message': f'Successfully synced {len(updated_orders)} orders',
             'data': {
-                'redeemed_mb': mb_amount,
-                'remaining_referral_data': user.referral_data_balance,
-                'total_redeemed': user.redeemed_referral_data,
-                'max_redeemable': 50
+                'total_checked': len(identifiers),
+                'updated_orders': updated_orders,
+                'digimall_response': bulk_result
             }
         })
         
     except Exception as e:
-        print(f"Redeem referral data error: {e}")
+        print(f"Error syncing Digimall orders: {e}")
         db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
-    
-@app.route('/api/referral/list', methods=['GET'])
-@token_required
-def get_referral_list():
-    """Get list of user's referrals with status"""
+
+
+# ========== DELIVERY ORDER STATUS WEBHOOK ==========
+
+@app.route('/api/delivery/order-status', methods=['POST'])
+def update_order_delivery_status():
+    """Webhook to update order status when data is sent"""
     try:
-        page = request.args.get('page', 1, type=int)
-        per_page = request.args.get('limit', 20, type=int)
+        data = request.get_json()
+        order_id = data.get('order_id')
+        status = data.get('status')
+        provider_response = data.get('provider_response', {})
         
-        pagination = Referral.query.filter_by(
-            referrer_id=g.current_user.id
-        ).order_by(Referral.created_at.desc()).paginate(
-            page=page, per_page=per_page, error_out=False
-        )
+        order = Order.query.filter_by(order_id=order_id).first()
+        if not order:
+            return jsonify({'success': False, 'error': 'Order not found'}), 404
         
-        referrals_data = []
-        for r in pagination.items:
-            referred_user = User.query.get(r.referred_id)
-            referrals_data.append({
-                'id': r.id,
-                'username': referred_user.username if referred_user else 'Unknown',
-                'email': referred_user.email if referred_user else 'Unknown',
-                'phone': referred_user.phone if referred_user else 'Unknown',
-                'status': r.status,
-                'registered_at': r.created_at.isoformat(),
-                'completed_at': r.completed_at.isoformat() if r.completed_at else None,
-                'reward': '1 point towards 10MB' if r.status == 'completed' else 'Pending first purchase'
-            })
+        old_status = order.delivery_status
+        order.delivery_status = status
+        order.delivery_status_updated_at = datetime.utcnow()
+        
+        if status == 'delivered':
+            order.completed_at = datetime.utcnow()
+        
+        db.session.commit()
+        
+        trigger_websocket_update(order.agent_id, order_id, status)
         
         return jsonify({
             'success': True,
-            'data': referrals_data,
-            'total': pagination.total,
-            'page': page,
-            'total_pages': pagination.pages
+            'message': f'Order {order_id} status updated to {status}'
         })
         
     except Exception as e:
-        print(f"Get referral list error: {e}")
+        print(f"Error updating order status: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ========== SWITCH DELIVERY OPTION ==========
+
+@app.route('/api/delivery/switch', methods=['POST'])
+@token_required
+def switch_delivery_option():
+    """Switch to a different delivery option for an order"""
+    try:
+        data = request.get_json()
+        order_id = data.get('order_id')
+        new_offer_slug = data.get('offer_slug')
+        
+        order = Order.query.filter_by(order_id=order_id).first()
+        if not order:
+            return jsonify({'success': False, 'error': 'Order not found'}), 404
+        
+        if order.delivery_status not in ['pending', 'queued']:
+            return jsonify({'success': False, 'error': f'Cannot switch order in {order.delivery_status} status'}), 400
+        
+        order.provider_offer_slug = new_offer_slug
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': 'Delivery option updated successfully',
+            'data': {
+                'order_id': order_id,
+                'new_offer_slug': new_offer_slug
+            }
+        })
+        
+    except Exception as e:
+        print(f"Switch delivery option error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ========== DELIVERY ESTIMATES ENDPOINT ==========
+
+delivery_estimates_cache = {
+    'data': None,
+    'last_updated': 0,
+    'ttl': 30
+}
+
+@app.route('/api/delivery/estimates', methods=['GET'])
+@token_required
+def get_delivery_estimates():
+    """Get real-time delivery estimates for all networks with caching"""
+    try:
+        import time
+        current_time = time.time()
+        
+        if delivery_estimates_cache['data'] and delivery_estimates_cache['last_updated']:
+            cache_age = current_time - delivery_estimates_cache['last_updated']
+            if cache_age < delivery_estimates_cache['ttl']:
+                return jsonify({
+                    'success': True,
+                    'data': delivery_estimates_cache['data'],
+                    'cached': True,
+                    'cache_age': int(cache_age)
+                })
+        
+        networks = ['mtn', 'telecel', 'airteltigo']
+        estimates = {}
+        
+        for network in networks:
+            analytics = DeliveryAnalytics.analyze_delivery_performance(network, lookback_hours=24)
+            analytics_data = analytics.get('data', {})
+            
+            estimated_wait = analytics_data.get('estimated_wait_by_type', {}).get('master', {})
+            avg_time = estimated_wait.get('estimated_minutes', 5)
+            
+            if avg_time <= 2:
+                status = 'excellent'
+                congestion = 'low'
+            elif avg_time <= 5:
+                status = 'good'
+                congestion = 'low'
+            elif avg_time <= 10:
+                status = 'fair'
+                congestion = 'medium'
+            else:
+                status = 'poor'
+                congestion = 'high'
+            
+            estimates[network] = {
+                'min': max(1, avg_time - 2),
+                'max': avg_time + 3,
+                'avg': avg_time,
+                'unit': 'minutes',
+                'network_status': status,
+                'congestion': congestion,
+                'pending_orders': analytics_data.get('pending_count', 0)
+            }
+        
+        fastest_network = min(estimates.items(), key=lambda x: x[1]['avg'])
+        
+        response_data = {
+            'estimates': estimates,
+            'fastest_network': {
+                'network': fastest_network[0],
+                'avg_time': fastest_network[1]['avg']
+            },
+            'last_updated': datetime.utcnow().isoformat(),
+            'refresh_interval': 30
+        }
+        
+        delivery_estimates_cache['data'] = response_data
+        delivery_estimates_cache['last_updated'] = current_time
+        
+        return jsonify({
+            'success': True,
+            'data': response_data
+        })
+        
+    except Exception as e:
+        print(f"Error getting delivery estimates: {e}")
+        fallback_estimates = {
+            'mtn': {'min': 2, 'max': 5, 'avg': 3, 'unit': 'minutes', 'network_status': 'excellent', 'congestion': 'low', 'pending_orders': 0},
+            'telecel': {'min': 3, 'max': 8, 'avg': 5, 'unit': 'minutes', 'network_status': 'good', 'congestion': 'medium', 'pending_orders': 0},
+            'airteltigo': {'min': 3, 'max': 7, 'avg': 4, 'unit': 'minutes', 'network_status': 'excellent', 'congestion': 'low', 'pending_orders': 0}
+        }
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'estimates': fallback_estimates,
+                'fastest_network': {'network': 'mtn', 'avg_time': 3},
+                'last_updated': datetime.utcnow().isoformat(),
+                'refresh_interval': 30
+            }
+        }), 200
+
+
+# ========== HELPER FUNCTIONS ==========
+
+def get_name_for_type(delivery_type):
+    """Get display name for delivery type"""
+    names = {
+        'express': 'MTN EXPRESS BUNDLE',
+        'master': 'MTN Master Bundle',
+        'mashup': 'MTN MASHUP (BUNDLE ONLY)',
+        'standard': 'Standard Delivery'
+    }
+    return names.get(delivery_type, 'MTN Data Bundle')
+
+def get_icon_for_type(delivery_type):
+    """Get icon for delivery type"""
+    icons = {
+        'express': '⚡',
+        'master': '👑',
+        'mashup': '📦',
+        'standard': '📱'
+    }
+    return icons.get(delivery_type, '📱')
+
+def get_color_for_type(delivery_type):
+    """Get color for delivery type"""
+    colors = {
+        'express': '#f39c12',
+        'master': '#8B0000',
+        'mashup': '#dc3545',
+        'standard': '#3498db'
+    }
+    return colors.get(delivery_type, '#3498db')
+
+def get_delivery_window(avg_time):
+    """Calculate delivery window based on average time"""
+    now = datetime.now()
+    start = now + timedelta(minutes=int(avg_time * 0.7))
+    end = now + timedelta(minutes=int(avg_time * 1.3))
+    return {
+        'start': start.strftime('%I:%M %p'),
+        'end': end.strftime('%I:%M %p')
+    }
+
+
+def trigger_websocket_update(agent_id, order_id, status):
+    """Trigger WebSocket update for real-time notifications"""
+    try:
+        # Import socketio instance if available
+        try:
+            from extensions import socketio
+            socketio.emit('order_status_update', {
+                'order_id': order_id,
+                'status': status,
+                'agent_id': agent_id,
+                'timestamp': datetime.now().isoformat()
+            }, room=f'agent_{agent_id}')
+        except:
+            pass
+    except Exception as e:
+        print(f"WebSocket update error: {e}")
+
+
 # ========== WAEC VOUCHER ENDPOINTS ==========
 
 @app.route('/api/waec/vouchers', methods=['GET'])
@@ -5464,6 +8555,9 @@ def create_order():
         phone = data.get('phone')
         payment_method = data.get('payment_method', 'wallet')
         quantity = data.get('quantity', 1)
+        delivery_type = data.get('delivery_type', 'master')  # Get delivery type from request
+        
+        print(f"📦 Delivery Type: {delivery_type}")
         
         # Check required fields
         missing = []
@@ -5485,22 +8579,56 @@ def create_order():
         print(f"  Is Agent: {is_agent}")
         print(f"  Network: {network}")
         print(f"  Size: {size_gb}GB")
+        print(f"  Delivery Type: {delivery_type}")
         
+        # Get price based on delivery type
+        from models import PriceSetting
+        
+        # Try to get delivery-specific price first
         if is_agent:
-            unit_price = get_agent_price(network, size_gb)
-            print(f"  Agent price: ₵{unit_price}")
+            # Agent price with delivery type
+            price_setting = PriceSetting.query.filter_by(
+                category='agent_price',
+                network=network,
+                size_gb=size_gb,
+                delivery_type=delivery_type,
+                is_available=True
+            ).first()
+            
+            if price_setting:
+                unit_price = float(price_setting.price)
+                print(f"  Agent {delivery_type} price: ₵{unit_price}")
+            else:
+                # Fallback to base agent price
+                unit_price = get_agent_price(network, size_gb)
+                print(f"  Agent base price: ₵{unit_price}")
         else:
-            unit_price = get_user_price(network, size_gb)
-            print(f"  User price: ₵{unit_price}")
+            # User price with delivery type
+            price_setting = PriceSetting.query.filter_by(
+                category='user_price',
+                network=network,
+                size_gb=size_gb,
+                delivery_type=delivery_type,
+                is_available=True
+            ).first()
+            
+            if price_setting:
+                unit_price = float(price_setting.price)
+                print(f"  User {delivery_type} price: ₵{unit_price}")
+            else:
+                # Fallback to base user price
+                unit_price = get_user_price(network, size_gb)
+                print(f"  User base price: ₵{unit_price}")
         
         if unit_price == 0:
             return jsonify({
                 'success': False, 
-                'error': f'Price not configured for {network} {size_gb}GB. Please contact admin.',
+                'error': f'Price not configured for {network} {size_gb}GB ({delivery_type}). Please contact admin.',
                 'debug': {
                     'network': network,
                     'size_gb': size_gb,
-                    'is_agent': is_agent
+                    'is_agent': is_agent,
+                    'delivery_type': delivery_type
                 }
             }), 400
         
@@ -5527,6 +8655,27 @@ def create_order():
         # Generate order ID
         order_id = f"ORD-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{g.current_user.id}"
         
+        # Get the offer_slug for Digimall based on delivery_type
+        from models import DeliverySetting
+        delivery_setting = DeliverySetting.query.filter_by(
+            network=network,
+            delivery_type=delivery_type,
+            is_active=True
+        ).first()
+        
+        if delivery_setting and delivery_setting.offer_slug:
+            offer_slug = delivery_setting.offer_slug
+            print(f"📦 Using offer_slug: {offer_slug}")
+        else:
+            # Fallback defaults
+            if delivery_type == 'express':
+                offer_slug = 'mtn_express_bundle'
+            elif delivery_type == 'master':
+                offer_slug = 'mtn_master_bundle'
+            else:
+                offer_slug = 'standard_bundle'
+            print(f"📦 Using fallback offer_slug: {offer_slug}")
+        
         # Create order with delivery status tracking
         order = Order(
             user_id=g.current_user.id,
@@ -5541,10 +8690,29 @@ def create_order():
             delivery_status='pending',
             delivery_status_updated_at=datetime.utcnow(),
             payment_method=payment_method,
+            delivery_type=delivery_type,  # Store the delivery type
+            offer_slug=offer_slug,  # Store the offer_slug
             created_at=datetime.utcnow()
         )
         db.session.add(order)
         db.session.flush()
+        
+        # ========== CHECK REFERRAL COMPLETION ==========
+        # Check if this is the user's first completed order
+        # We need to check BEFORE marking this order as completed
+        previous_orders = Order.query.filter(
+            Order.user_id == g.current_user.id,
+            Order.status == 'completed'
+        ).count()
+        
+        # Check if this user was referred by someone
+        referred_by_user = None
+        if g.current_user.referred_by:
+            referred_by_user = User.query.get(g.current_user.referred_by)
+        
+        print(f"\n[REFERRAL CHECK]")
+        print(f"  Previous completed orders: {previous_orders}")
+        print(f"  Referred by: {referred_by_user.username if referred_by_user else 'None'}")
         
         if payment_method == 'wallet':
             # Initialize Digimall service for delivery only
@@ -5565,7 +8733,7 @@ def create_order():
                 amount=total_price,
                 balance_before=balance_before,
                 balance_after=g.current_user.wallet_balance,
-                description=f'Purchase: {quantity}x {network} {size_gb}GB to {phone}',
+                description=f'Purchase: {quantity}x {network} {size_gb}GB to {phone} ({delivery_type})',
                 reference=order_id,
                 status='pending'
             )
@@ -5590,12 +8758,15 @@ def create_order():
                 print(f"  Network: {network}")
                 print(f"  Volume: {size_gb}GB")
                 print(f"  Phone: {formatted_phone}")
+                print(f"  Offer Slug: {offer_slug}")
+                print(f"  Delivery Type: {delivery_type}")
                 
                 # Call deliver_data with correct parameters
                 digimall_response = digimall.deliver_data(
                     network=network,
                     phone_number=formatted_phone,
-                    volume=size_gb
+                    volume=size_gb,
+                    offer_slug=offer_slug  # Pass the correct offer_slug
                 )
                 
                 print(f"  Response: {digimall_response}")
@@ -5613,6 +8784,39 @@ def create_order():
                     transaction.status = 'completed'
                     db.session.commit()
                     
+                    # ========== COMPLETE REFERRAL AFTER SUCCESSFUL ORDER ==========
+                    # Check if this is the first purchase and user was referred
+                    if previous_orders == 0 and referred_by_user:
+                        referral = Referral.query.filter_by(
+                            referrer_id=referred_by_user.id,
+                            referred_user_id=g.current_user.id,
+                            status='pending'
+                        ).first()
+                        
+                        if referral:
+                            # Complete the referral
+                            referral.status = 'completed'
+                            referral.completed_at = datetime.utcnow()
+                            
+                            # Award points to referrer
+                            points_awarded = POINTS_CONFIG['REFERRAL_POINTS']  # 1 point
+                            referred_by_user.points_balance = (referred_by_user.points_balance or 0) + points_awarded
+                            referred_by_user.total_points_earned = (referred_by_user.total_points_earned or 0) + points_awarded
+                            
+                            # Create points transaction for referrer
+                            points_trans = PointsTransaction(
+                                user_id=referred_by_user.id,
+                                points=points_awarded,
+                                type='referral_bonus',
+                                description=f'Referral bonus for {g.current_user.username}\'s first purchase',
+                                reference=referral.referral_code,
+                                balance_after=referred_by_user.points_balance
+                            )
+                            db.session.add(points_trans)
+                            
+                            db.session.commit()
+                            print(f"✅ Referral completed! {referred_by_user.username} earned {points_awarded} point(s)")
+                    
                     return jsonify({
                         'success': True,
                         'data': {
@@ -5621,9 +8825,11 @@ def create_order():
                             'amount': float(total_price),
                             'provider_order_id': digimall_response.get('orderId'),
                             'provider_status': digimall_response.get('status'),
-                            'delivery_status': order.delivery_status
+                            'delivery_status': order.delivery_status,
+                            'delivery_type': delivery_type,
+                            'offer_slug': offer_slug
                         },
-                        'message': f'✅ {size_gb}GB {network.upper()} data ordered. Delivery in progress...'
+                        'message': f'✅ {size_gb}GB {network.upper()} {delivery_type} bundle ordered. Delivery in progress...'
                     })
                 else:
                     # Delivery failed - refund
@@ -5696,7 +8902,8 @@ def create_order():
                     'order_id': order_id,
                     'reference': reference,
                     'amount': total_price,
-                    'delivery_status': 'pending'
+                    'delivery_status': 'pending',
+                    'delivery_type': delivery_type
                 },
                 'payment_instructions': {
                     'mobile_money_number': COMPANY_PHONE,
@@ -5714,7 +8921,60 @@ def create_order():
         db.session.rollback()
         
         return jsonify({'success': False, 'error': str(e)}), 500
-    
+
+# Add this function to check and complete referrals
+
+def check_and_complete_referral(user):
+    """Check if user was referred and complete the referral on first purchase"""
+    try:
+        # Check if this is the user's first completed order
+        previous_orders = Order.query.filter(
+            Order.user_id == user.id,
+            Order.status == 'completed'
+        ).count()
+        
+        # If this is the first order (previous count is 0 before adding this one)
+        if previous_orders == 0:
+            # Check if this user was referred by someone
+            if user.referred_by:
+                referrer = User.query.get(user.referred_by)
+                if referrer:
+                    # Find the pending referral
+                    referral = Referral.query.filter_by(
+                        referrer_id=referrer.id,
+                        referred_user_id=user.id,
+                        status='pending'
+                    ).first()
+                    
+                    if referral:
+                        # Complete the referral
+                        referral.status = 'completed'
+                        referral.completed_at = datetime.utcnow()
+                        
+                        # Award points to referrer
+                        points_awarded = POINTS_CONFIG['REFERRAL_POINTS']  # 1 point
+                        referrer.points_balance = (referrer.points_balance or 0) + points_awarded
+                        referrer.total_points_earned = (referrer.total_points_earned or 0) + points_awarded
+                        
+                        # Create points transaction for referrer
+                        points_trans = PointsTransaction(
+                            user_id=referrer.id,
+                            points=points_awarded,
+                            type='referral_bonus',
+                            description=f'Referral bonus for {user.username}\'s first purchase',
+                            reference=referral.referral_code,
+                            balance_after=referrer.points_balance
+                        )
+                        db.session.add(points_trans)
+                        
+                        db.session.commit()
+                        print(f"✅ Referral completed! {referrer.username} earned {points_awarded} point(s)")
+                        return True
+        return False
+    except Exception as e:
+        print(f"Error checking referral: {e}")
+        return False
+
 @app.route('/api/order/bulk', methods=['POST'])
 @token_required
 @agent_required
@@ -5979,13 +9239,31 @@ def bulk_check_digimall_status():
         digimall = DigimallService()
         results = []
         
-        for identifier in identifiers[:20]:  # Limit to 20 per request
+        # Limit to 20 per request to avoid timeouts
+        for identifier in identifiers[:20]:
             try:
-                result = digimall.check_delivery_status(identifier)
+                # FIXED: Use check_order_status (not check_delivery_status)
+                result = digimall.check_order_status(identifier)
                 
-                if result.get('success'):
-                    order_data = result.get('order', {})
-                    status = order_data.get('status')
+                # Handle different response formats
+                if result.get('success') or result.get('found'):
+                    # Extract status from various possible response formats
+                    status = None
+                    order_data = {}
+                    
+                    if result.get('order'):
+                        order_data = result.get('order', {})
+                        status = order_data.get('status')
+                    elif result.get('data'):
+                        order_data = result.get('data', {})
+                        status = order_data.get('status')
+                    else:
+                        status = result.get('status')
+                        order_data = result
+                    
+                    # If no status found, try to get it from the result directly
+                    if not status:
+                        status = result.get('status')
                     
                     # Update local database
                     order = Order.query.filter(
@@ -5993,6 +9271,7 @@ def bulk_check_digimall_status():
                         (Order.order_id == identifier)
                     ).first()
                     
+                    updated = False
                     if order and status and status != order.delivery_status:
                         old_status = order.delivery_status
                         order.delivery_status = status
@@ -6000,19 +9279,21 @@ def bulk_check_digimall_status():
                         if status == 'delivered':
                             order.completed_at = datetime.utcnow()
                         db.session.commit()
+                        updated = True
                         print(f"[DIGIMALL BULK] Updated order {order.order_id}: {old_status} -> {status}")
                     
                     results.append({
                         'identifier': identifier,
                         'status': status,
-                        'found': True
+                        'found': True,
+                        'updated': updated
                     })
                 else:
                     results.append({
                         'identifier': identifier,
                         'status': None,
                         'found': False,
-                        'error': result.get('error')
+                        'error': result.get('error', 'Order not found')
                     })
             except Exception as e:
                 print(f"[DIGIMALL BULK] Error checking {identifier}: {e}")
@@ -6025,16 +9306,22 @@ def bulk_check_digimall_status():
         
         db.session.commit()
         
+        # Count found orders
+        found_count = sum(1 for r in results if r.get('found'))
+        
         return jsonify({
             'success': True,
             'results': results,
-            'total': len(results)
+            'total': len(results),
+            'found': found_count,
+            'notFound': len(results) - found_count
         })
         
     except Exception as e:
         print(f"Bulk status check error: {e}")
         import traceback
         traceback.print_exc()
+        db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
@@ -6046,11 +9333,29 @@ def check_single_order_status(identifier):
         print(f"[DIGIMALL] Checking status for identifier: {identifier}")
         
         digimall = DigimallService()
-        result = digimall.check_delivery_status(identifier)
         
-        if result.get('success'):
-            order_data = result.get('order', {})
-            status = order_data.get('status')
+        # FIXED: Use check_order_status (not check_delivery_status)
+        result = digimall.check_order_status(identifier)
+        
+        # Handle different response formats
+        if result.get('success') or result.get('found'):
+            # Extract status from various possible response formats
+            status = None
+            order_data = {}
+            
+            if result.get('order'):
+                order_data = result.get('order', {})
+                status = order_data.get('status')
+            elif result.get('data'):
+                order_data = result.get('data', {})
+                status = order_data.get('status')
+            else:
+                status = result.get('status')
+                order_data = result
+            
+            # If no status found, try to get it from the result directly
+            if not status:
+                status = result.get('status')
             
             # Update local database
             order = Order.query.filter(
@@ -6058,6 +9363,7 @@ def check_single_order_status(identifier):
                 (Order.order_id == identifier)
             ).first()
             
+            updated = False
             if order and status:
                 old_status = order.delivery_status
                 if status != old_status:
@@ -6066,6 +9372,7 @@ def check_single_order_status(identifier):
                     if status == 'delivered':
                         order.completed_at = datetime.utcnow()
                     db.session.commit()
+                    updated = True
                     print(f"[DIGIMALL] Updated order {order.order_id}: {old_status} -> {status}")
                 
                 return jsonify({
@@ -6073,7 +9380,7 @@ def check_single_order_status(identifier):
                     'status': status,
                     'order_id': order.order_id,
                     'provider_status': order_data,
-                    'updated': status != old_status
+                    'updated': updated
                 })
             else:
                 return jsonify({
@@ -6084,14 +9391,14 @@ def check_single_order_status(identifier):
                     'updated': False
                 })
         
-        return jsonify({'success': False, 'error': result.get('error')}), 400
+        return jsonify({'success': False, 'error': result.get('error', 'Order not found')}), 400
         
     except Exception as e:
         print(f"Check order status error: {e}")
         import traceback
         traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
-
+    
 @app.route('/api/admin/digimall-balance', methods=['GET'])
 @token_required
 @admin_required
@@ -9001,6 +12308,7 @@ def get_agent_dashboard():
         return jsonify({'success': False, 'error': 'Failed to fetch dashboard data'}), 500
 
 
+
 @app.route('/api/agent/sell', methods=['POST'])
 @token_required
 @agent_required
@@ -9020,6 +12328,8 @@ def agent_sell():
         customer_name = data.get('customer_name')
         quantity = data.get('quantity', 1)
         selling_price = data.get('selling_price')
+        delivery_type = data.get('delivery_type', 'master')
+        offer_slug = data.get('offer_slug')
         
         print(f"📱 Network: {network}")
         print(f"💾 Size GB: {size_gb}")
@@ -9027,13 +12337,56 @@ def agent_sell():
         print(f"👤 Customer: {customer_name}")
         print(f"🔢 Quantity: {quantity}")
         print(f"💰 Selling Price (provided): {selling_price}")
+        print(f"🚀 Delivery Type: {delivery_type}")
+        print(f"📦 Offer Slug (from frontend): {offer_slug}")
         
         if not all([network, size_gb, phone]):
             return jsonify({'success': False, 'error': 'Missing required fields'}), 400
         
-        # Get agent's wholesale price from database
-        agent_cost = get_agent_price(network, size_gb)
-        print(f"💰 Agent Wholesale Cost: GHS {agent_cost}")
+        # ========== GET AGENT WHOLESALE PRICE WITH DELIVERY TYPE ==========
+        print(f"\n{'='*60}")
+        print(f"🔍 GETTING AGENT WHOLESALE PRICE FOR {delivery_type.upper()}")
+        print(f"{'='*60}")
+        
+        # Get delivery-specific price
+        from models import PriceSetting
+        
+        # Method 1: Try delivery-specific price
+        print(f"\n📊 Method 1: Checking delivery-specific price for {delivery_type}")
+        setting = PriceSetting.query.filter_by(
+            category='agent_price',
+            network=network,
+            size_gb=size_gb,
+            delivery_type=delivery_type,
+            is_available=True
+        ).first()
+        
+        if setting:
+            agent_cost = float(setting.price)
+            print(f"   ✅ Found {delivery_type} price: ₵{agent_cost}")
+            print(f"   📋 PriceSetting record: id={setting.id}, category={setting.category}, network={setting.network}, size_gb={setting.size_gb}, delivery_type={setting.delivery_type}, price={setting.price}")
+        else:
+            print(f"   ⚠️ No {delivery_type} price found, checking base price...")
+            
+            # Method 2: Fallback to base price
+            setting = PriceSetting.query.filter_by(
+                category='agent_price',
+                network=network,
+                size_gb=size_gb,
+                delivery_type=None,
+                is_available=True
+            ).first()
+            
+            if setting:
+                agent_cost = float(setting.price)
+                print(f"   ✅ Found base price: ₵{agent_cost}")
+                print(f"   📋 PriceSetting record: id={setting.id}, category={setting.category}, network={setting.network}, size_gb={setting.size_gb}, price={setting.price}")
+            else:
+                agent_cost = 0
+                print(f"   ❌ No price found for {network} {size_gb}GB")
+        
+        print(f"\n💰 FINAL Agent Wholesale Cost: GHS {agent_cost}")
+        print(f"{'='*60}\n")
         
         if agent_cost == 0:
             return jsonify({'success': False, 'error': f'Price not configured for {network} {size_gb}GB'}), 400
@@ -9064,6 +12417,30 @@ def agent_sell():
         order_id = f"ORD-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{g.current_user.id}"
         print(f"🆔 Generated Order ID: {order_id}")
         
+        # Get the offer_slug from delivery_settings if not provided
+        if not offer_slug:
+            from models import DeliverySetting
+            delivery_setting = DeliverySetting.query.filter_by(
+                network=network,
+                delivery_type=delivery_type,
+                is_active=True
+            ).first()
+            
+            if delivery_setting and delivery_setting.offer_slug:
+                offer_slug = delivery_setting.offer_slug
+                print(f"📦 Found offer_slug in delivery_settings: {offer_slug}")
+            else:
+                # Fallback defaults
+                if delivery_type == 'express':
+                    offer_slug = 'mtn_express_bundle'
+                elif delivery_type == 'master':
+                    offer_slug = 'mtn_master_bundle'
+                else:
+                    offer_slug = 'standard_bundle'
+                print(f"📦 Using fallback offer_slug: {offer_slug}")
+        
+        print(f"📦 FINAL OFFER_SLUG: {offer_slug}")
+        
         # Deduct from agent's wallet
         balance_before = g.current_user.wallet_balance
         g.current_user.wallet_balance -= total_cost
@@ -9088,7 +12465,9 @@ def agent_sell():
             delivery_status_updated_at=datetime.utcnow(),
             payment_method='wallet',
             completed_at=datetime.utcnow(),
-            created_at=datetime.utcnow()
+            created_at=datetime.utcnow(),
+            delivery_type=delivery_type,
+            offer_slug=offer_slug
         )
         db.session.add(order)
         print(f"📝 Order created in database (ID: {order.id})")
@@ -9100,7 +12479,7 @@ def agent_sell():
             amount=total_cost,
             balance_before=balance_before,
             balance_after=g.current_user.wallet_balance,
-            description=f'Sale: {quantity}x {size_gb}GB {network} to {phone} (Cost: GHS {total_cost:.2f})',
+            description=f'Sale: {quantity}x {size_gb}GB {network} to {phone} ({delivery_type})',
             reference=order_id,
             status='completed'
         )
@@ -9138,44 +12517,32 @@ def agent_sell():
         db.session.commit()
         print(f"💾 Database changes committed")
         
-        # ========== DIGIMALL DELIVERY WITH FULL DEBUG ==========
+        # ========== DIGIMALL DELIVERY ==========
         print(f"\n{'='*60}")
         print(f"📡 DIGIMALL DELIVERY START")
         print(f"{'='*60}")
         
         digimall_result = None
         try:
-            # Check if DigimallService is available
-            print(f"🔧 Initializing DigimallService...")
             digimall = DigimallService()
-            
-            # Log Digimall configuration
-            print(f"🔑 API Key exists: {bool(digimall.api_key)}")
-            if digimall.api_key:
-                print(f"🔑 API Key (first 10 chars): {digimall.api_key[:10]}...")
-            print(f"🌐 Base URL: {digimall.base_url}")
-            print(f"🔗 Webhook URL: {digimall.webhook_url}")
-            
-            webhook_url = f"{current_app.config.get('BASE_URL', 'https://roamsmart-backend-production.up.railway.app')}/api/webhooks/digimall"
-            print(f"🔗 Generated Webhook URL: {webhook_url}")
             
             print(f"\n📤 Calling digimall.deliver_data with:")
             print(f"   network: {network}")
             print(f"   phone_number: {phone}")
             print(f"   volume: {size_gb}")
+            print(f"   offer_slug: {offer_slug}")
             
-            # Make the Digimall call
             digimall_result = digimall.deliver_data(
                 network=network, 
                 phone_number=phone,
-                volume=size_gb
+                volume=size_gb,
+                offer_slug=offer_slug
             )
             
             print(f"\n📥 Digimall Response:")
             print(f"   Result: {digimall_result}")
             
-            if digimall_result and digimall_result.get('success'):
-                # Update order with Digimall info
+            if digimall_result and digimall_result.get('orderId'):
                 order.provider = 'digimall'
                 order.provider_order_id = digimall_result.get('orderId')
                 order.provider_reference = digimall_result.get('reference')
@@ -9202,7 +12569,6 @@ def agent_sell():
             print(f"   Error type: {type(e).__name__}")
             print(f"   Error message: {str(e)}")
             import traceback
-            print(f"   Traceback:")
             traceback.print_exc()
             order.delivery_status = 'failed'
             order.delivery_status_updated_at = datetime.utcnow()
@@ -9213,10 +12579,9 @@ def agent_sell():
         print(f"🏁 AGENT SELL COMPLETED")
         print(f"{'='*60}")
         
-        # Return response
         return jsonify({
             'success': True,
-            'message': f'Sold {quantity}x {size_gb}GB {network.upper()} to {phone}',
+            'message': f'Sold {quantity}x {size_gb}GB {network.upper()} to {phone} ({delivery_type})',
             'data': {
                 'order_id': order_id,
                 'amount_deducted': float(total_cost),
@@ -9224,7 +12589,9 @@ def agent_sell():
                 'profit': float(total_revenue - total_cost),
                 'balance': float(g.current_user.wallet_balance),
                 'delivery_status': order.delivery_status,
-                'digimall_delivery': digimall_result.get('success') if digimall_result else False,
+                'delivery_type': delivery_type,
+                'offer_slug': offer_slug,
+                'digimall_delivery': digimall_result.get('orderId') is not None if digimall_result else False,
                 'digimall_response': digimall_result if digimall_result else None
             }
         })
@@ -9459,11 +12826,11 @@ def get_agent_earnings():
 @token_required
 @agent_required
 def get_agent_stats():
-    """Get agent statistics - NO COMMISSION, NO PROFIT, only actual sales data from database"""
+    """Get agent statistics - including referral points and sales data"""
     try:
         agent = g.current_user
         
-        print(f"\n=== AGENT STATS DEBUG (No Commission, No Profit) ===")
+        print(f"\n=== AGENT STATS DEBUG ===")
         print(f"Agent ID: {agent.id}")
         print(f"Agent Username: {agent.username}")
         
@@ -9525,11 +12892,57 @@ def get_agent_stats():
         
         print(f"Customers: {customer_count}")
         
-        # REMOVED: profit calculations
-        # REMOVED: commission calculations
-        # REMOVED: any earnings/savings calculations
+        # ========== REFERRAL & POINTS STATS ==========
+        # Get referral stats
+        total_referrals = Referral.query.filter_by(
+            referrer_id=agent.id
+        ).count()
         
-        # Get agent tier based on sales volume (just for display)
+        completed_referrals = Referral.query.filter_by(
+            referrer_id=agent.id,
+            status='completed'
+        ).count()
+        
+        pending_referrals = Referral.query.filter_by(
+            referrer_id=agent.id,
+            status='pending'
+        ).count()
+        
+        # Points earned from referrals
+        referral_points = db.session.query(db.func.sum(Referral.points_earned)).filter(
+            Referral.referrer_id == agent.id,
+            Referral.status == 'completed'
+        ).scalar() or 0
+        
+        # Get agent's points balance
+        points_balance = agent.points_balance or 0
+        
+        # ========== COMMISSION STATS (from bill payments) ==========
+        # Total commission from bill payments
+        total_commission = db.session.query(db.func.sum(Order.initiator_commission)).filter(
+            Order.initiator_id == agent.id,
+            Order.type == 'bill_payment',
+            Order.status == 'completed'
+        ).scalar() or 0
+        
+        # Pending commission
+        pending_commission = db.session.query(db.func.sum(Order.initiator_commission)).filter(
+            Order.initiator_id == agent.id,
+            Order.type == 'bill_payment',
+            Order.status == 'pending'
+        ).scalar() or 0
+        
+        # Total profit from data sales
+        total_profit = db.session.query(db.func.sum(Order.profit)).filter(
+            Order.agent_id == agent.id,
+            Order.type == 'data',
+            Order.status == 'completed'
+        ).scalar() or 0
+        
+        # Agent savings (commission + profit)
+        agent_savings = total_commission + total_profit
+        
+        # Get agent tier based on sales volume
         agent_tier = 'Bronze'
         next_tier_sales = 500
         if total_sales >= 10000:
@@ -9548,23 +12961,29 @@ def get_agent_stats():
                 'wallet_balance': float(agent.wallet_balance),
                 'total_sales': float(total_sales),
                 'total_orders': total_orders,
-                # REMOVED: 'total_profit'
-                # REMOVED: 'agent_savings'
-                # REMOVED: 'total_commission'
-                # REMOVED: 'pending_commission'
+                'total_profit': float(total_profit),
+                'agent_savings': float(agent_savings),
+                'total_commission': float(total_commission),
+                'pending_commission': float(pending_commission),
                 'today_sales': float(today_sales),
-                # REMOVED: 'today_profit'
                 'this_week_sales': float(week_sales),
-                # REMOVED: 'this_week_profit'
                 'this_month_sales': float(month_sales),
-                # REMOVED: 'this_month_profit'
                 'total_customers': customer_count,
                 'agent_tier': agent_tier,
                 'next_tier_sales': next_tier_sales,
-                # REMOVED: 'commission_rate'
+                'commission_rate': 10,  # Default commission rate
                 'rank': 0,
                 'username': agent.username,
-                'phone': agent.phone or ''
+                'phone': agent.phone or '',
+                # New referral & points fields
+                'referral_stats': {
+                    'total': total_referrals,
+                    'completed': completed_referrals,
+                    'pending': pending_referrals,
+                    'points_earned': int(referral_points)
+                },
+                'points_balance': int(points_balance),
+                'points_value_ghs': float(points_balance / 10)  # 10 points = ₵1
             }
         })
         
@@ -9573,31 +12992,7 @@ def get_agent_stats():
         import traceback
         traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
-
-# Helper function to get agent's wholesale price (admin configured)
-def get_agent_price(network, size_gb):
-    """Get wholesale price configured by admin"""
-    from models import Price
     
-    price_entry = Price.query.filter_by(
-        network=network,
-        size_gb=size_gb,
-        is_active=True
-    ).first()
-    
-    if price_entry:
-        return float(price_entry.wholesale_price)
-    
-    # Fallback to default prices if not in database
-    default_prices = {
-        'mtn': {1: 5.50, 2: 10.00, 5: 22.00, 10: 42.00, 20: 80.00},
-        'telecel': {1: 5.00, 2: 9.00, 5: 20.00, 10: 38.00, 20: 75.00},
-        'airteltigo': {1: 5.00, 2: 9.00, 5: 20.00, 10: 38.00, 20: 75.00}
-    }
-    
-    return default_prices.get(network, {}).get(size_gb, 0)
-
-
 @app.route('/api/agent/withdraw', methods=['POST'])
 @token_required
 @agent_required
@@ -10714,6 +14109,14 @@ def get_user_unavailable_packages():
         traceback.print_exc()
         return jsonify({'success': True, 'data': {}}), 200
 
+def generate_referral_code():
+    """Generate a unique referral code"""
+    # Format: RS + 6 random alphanumeric characters
+    # Example: RS-ABC123
+    chars = string.ascii_uppercase + string.digits
+    code = 'RS-' + ''.join(random.choices(chars, k=6))
+    return code
+
 @app.route('/api/admin/users', methods=['GET'])
 @token_required
 @admin_required
@@ -10731,7 +14134,7 @@ def get_admin_users():
 @token_required
 @admin_required
 def create_admin_user():
-    """Create user (admin only)"""
+    """Create user (admin only) - Sets email_verified=True by default"""
     try:
         data = request.get_json()
         
@@ -10742,46 +14145,85 @@ def create_admin_user():
         role = data.get('role', 'user')
         wallet_balance = data.get('wallet_balance', 0)
         
+        # Validate required fields
+        if not username or not email or not phone:
+            return jsonify({'success': False, 'error': 'Username, email, and phone are required'}), 400
+        
+        # Check if user exists
         if User.query.filter_by(email=email).first():
             return jsonify({'success': False, 'error': 'Email already exists'}), 400
         
+        if User.query.filter_by(phone=phone).first():
+            return jsonify({'success': False, 'error': 'Phone number already exists'}), 400
+        
+        # Generate unique referral code
+        referral_code = generate_referral_code()
+        while User.query.filter_by(referral_code=referral_code).first():
+            referral_code = generate_referral_code()
+        
+        # Create user with email_verified=True
         new_user = User(
             username=username,
             email=email,
             phone=phone,
             role=role,
             wallet_balance=wallet_balance,
-            referral_code=f"REF{uuid.uuid4().hex[:8].upper()}"
+            referral_code=referral_code,
+            email_verified=True,  # ← IMPORTANT: Set to True for admin-created users
+            phone_verified=True,   # ← Also set phone as verified
+            is_active=True,
+            created_at=datetime.utcnow()
         )
+        
+        # Set password (use provided password or default)
         if password:
             new_user.set_password(password)
         else:
-            new_user.set_password('password123')
+            # Generate a random password if not provided
+            import random
+            import string
+            temp_password = ''.join(random.choices(string.ascii_letters + string.digits, k=10))
+            new_user.set_password(temp_password)
+            password = temp_password  # Store for email
         
         db.session.add(new_user)
         db.session.commit()
         
-        # Send welcome email (priority)
-        send_email(
-            email,
-            f"Account Created for You - {COMPANY_NAME}",
-            f"""
-            <h3>Account Created for You - {COMPANY_NAME}</h3>
-            <p>Dear {username},</p>
-            <p>An account has been created for you on {COMPANY_NAME}.</p>
-            <p><strong>Email:</strong> {email}</p>
-            <p><strong>Password:</strong> {password if password else 'password123'}</p>
-            <p>Please login and change your password immediately.</p>
-            <a href="{COMPANY_WEBSITE}/login" style="background: #8B0000; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Login Now</a>
-            """
-        )
+        # Send welcome email
+        try:
+            send_email(
+                email,
+                f"Account Created for You - {COMPANY_NAME}",
+                f"""
+                <h3>Account Created for You - {COMPANY_NAME}</h3>
+                <p>Dear {username},</p>
+                <p>An account has been created for you on {COMPANY_NAME}.</p>
+                <p><strong>Email:</strong> {email}</p>
+                <p><strong>Password:</strong> {password}</p>
+                <p><strong>Referral Code:</strong> {referral_code}</p>
+                <p>Please login and change your password immediately.</p>
+                <p><a href="{COMPANY_WEBSITE}/login" style="background: #8B0000; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Login Now</a></p>
+                <hr>
+                <p style="color: #666; font-size: 12px;">This is an automated message from {COMPANY_NAME}. Please do not reply.</p>
+                """
+            )
+            print(f"[EMAIL] Welcome email sent to {email}")
+        except Exception as email_error:
+            print(f"[EMAIL ERROR] Failed to send welcome email: {email_error}")
+            # Continue even if email fails
         
-        return jsonify({'success': True, 'user': new_user.to_dict()})
+        return jsonify({
+            'success': True, 
+            'message': f'User {username} created successfully!',
+            'user': new_user.to_dict()
+        })
+        
     except Exception as e:
         print(f"Create admin user error: {e}")
+        import traceback
+        traceback.print_exc()
         db.session.rollback()
         return jsonify({'success': False, 'error': 'Failed to create user'}), 500
-
 
 @app.route('/api/admin/users/<int:user_id>/suspend', methods=['POST'])
 @token_required
@@ -14500,6 +17942,884 @@ def get_waec_stats():
         print(f"Get WAEC stats error: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
+@app.route('/api/agent/bills/history', methods=['GET'])
+@token_required
+@agent_required  # Make sure this decorator exists or check is_agent flag
+def agent_bill_history():
+    """Get agent's bill payment history for their customers"""
+    try:
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('limit', 20, type=int)
+        
+        # Get bills from agent's sales (where agent_id matches)
+        bills = Order.query.filter_by(
+            agent_id=g.current_user.id,
+            type='bill_payment'
+        ).order_by(Order.created_at.desc()).paginate(
+            page=page, per_page=per_page, error_out=False
+        )
+        
+        return jsonify({
+            'success': True,
+            'data': [{
+                'id': b.id,
+                'order_id': b.order_id,
+                'biller_code': b.biller_code,
+                'biller_name': b.biller_name,
+                'account_number': b.account_number,
+                'customer_name': b.customer_name,
+                'customer_phone': b.phone_number,
+                'amount': float(b.amount),
+                'commission': float(b.commission) if hasattr(b, 'commission') else 0,
+                'status': b.status,
+                'reference': b.provider_reference,
+                'created_at': b.created_at.isoformat()
+            } for b in bills.items],
+            'total': bills.total,
+            'page': page,
+            'total_pages': bills.pages
+        })
+        
+    except Exception as e:
+        print(f"Error fetching agent bill history: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/agent/bills/recurring', methods=['GET'])
+@token_required
+@agent_required
+def agent_recurring_bills():
+    """Get recurring bills for agent's customers"""
+    try:
+        # Get all customers of this agent
+        customers = Customer.query.filter_by(agent_id=g.current_user.id).all()
+        customer_ids = [c.id for c in customers]
+        
+        # Find recurring bills for these customers
+        recurring_bills = RecurringBill.query.filter(
+            RecurringBill.customer_id.in_(customer_ids)
+        ).order_by(RecurringBill.next_due_date.asc()).all()
+        
+        return jsonify({
+            'success': True,
+            'data': [{
+                'id': r.id,
+                'customer_name': r.customer_name,
+                'customer_phone': r.customer_phone,
+                'biller_code': r.biller_code,
+                'biller_name': r.biller_name,
+                'account_number': r.account_number,
+                'amount': float(r.amount),
+                'frequency': r.frequency,
+                'next_due_date': r.next_due_date.isoformat(),
+                'status': r.status
+            } for r in recurring_bills]
+        })
+        
+    except Exception as e:
+        print(f"Error fetching recurring bills: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/agent/bills/recurring', methods=['POST'])
+@token_required
+@agent_required
+def create_recurring_bill():
+    """Create a recurring bill for a customer"""
+    try:
+        data = request.get_json()
+        
+        customer_phone = data.get('customer_phone')
+        customer_name = data.get('customer_name')
+        biller_code = data.get('biller_code')
+        biller_name = data.get('biller_name')
+        account_number = data.get('account_number')
+        amount = float(data.get('amount'))
+        frequency = data.get('frequency', 'monthly')  # weekly, monthly, quarterly
+        
+        # Find or create customer
+        customer = Customer.query.filter_by(
+            phone=customer_phone,
+            agent_id=g.current_user.id
+        ).first()
+        
+        if not customer:
+            customer = Customer(
+                name=customer_name,
+                phone=customer_phone,
+                agent_id=g.current_user.id,
+                created_at=datetime.utcnow()
+            )
+            db.session.add(customer)
+            db.session.commit()
+        
+        # Calculate next due date based on frequency
+        from dateutil.relativedelta import relativedelta
+        
+        today = datetime.utcnow().date()
+        if frequency == 'weekly':
+            next_due = today + relativedelta(weeks=1)
+        elif frequency == 'monthly':
+            next_due = today + relativedelta(months=1)
+        elif frequency == 'quarterly':
+            next_due = today + relativedelta(months=3)
+        else:
+            next_due = today + relativedelta(months=1)
+        
+        # Create recurring bill
+        recurring = RecurringBill(
+            customer_id=customer.id,
+            customer_name=customer_name,
+            customer_phone=customer_phone,
+            biller_code=biller_code,
+            biller_name=biller_name,
+            account_number=account_number,
+            amount=amount,
+            frequency=frequency,
+            next_due_date=next_due,
+            status='active',
+            created_by=g.current_user.id,
+            created_at=datetime.utcnow()
+        )
+        db.session.add(recurring)
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': 'Recurring bill created successfully',
+            'data': {
+                'id': recurring.id,
+                'customer_phone': customer_phone,
+                'biller_name': biller_name,
+                'amount': amount,
+                'frequency': frequency,
+                'next_due_date': next_due.isoformat()
+            }
+        })
+        
+    except Exception as e:
+        print(f"Error creating recurring bill: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/agent/bills/stats', methods=['GET'])
+@token_required
+@agent_required
+def agent_bill_stats():
+    """Get bill payment statistics for agent"""
+    try:
+        # Total bill payments made by agent
+        total_bills = Order.query.filter_by(
+            agent_id=g.current_user.id,
+            type='bill_payment'
+        ).count()
+        
+        # Total bill amount
+        total_amount = db.session.query(db.func.sum(Order.amount)).filter(
+            Order.agent_id == g.current_user.id,
+            Order.type == 'bill_payment'
+        ).scalar() or 0
+        
+        # Total commission earned
+        total_commission = db.session.query(db.func.sum(Order.commission)).filter(
+            Order.agent_id == g.current_user.id,
+            Order.type == 'bill_payment'
+        ).scalar() or 0
+        
+        # Bills by status
+        completed_bills = Order.query.filter_by(
+            agent_id=g.current_user.id,
+            type='bill_payment',
+            status='completed'
+        ).count()
+        
+        pending_bills = Order.query.filter_by(
+            agent_id=g.current_user.id,
+            type='bill_payment',
+            status='pending'
+        ).count()
+        
+        failed_bills = Order.query.filter_by(
+            agent_id=g.current_user.id,
+            type='bill_payment',
+            status='failed'
+        ).count()
+        
+        # Recent bill payments (last 7 days)
+        seven_days_ago = datetime.utcnow() - timedelta(days=7)
+        recent_bills = Order.query.filter(
+            Order.agent_id == g.current_user.id,
+            Order.type == 'bill_payment',
+            Order.created_at >= seven_days_ago
+        ).count()
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'total_bills': total_bills,
+                'total_amount': float(total_amount),
+                'total_commission': float(total_commission),
+                'completed_bills': completed_bills,
+                'pending_bills': pending_bills,
+                'failed_bills': failed_bills,
+                'recent_bills': recent_bills
+            }
+        })
+        
+    except Exception as e:
+        print(f"Error fetching bill stats: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/agent/bills/pay', methods=['POST'])
+@token_required
+def agent_pay_bill():
+    """Process bill payment for a customer (agent version)"""
+    try:
+        import uuid
+        data = request.get_json()
+        
+        # Log the incoming request for debugging
+        print(f"\n📥 Received payment request:")
+        print(f"   Data: {data}")
+        
+        biller_code = data.get('biller_code')
+        account_number = data.get('account_number')
+        amount = data.get('amount')
+        customer_name = data.get('customer_name', 'Customer')
+        customer_phone = data.get('customer_phone')
+        customer_email = data.get('customer_email')
+        meter_number = data.get('meter_number')
+        session_id = data.get('session_id')
+        
+        # Validate required fields
+        missing_fields = []
+        if not biller_code:
+            missing_fields.append('biller_code')
+        if not account_number:
+            missing_fields.append('account_number')
+        if not amount:
+            missing_fields.append('amount')
+        
+        if missing_fields:
+            print(f"❌ Missing required fields: {missing_fields}")
+            return jsonify({
+                'success': False, 
+                'error': f'Missing required fields: {", ".join(missing_fields)}'
+            }), 400
+        
+        amount = float(amount)
+        
+        # Check if user is agent
+        if not g.current_user.is_agent:
+            return jsonify({'success': False, 'error': 'Agent access required'}), 403
+        
+        # Make customer_phone optional - use agent's phone as fallback
+        if not customer_phone:
+            customer_phone = g.current_user.phone or '0557388622'
+            print(f"⚠️ customer_phone not provided, using agent phone: {customer_phone}")
+        
+        # For ECG, require meter_number
+        if biller_code == 'ECG' and not meter_number:
+            meter_number = account_number
+            if not meter_number:
+                return jsonify({'success': False, 'error': 'Meter number required for ECG. Please select a meter.'}), 400
+        
+        # For GWCL, require meter_number and session_id
+        if biller_code == 'GWCL':
+            if not meter_number:
+                meter_number = account_number
+            if not session_id:
+                return jsonify({'success': False, 'error': 'Session ID required for Water bill. Please validate first.'}), 400
+        
+        # Check agent wallet balance
+        balance_before = g.current_user.wallet_balance
+        if balance_before < amount:
+            return jsonify({
+                'success': False,
+                'error': f'Insufficient balance. Need GHS {amount:.2f}. Your balance: GHS {balance_before:.2f}'
+            }), 400
+        
+        # Calculate commission
+        commission_service = CommissionService()
+        service_type = commission_service.get_service_type(biller_code)
+        commission = commission_service.calculate_commission(amount, service_type)
+        
+        print(f"\n{'='*50}")
+        print(f"💰 BILL PAYMENT - AGENT VERSION")
+        print(f"{'='*50}")
+        print(f"Agent: {g.current_user.username} (ID: {g.current_user.id})")
+        print(f"Customer: {customer_name} ({customer_phone})")
+        print(f"Service: {service_type}")
+        print(f"Amount: GHS {amount}")
+        print(f"Meter Number: {meter_number}")
+        print(f"Session ID: {session_id}")
+        print(f"Hubtel Commission Rate: {commission['hubtel_rate']}%")
+        print(f"Total Commission: GHS {commission['total_commission']:.4f}")
+        print(f"Admin gets: GHS {commission['admin_commission']:.4f} (30%)")
+        print(f"Agent gets: GHS {commission['initiator_commission']:.4f} (70%)")
+        
+        # Process payment via Hubtel
+        hubtel = HubtelService()
+        callback_url = f"{os.environ.get('BASE_URL')}/api/webhooks/hubtel"
+        client_reference = f"AGENT-{uuid.uuid4().hex[:12].upper()}"
+        
+        payment_result = None
+        
+        try:
+            if biller_code == 'DSTV':
+                payment_result = hubtel.pay_dstv(account_number, amount, client_reference, callback_url)
+            elif biller_code == 'GOTV':
+                payment_result = hubtel.pay_gotv(account_number, amount, client_reference, callback_url)
+            elif biller_code == 'STARTIMES':
+                payment_result = hubtel.pay_startimes(account_number, amount, client_reference, callback_url)
+            elif biller_code == 'ECG':
+                if not meter_number:
+                    return jsonify({'success': False, 'error': 'Meter number required for ECG'}), 400
+                payment_result = hubtel.pay_ecg(customer_phone, meter_number, amount, client_reference, callback_url)
+            elif biller_code == 'GWCL':
+                if not meter_number or not session_id:
+                    return jsonify({'success': False, 'error': 'Meter number and session ID required for Water'}), 400
+                payment_result = hubtel.pay_water(meter_number, customer_phone, customer_email, session_id, amount, client_reference, callback_url)
+            else:
+                return jsonify({'success': False, 'error': f'Unsupported biller: {biller_code}'}), 400
+        except Exception as hubtel_error:
+            print(f"❌ Hubtel payment error: {hubtel_error}")
+            return jsonify({'success': False, 'error': f'Hubtel payment failed: {str(hubtel_error)}'}), 400
+        
+        if not payment_result or not payment_result.get('success'):
+            error_msg = payment_result.get('error', 'Payment failed') if payment_result else 'Unknown error'
+            return jsonify({'success': False, 'error': error_msg}), 400
+        
+        # Determine status based on response code
+        response_code = payment_result.get('response_code')
+        if response_code == '0000':
+            status = 'completed'
+        elif response_code == '0001':
+            status = 'pending'
+        else:
+            status = 'failed'
+        
+        # Deduct from agent wallet
+        g.current_user.wallet_balance -= amount
+        balance_after = g.current_user.wallet_balance
+        
+        # Generate order ID
+        order_id = f"BILL-{uuid.uuid4().hex[:8].upper()}"
+        
+        biller_names = {
+            'DSTV': 'DSTV',
+            'GOTV': 'GoTV',
+            'STARTIMES': 'StarTimes',
+            'ECG': 'ECG Electricity',
+            'GWCL': 'Ghana Water'
+        }
+        
+        # Create order record - REMOVE balance_before/after from Order
+        order = Order(
+            user_id=g.current_user.id,
+            agent_id=g.current_user.id,
+            order_id=order_id,
+            type='bill_payment',
+            biller_code=biller_code,
+            biller_name=biller_names.get(biller_code, biller_code),
+            account_number=account_number,
+            customer_name=customer_name,
+            phone_number=customer_phone,
+            amount=amount,
+            cost=0,  # No wholesale cost for bill payments
+            profit=commission['initiator_commission'] if status == 'completed' else 0,  # Agent profit is commission
+            status=status,
+            payment_method='wallet',
+            provider='hubtel',
+            provider_reference=payment_result.get('client_reference'),
+            provider_order_id=payment_result.get('transaction_id'),
+            # Commission fields
+            hubtel_commission_rate=commission['hubtel_rate'],
+            total_commission=commission['total_commission'],
+            admin_commission=commission['admin_commission'],
+            initiator_commission=commission['initiator_commission'],
+            initiator_type='agent',
+            initiator_id=g.current_user.id,
+            completed_at=datetime.utcnow() if status == 'completed' else None,
+            created_at=datetime.utcnow()
+        )
+        db.session.add(order)
+        
+        # Create transaction record with balance info (Transaction model has balance_before/after)
+        transaction = Transaction(
+            user_id=g.current_user.id,
+            type='bill_payment_agent',
+            amount=amount,
+            balance_before=balance_before,
+            balance_after=balance_after,
+            description=f'Bill payment for {customer_name}: {biller_names.get(biller_code, biller_code)} - {account_number}',
+            reference=order_id,
+            status=status,
+            meta_data={
+                'biller_code': biller_code,
+                'biller_name': biller_names.get(biller_code, biller_code),
+                'account_number': account_number,
+                'meter_number': meter_number,
+                'customer_name': customer_name,
+                'customer_phone': customer_phone,
+                'response_code': response_code,
+                'commission': {
+                    'hubtel_rate': commission['hubtel_rate'],
+                    'total': commission['total_commission'],
+                    'admin': commission['admin_commission'],
+                    'agent_earned': commission['initiator_commission']
+                }
+            }
+        )
+        db.session.add(transaction)
+        
+        db.session.commit()
+        
+        # ========== CHECK REFERRAL COMPLETION ==========
+        # Check if the customer (phone number) is a user who was referred
+        # and this is their first bill payment
+        if status == 'completed':
+            # Find the customer by phone number
+            customer_user = User.query.filter_by(phone=customer_phone).first()
+            
+            if customer_user:
+                # Check if this is the customer's first completed order (bill payment counts)
+                previous_orders = Order.query.filter(
+                    Order.user_id == customer_user.id,
+                    Order.status == 'completed'
+                ).count()
+                
+                print(f"\n[REFERRAL CHECK - AGENT BILL PAYMENT]")
+                print(f"  Customer: {customer_user.username} (ID: {customer_user.id})")
+                print(f"  Previous completed orders: {previous_orders}")
+                print(f"  Referred by: {customer_user.referred_by}")
+                
+                # If this is the first purchase and user was referred
+                if previous_orders == 0 and customer_user.referred_by:
+                    referrer = User.query.get(customer_user.referred_by)
+                    if referrer:
+                        referral = Referral.query.filter_by(
+                            referrer_id=referrer.id,
+                            referred_user_id=customer_user.id,
+                            status='pending'
+                        ).first()
+                        
+                        if referral:
+                            # Complete the referral
+                            referral.status = 'completed'
+                            referral.completed_at = datetime.utcnow()
+                            
+                            # Award points to referrer
+                            points_awarded = POINTS_CONFIG['REFERRAL_POINTS']  # 1 point
+                            referrer.points_balance = (referrer.points_balance or 0) + points_awarded
+                            referrer.total_points_earned = (referrer.total_points_earned or 0) + points_awarded
+                            
+                            # Create points transaction for referrer
+                            points_trans = PointsTransaction(
+                                user_id=referrer.id,
+                                points=points_awarded,
+                                type='referral_bonus',
+                                description=f'Referral bonus for {customer_user.username}\'s first bill payment (via agent)',
+                                reference=referral.referral_code,
+                                balance_after=referrer.points_balance
+                            )
+                            db.session.add(points_trans)
+                            
+                            db.session.commit()
+                            print(f"✅ Referral completed! {referrer.username} earned {points_awarded} point(s)")
+        
+        # Distribute commission (only if completed)
+        if status == 'completed':
+            distribution = commission_service.distribute_commission(
+                order_id=order_id,
+                commission_data=commission,
+                initiator_id=g.current_user.id,
+                initiator_type='agent'
+            )
+            # Refresh agent balance
+            db.session.refresh(g.current_user)
+            balance_after_with_commission = g.current_user.wallet_balance
+        else:
+            print(f"ℹ️ Commission will be distributed when payment is completed")
+            balance_after_with_commission = balance_after
+        
+        return jsonify({
+            'success': True,
+            'message': f'✅ Bill payment processed for {customer_name}! You earned GHS {commission["initiator_commission"]:.4f} commission!' if status == 'completed' else f'⏳ Bill payment pending for {customer_name}. You will earn commission when completed.',
+            'data': {
+                'order_id': order_id,
+                'reference': payment_result.get('client_reference'),
+                'transaction_id': payment_result.get('transaction_id'),
+                'amount': amount,
+                'biller_name': biller_names.get(biller_code, biller_code),
+                'account_number': account_number,
+                'meter_number': meter_number,
+                'customer_name': customer_name,
+                'customer_phone': customer_phone,
+                'status': status,
+                'response_code': response_code,
+                'balance_before': float(balance_before),
+                'amount_paid': float(amount),
+                'new_balance': float(balance_after_with_commission),
+                'commission_earned': float(commission['initiator_commission']) if status == 'completed' else 0,
+                'commission': {
+                    'hubtel_rate': commission['hubtel_rate'],
+                    'total': commission['total_commission'],
+                    'admin': commission['admin_commission'],
+                    'you_earned': commission['initiator_commission']
+                }
+            }
+        }), 200
+        
+    except Exception as e:
+        print(f"❌ Agent bill payment error: {e}")
+        import traceback
+        traceback.print_exc()
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+    
+@app.route('/api/agent/bills/validate', methods=['POST'])
+@token_required
+def agent_validate_bill():
+    """Validate bill for agent's customer"""
+    try:
+        data = request.get_json()
+        
+        print(f"\n📋 BILL VALIDATION REQUEST:")
+        print(f"   Data: {data}")
+        print(f"   User: {g.current_user.username} (Agent: {g.current_user.is_agent})")
+        
+        if not g.current_user.is_agent:
+            return jsonify({'success': False, 'error': 'Agent access required'}), 403
+        
+        biller_code = data.get('biller_code')
+        account_number = data.get('account_number')
+        phone_number = data.get('phone_number')
+        meter_number = data.get('meter_number')
+        
+        # Validate required fields
+        if not biller_code:
+            return jsonify({
+                'success': False, 
+                'error': 'Biller code is required'
+            }), 400
+        
+        if not account_number:
+            return jsonify({
+                'success': False, 
+                'error': 'Account number is required'
+            }), 400
+        
+        print(f"🔍 Validating bill:")
+        print(f"   Biller: {biller_code}")
+        print(f"   Account: {account_number}")
+        print(f"   Phone: {phone_number}")
+        print(f"   Meter: {meter_number}")
+        
+        # For ECG and Water, require phone number
+        if biller_code in ['ECG', 'GWCL'] and not phone_number:
+            return jsonify({
+                'success': False, 
+                'error': 'Phone number is required for ECG/Water validation'
+            }), 400
+        
+        # Initialize Hubtel service
+        hubtel = HubtelService()
+        
+        # Check if Hubtel is configured
+        if not hubtel.is_configured():
+            return jsonify({
+                'success': False, 
+                'error': 'Hubtel service is not configured. Please contact support.'
+            }), 503
+        
+        result = None
+        
+        # ========== DSTV ==========
+        if biller_code == 'DSTV':
+            result = hubtel.query_dstv(account_number)
+            print(f"📡 DSTV Query Result: {result}")
+            
+            if result and result.get('success'):
+                data = result.get('data', {})
+                amount_due = abs(float(data.get('amountDue', 0)))
+                
+                return jsonify({
+                    'success': True,
+                    'data': {
+                        'customer_name': data.get('name') or data.get('customer_name') or 'DSTV Customer',
+                        'account_number': account_number,
+                        'biller_name': 'DSTV',
+                        'amount_due': amount_due if amount_due > 0 else 0,
+                        'biller_code': biller_code
+                    }
+                })
+            else:
+                error_msg = result.get('error', 'DSTV account not found') if result else 'Unknown error'
+                return jsonify({'success': False, 'error': error_msg}), 400
+        
+        # ========== GoTV ==========
+        elif biller_code == 'GOTV':
+            result = hubtel.query_gotv(account_number)
+            print(f"📡 GoTV Query Result: {result}")
+            
+            if result and result.get('success'):
+                data = result.get('data', {})
+                amount_due = abs(float(data.get('amountDue', 0)))
+                
+                return jsonify({
+                    'success': True,
+                    'data': {
+                        'customer_name': data.get('name') or data.get('customer_name') or 'GoTV Customer',
+                        'account_number': account_number,
+                        'biller_name': 'GoTV',
+                        'amount_due': amount_due if amount_due > 0 else 0,
+                        'biller_code': biller_code
+                    }
+                })
+            else:
+                error_msg = result.get('error', 'GoTV account not found') if result else 'Unknown error'
+                return jsonify({'success': False, 'error': error_msg}), 400
+        
+        # ========== StarTimes ==========
+        elif biller_code == 'STARTIMES':
+            result = hubtel.query_startimes(account_number)
+            print(f"📡 StarTimes Query Result: {result}")
+            
+            if result and result.get('success'):
+                data = result.get('data', {})
+                
+                return jsonify({
+                    'success': True,
+                    'data': {
+                        'customer_name': data.get('Name') or data.get('customer_name') or 'StarTimes Customer',
+                        'account_number': account_number,
+                        'bouquet': data.get('Bouquet', ''),
+                        'biller_name': 'StarTimes',
+                        'amount_due': 0,
+                        'biller_code': biller_code
+                    }
+                })
+            else:
+                error_msg = result.get('error', 'StarTimes account not found') if result else 'Unknown error'
+                return jsonify({'success': False, 'error': error_msg}), 400
+        
+        # ========== ECG ==========
+        elif biller_code == 'ECG':
+            if not phone_number:
+                return jsonify({
+                    'success': False, 
+                    'error': 'Phone number is required to fetch ECG meters'
+                }), 400
+            
+            result = hubtel.query_ecg_meters(phone_number)
+            print(f"📡 ECG Query Result: {result}")
+            
+            if result and result.get('success'):
+                meters = result.get('meters', [])
+                
+                if not meters:
+                    return jsonify({
+                        'success': False,
+                        'error': 'No ECG meters found for this phone number'
+                    }), 400
+                
+                # Format meters for frontend
+                formatted_meters = []
+                for meter in meters:
+                    formatted_meters.append({
+                        'meter_number': meter.get('meter_number'),
+                        'customer_name': meter.get('customer_name'),
+                        'amount_due': abs(float(meter.get('amount_due', 0))),
+                        'address': meter.get('address', '')
+                    })
+                
+                return jsonify({
+                    'success': True,
+                    'data': {
+                        'meters': formatted_meters,
+                        'biller_name': 'ECG Electricity',
+                        'message': f'Found {len(meters)} meter(s) linked to this phone number',
+                        'biller_code': biller_code
+                    }
+                })
+            else:
+                error_msg = result.get('error', 'Failed to fetch ECG meters') if result else 'Unknown error'
+                return jsonify({'success': False, 'error': error_msg}), 400
+        
+        # ========== Ghana Water (GWCL) ==========
+        elif biller_code == 'GWCL':
+            if not phone_number:
+                return jsonify({
+                    'success': False, 
+                    'error': 'Phone number is required for water bill validation'
+                }), 400
+            
+            # Use meter_number if provided, otherwise use account_number
+            meter_id = meter_number or account_number
+            
+            if not meter_id:
+                return jsonify({
+                    'success': False, 
+                    'error': 'Meter number or account number is required for water bill'
+                }), 400
+            
+            result = hubtel.query_water(meter_id, phone_number)
+            print(f"📡 GWCL Query Result: {result}")
+            
+            if result and result.get('success'):
+                amount_due = abs(float(result.get('amount_due', 0)))
+                
+                return jsonify({
+                    'success': True,
+                    'data': {
+                        'customer_name': result.get('customer_name') or 'GWCL Customer',
+                        'amount_due': amount_due if amount_due > 0 else 0,
+                        'session_id': result.get('session_id'),
+                        'account_number': meter_id,
+                        'meter_number': meter_id,
+                        'biller_name': 'Ghana Water',
+                        'biller_code': biller_code
+                    }
+                })
+            else:
+                error_msg = result.get('error', 'Water account not found') if result else 'Unknown error'
+                return jsonify({'success': False, 'error': error_msg}), 400
+        
+        # ========== Unsupported Biller ==========
+        else:
+            return jsonify({
+                'success': False, 
+                'error': f'Unsupported biller: {biller_code}. Supported billers: DSTV, GOTV, STARTIMES, ECG, GWCL'
+            }), 400
+        
+    except Exception as e:
+        print(f"❌ Agent bill validation error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'success': False, 
+            'error': f'Validation error: {str(e)}'
+        }), 500
+
+
+@app.route('/api/agent/bills/recurring/<int:bill_id>', methods=['DELETE'])
+@token_required
+@agent_required
+def delete_recurring_bill(bill_id):
+    """Delete a recurring bill"""
+    try:
+        recurring = RecurringBill.query.get(bill_id)
+        if not recurring:
+            return jsonify({'success': False, 'error': 'Recurring bill not found'}), 404
+        
+        # Check if this bill belongs to a customer of this agent
+        user = User.query.get(recurring.user_id)
+        if not user:
+            return jsonify({'success': False, 'error': 'User not found'}), 404
+        
+        customer = Customer.query.filter_by(
+            phone=user.phone,
+            agent_id=g.current_user.id
+        ).first()
+        
+        if not customer:
+            return jsonify({'success': False, 'error': 'You do not have permission to delete this bill'}), 403
+        
+        db.session.delete(recurring)
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': 'Recurring bill deleted successfully'
+        })
+        
+    except Exception as e:
+        print(f"Error deleting recurring bill: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/user/commission-stats', methods=['GET'])
+@token_required
+def get_user_commission_stats():
+    """Get user's commission earnings statistics"""
+    try:
+        from models import Order, CommissionTransaction
+        from sqlalchemy import func
+        
+        # Get total commission from orders where user is initiator
+        total_commission = db.session.query(func.sum(Order.initiator_commission)).filter(
+            Order.initiator_id == g.current_user.id,
+            Order.status == 'completed'
+        ).scalar() or 0
+        
+        # Count bill payment commissions
+        bill_commission_count = Order.query.filter(
+            Order.initiator_id == g.current_user.id,
+            Order.type == 'bill_payment',
+            Order.status == 'completed'
+        ).count()
+        
+        # Count data sale commissions (if applicable)
+        data_commission_count = Order.query.filter(
+            Order.initiator_id == g.current_user.id,
+            Order.type == 'data',
+            Order.status == 'completed'
+        ).count()
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'total_commission_earned': float(total_commission),
+                'bill_commission_count': bill_commission_count,
+                'data_commission_count': data_commission_count
+            }
+        })
+        
+    except Exception as e:
+        print(f"Error getting commission stats: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/user/commission-transactions', methods=['GET'])
+@token_required
+def get_user_commission_transactions():
+    """Get list of commission transactions for the user"""
+    try:
+        from models import Order
+        
+        # Get all orders where user is initiator and has commission
+        orders = Order.query.filter(
+            Order.initiator_id == g.current_user.id,
+            Order.initiator_commission > 0,
+            Order.status == 'completed'
+        ).order_by(Order.created_at.desc()).limit(50).all()
+        
+        transactions = []
+        for order in orders:
+            transactions.append({
+                'id': order.id,
+                'order_id': order.order_id,
+                'type': order.type,
+                'biller_code': order.biller_code,
+                'biller_name': order.biller_name,
+                'amount': order.amount,
+                'hubtel_commission_rate': order.hubtel_commission_rate,
+                'commission_earned': order.initiator_commission,
+                'created_at': order.created_at.isoformat()
+            })
+        
+        return jsonify({
+            'success': True,
+            'data': transactions
+        })
+        
+    except Exception as e:
+        print(f"Error getting commission transactions: {e}")
+        return jsonify({'success': True, 'data': []}), 200
 
 @app.route('/api/admin/bill-payments', methods=['GET'])
 @token_required
@@ -14555,6 +18875,1439 @@ def get_bill_payments():
         print(f"Get bill payments error: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
+# ========== USER BILL PAYMENT ENDPOINTS ==========
+
+@app.route('/api/user/bills/validate', methods=['POST'])
+@token_required
+def user_validate_bill():
+    """Validate bill for a regular user (not agent)"""
+    try:
+        data = request.get_json()
+        
+        print(f"\n📋 USER BILL VALIDATION REQUEST:")
+        print(f"   Data: {data}")
+        print(f"   User: {g.current_user.username} (ID: {g.current_user.id})")
+        
+        biller_code = data.get('biller_code')
+        account_number = data.get('account_number')
+        phone_number = data.get('phone_number')
+        meter_number = data.get('meter_number')
+        
+        # Validate required fields
+        if not biller_code:
+            return jsonify({
+                'success': False, 
+                'error': 'Biller code is required'
+            }), 400
+        
+        if not account_number:
+            return jsonify({
+                'success': False, 
+                'error': 'Account number is required'
+            }), 400
+        
+        # For ECG and Water, require phone number
+        if biller_code in ['ECG', 'GWCL'] and not phone_number:
+            return jsonify({
+                'success': False, 
+                'error': 'Phone number is required for ECG/Water validation'
+            }), 400
+        
+        print(f"🔍 Validating bill:")
+        print(f"   Biller: {biller_code}")
+        print(f"   Account: {account_number}")
+        print(f"   Phone: {phone_number}")
+        print(f"   Meter: {meter_number}")
+        
+        # Initialize Hubtel service
+        hubtel = HubtelService()
+        
+        # Check if Hubtel is configured
+        if not hubtel.is_configured():
+            return jsonify({
+                'success': False, 
+                'error': 'Hubtel service is not configured. Please contact support.'
+            }), 503
+        
+        result = None
+        
+        # ========== DSTV ==========
+        if biller_code == 'DSTV':
+            result = hubtel.query_dstv(account_number)
+            print(f"📡 DSTV Query Result: {result}")
+            
+            if result and result.get('success'):
+                data = result.get('data', {})
+                amount_due = abs(float(data.get('amountDue', 0)))
+                
+                return jsonify({
+                    'success': True,
+                    'data': {
+                        'customer_name': data.get('name') or data.get('customer_name') or 'DSTV Customer',
+                        'account_number': account_number,
+                        'biller_name': 'DSTV',
+                        'amount_due': amount_due if amount_due > 0 else 0,
+                        'biller_code': biller_code
+                    }
+                })
+            else:
+                error_msg = result.get('error', 'DSTV account not found') if result else 'Unknown error'
+                return jsonify({'success': False, 'error': error_msg}), 400
+        
+        # ========== GoTV ==========
+        elif biller_code == 'GOTV':
+            result = hubtel.query_gotv(account_number)
+            print(f"📡 GoTV Query Result: {result}")
+            
+            if result and result.get('success'):
+                data = result.get('data', {})
+                amount_due = abs(float(data.get('amountDue', 0)))
+                
+                return jsonify({
+                    'success': True,
+                    'data': {
+                        'customer_name': data.get('name') or data.get('customer_name') or 'GoTV Customer',
+                        'account_number': account_number,
+                        'biller_name': 'GoTV',
+                        'amount_due': amount_due if amount_due > 0 else 0,
+                        'biller_code': biller_code
+                    }
+                })
+            else:
+                error_msg = result.get('error', 'GoTV account not found') if result else 'Unknown error'
+                return jsonify({'success': False, 'error': error_msg}), 400
+        
+        # ========== StarTimes ==========
+        elif biller_code == 'STARTIMES':
+            result = hubtel.query_startimes(account_number)
+            print(f"📡 StarTimes Query Result: {result}")
+            
+            if result and result.get('success'):
+                data = result.get('data', {})
+                
+                return jsonify({
+                    'success': True,
+                    'data': {
+                        'customer_name': data.get('Name') or data.get('customer_name') or 'StarTimes Customer',
+                        'account_number': account_number,
+                        'bouquet': data.get('Bouquet', ''),
+                        'biller_name': 'StarTimes',
+                        'amount_due': 0,
+                        'biller_code': biller_code
+                    }
+                })
+            else:
+                error_msg = result.get('error', 'StarTimes account not found') if result else 'Unknown error'
+                return jsonify({'success': False, 'error': error_msg}), 400
+        
+        # ========== ECG ==========
+        elif biller_code == 'ECG':
+            if not phone_number:
+                return jsonify({
+                    'success': False, 
+                    'error': 'Phone number is required to fetch ECG meters'
+                }), 400
+            
+            # Format phone number for ECG query
+            # Remove leading 0 if present and ensure 233 prefix
+            formatted_phone = phone_number
+            if formatted_phone.startswith('0'):
+                formatted_phone = '233' + formatted_phone[1:]
+            elif not formatted_phone.startswith('233'):
+                formatted_phone = '233' + formatted_phone
+            
+            print(f"📞 Formatted phone for ECG: {formatted_phone}")
+            
+            result = hubtel.query_ecg_meters(formatted_phone)
+            print(f"📡 ECG Query Result: {result}")
+            
+            if result and result.get('success'):
+                meters = result.get('meters', [])
+                
+                if not meters:
+                    return jsonify({
+                        'success': False,
+                        'error': f'No ECG meters found for phone number {phone_number}. Please ensure this number is registered with ECG.',
+                        'suggestion': 'Try using the phone number linked to your ECG account. You can also try entering your meter number directly.'
+                    }), 400
+                
+                # Format meters for frontend
+                formatted_meters = []
+                for meter in meters:
+                    formatted_meters.append({
+                        'meter_number': meter.get('meter_number'),
+                        'customer_name': meter.get('customer_name'),
+                        'amount_due': abs(float(meter.get('amount_due', 0))),
+                        'address': meter.get('address', '')
+                    })
+                
+                return jsonify({
+                    'success': True,
+                    'data': {
+                        'meters': formatted_meters,
+                        'biller_name': 'ECG Electricity',
+                        'message': f'Found {len(meters)} meter(s) linked to this phone number',
+                        'biller_code': biller_code
+                    }
+                })
+            else:
+                error_msg = result.get('error', 'Failed to fetch ECG meters') if result else 'Unknown error'
+                return jsonify({
+                    'success': False, 
+                    'error': f'Could not validate ECG account: {error_msg}',
+                    'suggestion': 'Please ensure your phone number is registered with ECG. You can also try entering your meter number directly.'
+                }), 400
+        
+        # ========== Ghana Water (GWCL) ==========
+        elif biller_code == 'GWCL':
+            if not phone_number:
+                return jsonify({
+                    'success': False, 
+                    'error': 'Phone number is required for water bill validation'
+                }), 400
+            
+            # Use meter_number if provided, otherwise use account_number
+            meter_id = meter_number or account_number
+            
+            if not meter_id:
+                return jsonify({
+                    'success': False, 
+                    'error': 'Meter number or account number is required for water bill'
+                }), 400
+            
+            # Format phone number for GWCL
+            formatted_phone = phone_number
+            if formatted_phone.startswith('0'):
+                formatted_phone = '233' + formatted_phone[1:]
+            elif not formatted_phone.startswith('233'):
+                formatted_phone = '233' + formatted_phone
+            
+            print(f"📞 Formatted phone for GWCL: {formatted_phone}")
+            
+            result = hubtel.query_water(meter_id, formatted_phone)
+            print(f"📡 GWCL Query Result: {result}")
+            
+            if result and result.get('success'):
+                amount_due = abs(float(result.get('amount_due', 0)))
+                
+                return jsonify({
+                    'success': True,
+                    'data': {
+                        'customer_name': result.get('customer_name') or 'GWCL Customer',
+                        'amount_due': amount_due if amount_due > 0 else 0,
+                        'session_id': result.get('session_id'),
+                        'account_number': meter_id,
+                        'meter_number': meter_id,
+                        'biller_name': 'Ghana Water',
+                        'biller_code': biller_code
+                    }
+                })
+            else:
+                error_msg = result.get('error', 'Water account not found') if result else 'Unknown error'
+                return jsonify({
+                    'success': False, 
+                    'error': f'Could not validate water account: {error_msg}',
+                    'suggestion': 'Please ensure your phone number and meter number are correct.'
+                }), 400
+        
+        # ========== Unsupported Biller ==========
+        else:
+            return jsonify({
+                'success': False, 
+                'error': f'Unsupported biller: {biller_code}. Supported billers: DSTV, GOTV, STARTIMES, ECG, GWCL'
+            }), 400
+        
+    except Exception as e:
+        print(f"❌ User bill validation error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'success': False, 
+            'error': f'Validation error: {str(e)}'
+        }), 500
+
+@app.route('/api/user/bills/history', methods=['GET'])
+@token_required
+def user_bill_history():
+    """Get user's bill payment history"""
+    try:
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('limit', 20, type=int)
+        
+        # Get user's bill payments
+        bills = Order.query.filter_by(
+            user_id=g.current_user.id,
+            type='bill_payment'
+        ).order_by(Order.created_at.desc()).paginate(
+            page=page, per_page=per_page, error_out=False
+        )
+        
+        return jsonify({
+            'success': True,
+            'data': [{
+                'id': b.id,
+                'order_id': b.order_id,
+                'biller_code': b.biller_code,
+                'biller_name': b.biller_name,
+                'account_number': b.account_number,
+                'customer_name': b.customer_name,
+                'customer_phone': b.phone_number,
+                'amount': float(b.amount),
+                'status': b.status,
+                'reference': b.provider_reference,
+                'created_at': b.created_at.isoformat()
+            } for b in bills.items],
+            'total': bills.total,
+            'page': page,
+            'total_pages': bills.pages
+        })
+        
+    except Exception as e:
+        print(f"Error fetching user bill history: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/user/bills/stats', methods=['GET'])
+@token_required
+def user_bill_stats():
+    """Get user's bill payment statistics"""
+    try:
+        # Total bill payments made by user
+        total_bills = Order.query.filter_by(
+            user_id=g.current_user.id,
+            type='bill_payment'
+        ).count()
+        
+        # Total bill amount
+        total_amount = db.session.query(db.func.sum(Order.amount)).filter(
+            Order.user_id == g.current_user.id,
+            Order.type == 'bill_payment'
+        ).scalar() or 0
+        
+        # Bills by status
+        completed_bills = Order.query.filter_by(
+            user_id=g.current_user.id,
+            type='bill_payment',
+            status='completed'
+        ).count()
+        
+        pending_bills = Order.query.filter_by(
+            user_id=g.current_user.id,
+            type='bill_payment',
+            status='pending'
+        ).count()
+        
+        failed_bills = Order.query.filter_by(
+            user_id=g.current_user.id,
+            type='bill_payment',
+            status='failed'
+        ).count()
+        
+        # Recent bill payments (last 7 days)
+        seven_days_ago = datetime.utcnow() - timedelta(days=7)
+        recent_bills = Order.query.filter(
+            Order.user_id == g.current_user.id,
+            Order.type == 'bill_payment',
+            Order.created_at >= seven_days_ago
+        ).count()
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'total_bills': total_bills,
+                'total_amount': float(total_amount),
+                'completed_bills': completed_bills,
+                'pending_bills': pending_bills,
+                'failed_bills': failed_bills,
+                'recent_bills': recent_bills
+            }
+        })
+        
+    except Exception as e:
+        print(f"Error fetching user bill stats: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+# ========== USER COMMISSION ENDPOINTS ==========
+
+@app.route('/api/user/commission-stats', methods=['GET'])
+@token_required
+def get_commission_stats():
+    """Get user's commission earnings statistics"""
+    try:
+        from models import Order, CommissionTransaction
+        from sqlalchemy import func
+        
+        print(f"\n📊 COMMISSION STATS REQUEST:")
+        print(f"   User: {g.current_user.username} (ID: {g.current_user.id})")
+        
+        # Get total commission from orders where user is initiator
+        total_commission = db.session.query(func.sum(Order.initiator_commission)).filter(
+            Order.initiator_id == g.current_user.id,
+            Order.status == 'completed'
+        ).scalar() or 0
+        
+        # Count bill payment commissions
+        bill_commission_count = Order.query.filter(
+            Order.initiator_id == g.current_user.id,
+            Order.type == 'bill_payment',
+            Order.status == 'completed'
+        ).count()
+        
+        # Count data sale commissions (if applicable)
+        data_commission_count = Order.query.filter(
+            Order.initiator_id == g.current_user.id,
+            Order.type == 'data',
+            Order.status == 'completed'
+        ).count()
+        
+        # Get pending commission (from orders where user is initiator but not yet completed)
+        pending_commission = db.session.query(func.sum(Order.initiator_commission)).filter(
+            Order.initiator_id == g.current_user.id,
+            Order.status == 'pending'
+        ).scalar() or 0
+        
+        # Get commission by type breakdown
+        commission_by_type = {
+            'bill_payment': bill_commission_count,
+            'data': data_commission_count
+        }
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'total_commission_earned': float(total_commission),
+                'pending_commission': float(pending_commission),
+                'bill_commission_count': bill_commission_count,
+                'data_commission_count': data_commission_count,
+                'commission_by_type': commission_by_type
+            }
+        })
+        
+    except Exception as e:
+        print(f"Error getting commission stats: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/user/commission-transactions', methods=['GET'])
+@token_required
+def get_commission_transactions():
+    """Get list of commission transactions for the user"""
+    try:
+        from models import Order
+        
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('limit', 20, type=int)
+        
+        print(f"\n📊 COMMISSION TRANSACTIONS REQUEST:")
+        print(f"   User: {g.current_user.username} (ID: {g.current_user.id})")
+        print(f"   Page: {page}, Limit: {per_page}")
+        
+        # Get all orders where user is initiator and has commission
+        query = Order.query.filter(
+            Order.initiator_id == g.current_user.id,
+            Order.initiator_commission > 0,
+            Order.status == 'completed'
+        ).order_by(Order.created_at.desc())
+        
+        # Paginate
+        paginated = query.paginate(page=page, per_page=per_page, error_out=False)
+        
+        transactions = []
+        for order in paginated.items:
+            # Get the user who made the purchase (if available)
+            purchaser = User.query.get(order.user_id) if order.user_id else None
+            
+            transactions.append({
+                'id': order.id,
+                'order_id': order.order_id,
+                'type': order.type,
+                'biller_code': order.biller_code,
+                'biller_name': order.biller_name or 'Data Sale',
+                'amount': float(order.amount) if order.amount else 0,
+                'hubtel_commission_rate': float(order.hubtel_commission_rate) if order.hubtel_commission_rate else 0,
+                'commission_earned': float(order.initiator_commission) if order.initiator_commission else 0,
+                'customer_name': order.customer_name or (purchaser.username if purchaser else 'Unknown'),
+                'customer_phone': order.phone_number or (purchaser.phone if purchaser else 'N/A'),
+                'status': order.status,
+                'created_at': order.created_at.isoformat() if order.created_at else None
+            })
+        
+        return jsonify({
+            'success': True,
+            'data': transactions,
+            'pagination': {
+                'page': page,
+                'total': paginated.total,
+                'pages': paginated.pages,
+                'has_prev': paginated.has_prev,
+                'has_next': paginated.has_next
+            }
+        })
+        
+    except Exception as e:
+        print(f"Error getting commission transactions: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/user/commission-summary', methods=['GET'])
+@token_required
+def get_commission_summary():
+    """Get summary of commission earnings (for dashboard)"""
+    try:
+        from models import Order
+        from sqlalchemy import func
+        from datetime import datetime, timedelta
+        
+        user_id = g.current_user.id
+        
+        # Total commission all time
+        total_commission = db.session.query(func.sum(Order.initiator_commission)).filter(
+            Order.initiator_id == user_id,
+            Order.status == 'completed'
+        ).scalar() or 0
+        
+        # Commission this month
+        month_start = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        monthly_commission = db.session.query(func.sum(Order.initiator_commission)).filter(
+            Order.initiator_id == user_id,
+            Order.status == 'completed',
+            Order.created_at >= month_start
+        ).scalar() or 0
+        
+        # Commission this week
+        week_start = datetime.utcnow() - timedelta(days=7)
+        weekly_commission = db.session.query(func.sum(Order.initiator_commission)).filter(
+            Order.initiator_id == user_id,
+            Order.status == 'completed',
+            Order.created_at >= week_start
+        ).scalar() or 0
+        
+        # Commission today
+        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        today_commission = db.session.query(func.sum(Order.initiator_commission)).filter(
+            Order.initiator_id == user_id,
+            Order.status == 'completed',
+            Order.created_at >= today_start
+        ).scalar() or 0
+        
+        # Number of commission transactions
+        transaction_count = Order.query.filter(
+            Order.initiator_id == user_id,
+            Order.initiator_commission > 0,
+            Order.status == 'completed'
+        ).count()
+        
+        # Average commission per transaction
+        avg_commission = 0
+        if transaction_count > 0:
+            avg_commission = total_commission / transaction_count
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'total_commission': float(total_commission),
+                'monthly_commission': float(monthly_commission),
+                'weekly_commission': float(weekly_commission),
+                'today_commission': float(today_commission),
+                'transaction_count': transaction_count,
+                'avg_commission_per_transaction': float(avg_commission)
+            }
+        })
+        
+    except Exception as e:
+        print(f"Error getting commission summary: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ========== UPDATE: User bill payment now earns commission ==========
+
+@app.route('/api/user/bills/pay', methods=['POST'])
+@token_required
+def user_pay_bill():
+    """Process bill payment for a regular user"""
+    try:
+        import uuid
+        data = request.get_json()
+        
+        print(f"\n📥 USER BILL PAYMENT REQUEST:")
+        print(f"   Data: {data}")
+        print(f"   User: {g.current_user.username} (ID: {g.current_user.id})")
+        print(f"   Wallet Balance: ₵{g.current_user.wallet_balance}")
+        
+        biller_code = data.get('biller_code')
+        account_number = data.get('account_number')
+        amount = data.get('amount')
+        customer_name = data.get('customer_name', g.current_user.username)
+        customer_phone = data.get('customer_phone', g.current_user.phone)
+        customer_email = data.get('customer_email', g.current_user.email)
+        meter_number = data.get('meter_number')
+        session_id = data.get('session_id')
+        
+        # Validate required fields
+        missing_fields = []
+        if not biller_code:
+            missing_fields.append('biller_code')
+        if not account_number:
+            missing_fields.append('account_number')
+        if not amount:
+            missing_fields.append('amount')
+        
+        if missing_fields:
+            print(f"❌ Missing required fields: {missing_fields}")
+            return jsonify({
+                'success': False, 
+                'error': f'Missing required fields: {", ".join(missing_fields)}'
+            }), 400
+        
+        amount = float(amount)
+        
+        # For ECG, require meter_number
+        if biller_code == 'ECG' and not meter_number:
+            meter_number = account_number
+            if not meter_number:
+                return jsonify({
+                    'success': False, 
+                    'error': 'Meter number required for ECG. Please select a meter.'
+                }), 400
+        
+        # For GWCL, require meter_number and session_id
+        if biller_code == 'GWCL':
+            if not meter_number:
+                meter_number = account_number
+            if not session_id:
+                return jsonify({
+                    'success': False, 
+                    'error': 'Session ID required for Water bill. Please validate first.'
+                }), 400
+        
+        # Check user wallet balance
+        balance_before = g.current_user.wallet_balance
+        if balance_before < amount:
+            return jsonify({
+                'success': False,
+                'error': f'Insufficient balance. Need GHS {amount:.2f}. Your balance: GHS {balance_before:.2f}'
+            }), 400
+        
+        # Process payment via Hubtel
+        hubtel = HubtelService()
+        callback_url = f"{os.environ.get('BASE_URL')}/api/webhooks/hubtel"
+        client_reference = f"USER-{uuid.uuid4().hex[:12].upper()}"
+        
+        payment_result = None
+        
+        try:
+            if biller_code == 'DSTV':
+                payment_result = hubtel.pay_dstv(account_number, amount, client_reference, callback_url)
+            elif biller_code == 'GOTV':
+                payment_result = hubtel.pay_gotv(account_number, amount, client_reference, callback_url)
+            elif biller_code == 'STARTIMES':
+                payment_result = hubtel.pay_startimes(account_number, amount, client_reference, callback_url)
+            elif biller_code == 'ECG':
+                if not meter_number:
+                    return jsonify({'success': False, 'error': 'Meter number required for ECG'}), 400
+                payment_result = hubtel.pay_ecg(customer_phone, meter_number, amount, client_reference, callback_url)
+            elif biller_code == 'GWCL':
+                if not meter_number or not session_id:
+                    return jsonify({'success': False, 'error': 'Meter number and session ID required for Water'}), 400
+                payment_result = hubtel.pay_water(meter_number, customer_phone, customer_email, session_id, amount, client_reference, callback_url)
+            else:
+                return jsonify({'success': False, 'error': f'Unsupported biller: {biller_code}'}), 400
+        except Exception as hubtel_error:
+            print(f"❌ Hubtel payment error: {hubtel_error}")
+            return jsonify({'success': False, 'error': f'Hubtel payment failed: {str(hubtel_error)}'}), 400
+        
+        if not payment_result or not payment_result.get('success'):
+            error_msg = payment_result.get('error', 'Payment failed') if payment_result else 'Unknown error'
+            return jsonify({'success': False, 'error': error_msg}), 400
+        
+        # Determine status based on response code
+        response_code = payment_result.get('response_code')
+        if response_code == '0000':
+            status = 'completed'
+        elif response_code == '0001':
+            status = 'pending'
+        else:
+            status = 'failed'
+        
+        # Deduct from user wallet
+        g.current_user.wallet_balance -= amount
+        balance_after = g.current_user.wallet_balance
+        
+        # Generate order ID
+        order_id = f"BILL-{uuid.uuid4().hex[:8].upper()}"
+        
+        biller_names = {
+            'DSTV': 'DSTV',
+            'GOTV': 'GoTV',
+            'STARTIMES': 'StarTimes',
+            'ECG': 'ECG Electricity',
+            'GWCL': 'Ghana Water'
+        }
+        
+        # Calculate commission (if applicable)
+        commission_service = CommissionService()
+        service_type = commission_service.get_service_type(biller_code)
+        commission = commission_service.calculate_commission(amount, service_type)
+        
+        # Check if user is an agent or has a referrer
+        user_commission = 0
+        if g.current_user.is_agent:
+            user_commission = commission['initiator_commission']
+            print(f"💰 User is an agent! Commission earned: ₵{user_commission:.4f}")
+        elif g.current_user.referred_by:
+            referrer = User.query.get(g.current_user.referred_by)
+            if referrer:
+                user_commission = commission['initiator_commission']
+                print(f"💰 Referrer ({referrer.username}) gets commission: ₵{user_commission:.4f}")
+        
+        # Create order record - using existing fields
+        order = Order(
+            order_id=order_id,
+            user_id=g.current_user.id,
+            type='bill_payment',
+            biller_code=biller_code,
+            biller_name=biller_names.get(biller_code, biller_code),
+            account_number=account_number,
+            customer_name=customer_name,
+            phone_number=customer_phone,
+            amount=amount,
+            cost=0,  # No cost for bill payments
+            profit=0,  # No profit for bill payments
+            status=status,
+            payment_method='wallet',
+            provider='hubtel',
+            provider_reference=payment_result.get('client_reference'),
+            provider_order_id=payment_result.get('transaction_id'),
+            # Commission fields
+            hubtel_commission_rate=commission['hubtel_rate'] if user_commission > 0 else 0,
+            total_commission=commission['total_commission'] if user_commission > 0 else 0,
+            admin_commission=commission['admin_commission'] if user_commission > 0 else 0,
+            initiator_commission=user_commission if user_commission > 0 else 0,
+            initiator_type='user' if user_commission > 0 else None,
+            initiator_id=g.current_user.id if user_commission > 0 else None,
+            completed_at=datetime.utcnow() if status == 'completed' else None,
+            created_at=datetime.utcnow()
+        )
+        db.session.add(order)
+        
+        # Create transaction record with balance info (Transaction model has balance_before/after)
+        transaction = Transaction(
+            user_id=g.current_user.id,
+            type='bill_payment',
+            amount=amount,
+            balance_before=balance_before,
+            balance_after=balance_after,
+            description=f'Bill payment: {biller_names.get(biller_code, biller_code)} - {account_number}',
+            reference=order_id,
+            status=status,
+            meta_data={
+                'biller_code': biller_code,
+                'biller_name': biller_names.get(biller_code, biller_code),
+                'account_number': account_number,
+                'meter_number': meter_number,
+                'customer_name': customer_name,
+                'customer_phone': customer_phone,
+                'commission_earned': user_commission if user_commission > 0 else 0,
+                'response_code': response_code
+            }
+        )
+        db.session.add(transaction)
+        
+        db.session.commit()
+        
+        # If user earned commission, credit their wallet
+        if user_commission > 0 and status == 'completed':
+            g.current_user.wallet_balance += user_commission
+            # Create commission transaction
+            commission_trans = Transaction(
+                user_id=g.current_user.id,
+                type='commission',
+                amount=user_commission,
+                balance_before=g.current_user.wallet_balance - user_commission,
+                balance_after=g.current_user.wallet_balance,
+                description=f'Commission from bill payment: {biller_names.get(biller_code, biller_code)}',
+                reference=f'COMM-{order_id}',
+                status='completed'
+            )
+            db.session.add(commission_trans)
+            db.session.commit()
+            db.session.refresh(g.current_user)
+        
+        return jsonify({
+            'success': True,
+            'message': f'✅ Bill payment processed! ₵{amount:.2f} paid for {customer_name}',
+            'data': {
+                'order_id': order_id,
+                'reference': payment_result.get('client_reference'),
+                'transaction_id': payment_result.get('transaction_id'),
+                'amount': amount,
+                'biller_name': biller_names.get(biller_code, biller_code),
+                'account_number': account_number,
+                'meter_number': meter_number,
+                'customer_name': customer_name,
+                'customer_phone': customer_phone,
+                'status': status,
+                'balance_before': float(balance_before),
+                'amount_paid': float(amount),
+                'new_balance': float(g.current_user.wallet_balance),
+                'commission_earned': float(user_commission) if user_commission > 0 else 0,
+                'response_code': response_code
+            }
+        }), 200
+        
+    except Exception as e:
+        print(f"❌ User bill payment error: {e}")
+        import traceback
+        traceback.print_exc()
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+# ========== USER RECURRING BILL ENDPOINTS ==========
+
+@app.route('/api/user/bills/recurring', methods=['GET'])
+@token_required
+def user_get_recurring_bills():
+    """Get all recurring bills for the current user"""
+    try:
+        print(f"\n📋 GET RECURRING BILLS REQUEST:")
+        print(f"   User: {g.current_user.username} (ID: {g.current_user.id})")
+        
+        recurring_bills = RecurringBill.query.filter_by(
+            user_id=g.current_user.id,
+            enabled=True
+        ).order_by(RecurringBill.next_due_date.asc()).all()
+        
+        return jsonify({
+            'success': True,
+            'data': [{
+                'id': r.id,
+                'biller_code': r.biller_code,
+                'biller_name': r.biller_name,
+                'account_number': r.account_number,
+                'customer_name': r.customer_name,
+                'frequency': r.frequency,
+                'auto_pay': r.auto_pay,
+                'enabled': r.enabled,
+                'max_amount': float(r.max_amount) if r.max_amount else 0,
+                'next_due_date': r.next_due_date.isoformat() if r.next_due_date else None,
+                'last_paid_date': r.last_paid_date.isoformat() if r.last_paid_date else None,
+                'created_at': r.created_at.isoformat() if r.created_at else None,
+                'updated_at': r.updated_at.isoformat() if r.updated_at else None
+            } for r in recurring_bills]
+        })
+        
+    except Exception as e:
+        print(f"Error getting recurring bills: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/user/bills/recurring', methods=['POST'])
+@token_required
+def user_create_recurring_bill():
+    """Create a recurring bill for the current user"""
+    try:
+        data = request.get_json()
+        
+        print(f"\n📋 CREATE RECURRING BILL REQUEST:")
+        print(f"   Data: {data}")
+        print(f"   User: {g.current_user.username} (ID: {g.current_user.id})")
+        
+        biller_code = data.get('biller_code')
+        biller_name = data.get('biller_name')
+        account_number = data.get('account_number')
+        customer_name = data.get('customer_name', g.current_user.username)
+        frequency = data.get('frequency', 'monthly')
+        auto_pay = data.get('auto_pay', True)
+        max_amount = data.get('max_amount', 0)
+        
+        # Validate required fields
+        if not biller_code:
+            return jsonify({
+                'success': False, 
+                'error': 'Biller code is required'
+            }), 400
+        
+        if not account_number:
+            return jsonify({
+                'success': False, 
+                'error': 'Account number is required'
+            }), 400
+        
+        # Validate frequency
+        valid_frequencies = ['weekly', 'monthly', 'quarterly']
+        if frequency not in valid_frequencies:
+            return jsonify({
+                'success': False, 
+                'error': f'Invalid frequency. Must be one of: {", ".join(valid_frequencies)}'
+            }), 400
+        
+        # Validate max_amount
+        try:
+            max_amount = float(max_amount)
+            if max_amount < 0:
+                return jsonify({
+                    'success': False, 
+                    'error': 'Max amount must be greater than or equal to 0'
+                }), 400
+        except (TypeError, ValueError):
+            return jsonify({
+                'success': False, 
+                'error': 'Invalid max amount format'
+            }), 400
+        
+        # Check if recurring bill already exists for this biller and account
+        existing = RecurringBill.query.filter(
+            RecurringBill.user_id == g.current_user.id,
+            RecurringBill.biller_code == biller_code,
+            RecurringBill.account_number == account_number,
+            RecurringBill.enabled == True
+        ).first()
+        
+        if existing:
+            return jsonify({
+                'success': False, 
+                'error': f'A recurring bill for {biller_name or biller_code} already exists',
+                'data': {
+                    'id': existing.id,
+                    'frequency': existing.frequency,
+                    'next_due_date': existing.next_due_date.isoformat() if existing.next_due_date else None
+                }
+            }), 409
+        
+        # Calculate next due date based on frequency
+        from dateutil.relativedelta import relativedelta
+        
+        today = datetime.utcnow()
+        if frequency == 'weekly':
+            next_due = today + relativedelta(weeks=1)
+        elif frequency == 'monthly':
+            next_due = today + relativedelta(months=1)
+        elif frequency == 'quarterly':
+            next_due = today + relativedelta(months=3)
+        else:
+            next_due = today + relativedelta(months=1)
+        
+        # Create recurring bill
+        recurring = RecurringBill(
+            user_id=g.current_user.id,
+            biller_code=biller_code,
+            biller_name=biller_name or biller_code,
+            account_number=account_number,
+            customer_name=customer_name,
+            frequency=frequency,
+            auto_pay=auto_pay,
+            max_amount=max_amount,
+            enabled=True,
+            next_due_date=next_due,
+            created_at=datetime.utcnow()
+        )
+        
+        db.session.add(recurring)
+        db.session.commit()
+        db.session.refresh(recurring)
+        
+        return jsonify({
+            'success': True,
+            'message': 'Recurring bill created successfully',
+            'data': {
+                'id': recurring.id,
+                'biller_code': recurring.biller_code,
+                'biller_name': recurring.biller_name,
+                'account_number': recurring.account_number,
+                'customer_name': recurring.customer_name,
+                'frequency': recurring.frequency,
+                'auto_pay': recurring.auto_pay,
+                'enabled': recurring.enabled,
+                'max_amount': float(recurring.max_amount) if recurring.max_amount else 0,
+                'next_due_date': recurring.next_due_date.isoformat() if recurring.next_due_date else None,
+                'created_at': recurring.created_at.isoformat() if recurring.created_at else None
+            }
+        }), 201
+        
+    except Exception as e:
+        print(f"Error creating recurring bill: {e}")
+        import traceback
+        traceback.print_exc()
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/user/bills/recurring/<int:bill_id>', methods=['PUT'])
+@token_required
+def user_update_recurring_bill(bill_id):
+    """Update a recurring bill"""
+    try:
+        data = request.get_json()
+        
+        print(f"\n📋 UPDATE RECURRING BILL REQUEST:")
+        print(f"   Bill ID: {bill_id}")
+        print(f"   Data: {data}")
+        print(f"   User: {g.current_user.username} (ID: {g.current_user.id})")
+        
+        recurring = RecurringBill.query.get(bill_id)
+        
+        if not recurring:
+            return jsonify({'success': False, 'error': 'Recurring bill not found'}), 404
+        
+        # Check if this bill belongs to the current user
+        if recurring.user_id != g.current_user.id:
+            return jsonify({'success': False, 'error': 'You do not have permission to modify this bill'}), 403
+        
+        # Update fields
+        if 'enabled' in data:
+            recurring.enabled = data['enabled']
+        if 'auto_pay' in data:
+            recurring.auto_pay = data['auto_pay']
+        if 'max_amount' in data:
+            try:
+                recurring.max_amount = float(data['max_amount'])
+            except (TypeError, ValueError):
+                return jsonify({'success': False, 'error': 'Invalid max amount format'}), 400
+        if 'frequency' in data:
+            valid_frequencies = ['weekly', 'monthly', 'quarterly']
+            if data['frequency'] not in valid_frequencies:
+                return jsonify({
+                    'success': False, 
+                    'error': f'Invalid frequency. Must be one of: {", ".join(valid_frequencies)}'
+                }), 400
+            recurring.frequency = data['frequency']
+        if 'account_number' in data:
+            recurring.account_number = data['account_number']
+        if 'customer_name' in data:
+            recurring.customer_name = data['customer_name']
+        
+        # If frequency changed, recalculate next due date
+        if 'frequency' in data:
+            from dateutil.relativedelta import relativedelta
+            today = datetime.utcnow()
+            if recurring.frequency == 'weekly':
+                recurring.next_due_date = today + relativedelta(weeks=1)
+            elif recurring.frequency == 'monthly':
+                recurring.next_due_date = today + relativedelta(months=1)
+            elif recurring.frequency == 'quarterly':
+                recurring.next_due_date = today + relativedelta(months=3)
+        
+        recurring.updated_at = datetime.utcnow()
+        db.session.commit()
+        db.session.refresh(recurring)
+        
+        return jsonify({
+            'success': True,
+            'message': 'Recurring bill updated successfully',
+            'data': {
+                'id': recurring.id,
+                'biller_code': recurring.biller_code,
+                'biller_name': recurring.biller_name,
+                'account_number': recurring.account_number,
+                'customer_name': recurring.customer_name,
+                'frequency': recurring.frequency,
+                'auto_pay': recurring.auto_pay,
+                'enabled': recurring.enabled,
+                'max_amount': float(recurring.max_amount) if recurring.max_amount else 0,
+                'next_due_date': recurring.next_due_date.isoformat() if recurring.next_due_date else None,
+                'updated_at': recurring.updated_at.isoformat() if recurring.updated_at else None
+            }
+        })
+        
+    except Exception as e:
+        print(f"Error updating recurring bill: {e}")
+        import traceback
+        traceback.print_exc()
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/user/bills/recurring/<int:bill_id>', methods=['DELETE'])
+@token_required
+def user_delete_recurring_bill(bill_id):
+    """Delete a recurring bill (soft delete by setting enabled=False)"""
+    try:
+        print(f"\n📋 DELETE RECURRING BILL REQUEST:")
+        print(f"   Bill ID: {bill_id}")
+        print(f"   User: {g.current_user.username} (ID: {g.current_user.id})")
+        
+        recurring = RecurringBill.query.get(bill_id)
+        
+        if not recurring:
+            return jsonify({'success': False, 'error': 'Recurring bill not found'}), 404
+        
+        # Check if this bill belongs to the current user
+        if recurring.user_id != g.current_user.id:
+            return jsonify({'success': False, 'error': 'You do not have permission to delete this bill'}), 403
+        
+        # Soft delete - disable the recurring bill
+        recurring.enabled = False
+        recurring.updated_at = datetime.utcnow()
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': 'Recurring bill disabled successfully'
+        })
+        
+    except Exception as e:
+        print(f"Error deleting recurring bill: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/user/bills/recurring/<int:bill_id>/pay', methods=['POST'])
+@token_required
+def user_pay_recurring_bill(bill_id):
+    """Manually pay a recurring bill (trigger payment)"""
+    try:
+        data = request.get_json()
+        amount = data.get('amount')
+        
+        print(f"\n📋 PAY RECURRING BILL REQUEST:")
+        print(f"   Bill ID: {bill_id}")
+        print(f"   Amount: {amount}")
+        print(f"   User: {g.current_user.username} (ID: {g.current_user.id})")
+        
+        recurring = RecurringBill.query.get(bill_id)
+        
+        if not recurring:
+            return jsonify({'success': False, 'error': 'Recurring bill not found'}), 404
+        
+        # Check if this bill belongs to the current user
+        if recurring.user_id != g.current_user.id:
+            return jsonify({'success': False, 'error': 'You do not have permission to pay this bill'}), 403
+        
+        # Check if bill is enabled
+        if not recurring.enabled:
+            return jsonify({'success': False, 'error': 'This recurring bill is disabled'}), 400
+        
+        # Validate amount
+        try:
+            amount = float(amount) if amount else 0
+            if amount <= 0:
+                return jsonify({'success': False, 'error': 'Amount must be greater than 0'}), 400
+            
+            # If max_amount is set, ensure amount doesn't exceed it
+            if recurring.max_amount > 0 and amount > recurring.max_amount:
+                return jsonify({
+                    'success': False, 
+                    'error': f'Amount exceeds max limit of ₵{recurring.max_amount:.2f}'
+                }), 400
+        except (TypeError, ValueError):
+            return jsonify({'success': False, 'error': 'Invalid amount format'}), 400
+        
+        # Check user wallet balance
+        if g.current_user.wallet_balance < amount:
+            return jsonify({
+                'success': False,
+                'error': f'Insufficient balance. Need ₵{amount:.2f}. Your balance: ₵{g.current_user.wallet_balance:.2f}'
+            }), 400
+        
+        # Process payment via Hubtel
+        import uuid
+        hubtel = HubtelService()
+        callback_url = f"{os.environ.get('BASE_URL')}/api/webhooks/hubtel"
+        client_reference = f"RECUR-{uuid.uuid4().hex[:12].upper()}"
+        
+        payment_result = None
+        
+        try:
+            if recurring.biller_code == 'DSTV':
+                payment_result = hubtel.pay_dstv(recurring.account_number, amount, client_reference, callback_url)
+            elif recurring.biller_code == 'GOTV':
+                payment_result = hubtel.pay_gotv(recurring.account_number, amount, client_reference, callback_url)
+            elif recurring.biller_code == 'STARTIMES':
+                payment_result = hubtel.pay_startimes(recurring.account_number, amount, client_reference, callback_url)
+            elif recurring.biller_code == 'ECG':
+                # For ECG, we need meter number. Try to get from account_number
+                payment_result = hubtel.pay_ecg(
+                    g.current_user.phone or '0557388622', 
+                    recurring.account_number, 
+                    amount, 
+                    client_reference, 
+                    callback_url
+                )
+            elif recurring.biller_code == 'GWCL':
+                # For GWCL, we need session_id - use account_number as meter_number
+                payment_result = hubtel.pay_water(
+                    recurring.account_number, 
+                    g.current_user.phone or '0557388622', 
+                    g.current_user.email or '', 
+                    '',  # session_id - may need to validate first
+                    amount, 
+                    client_reference, 
+                    callback_url
+                )
+            else:
+                return jsonify({'success': False, 'error': f'Unsupported biller: {recurring.biller_code}'}), 400
+        except Exception as hubtel_error:
+            print(f"❌ Hubtel payment error: {hubtel_error}")
+            return jsonify({'success': False, 'error': f'Hubtel payment failed: {str(hubtel_error)}'}), 400
+        
+        if not payment_result or not payment_result.get('success'):
+            error_msg = payment_result.get('error', 'Payment failed') if payment_result else 'Unknown error'
+            return jsonify({'success': False, 'error': error_msg}), 400
+        
+        # Deduct from user wallet
+        balance_before = g.current_user.wallet_balance
+        g.current_user.wallet_balance -= amount
+        
+        # Generate order ID
+        order_id = f"RECUR-{uuid.uuid4().hex[:8].upper()}"
+        
+        # Create order record
+        order = Order(
+            user_id=g.current_user.id,
+            order_id=order_id,
+            type='bill_payment',
+            biller_code=recurring.biller_code,
+            biller_name=recurring.biller_name,
+            account_number=recurring.account_number,
+            customer_name=recurring.customer_name,
+            phone_number=g.current_user.phone,
+            amount=amount,
+            status='completed',
+            payment_method='wallet',
+            provider='hubtel',
+            provider_reference=payment_result.get('client_reference'),
+            provider_order_id=payment_result.get('transaction_id'),
+            completed_at=datetime.utcnow(),
+            created_at=datetime.utcnow(),
+            is_recurring=True,
+            recurring_bill_id=recurring.id
+        )
+        db.session.add(order)
+        
+        # Create transaction record
+        transaction = Transaction(
+            user_id=g.current_user.id,
+            type='bill_payment_recurring',
+            amount=amount,
+            balance_before=balance_before,
+            balance_after=g.current_user.wallet_balance,
+            description=f'Recurring bill payment: {recurring.biller_name} - {recurring.account_number}',
+            reference=order_id,
+            status='completed',
+            meta_data={
+                'recurring_bill_id': recurring.id,
+                'biller_code': recurring.biller_code,
+                'biller_name': recurring.biller_name,
+                'account_number': recurring.account_number
+            }
+        )
+        db.session.add(transaction)
+        
+        # Update recurring bill - set last_paid_date and next_due_date
+        recurring.last_paid_date = datetime.utcnow()
+        
+        # Calculate next due date based on frequency
+        from dateutil.relativedelta import relativedelta
+        today = datetime.utcnow()
+        if recurring.frequency == 'weekly':
+            recurring.next_due_date = today + relativedelta(weeks=1)
+        elif recurring.frequency == 'monthly':
+            recurring.next_due_date = today + relativedelta(months=1)
+        elif recurring.frequency == 'quarterly':
+            recurring.next_due_date = today + relativedelta(months=3)
+        
+        recurring.updated_at = datetime.utcnow()
+        
+        db.session.commit()
+        db.session.refresh(g.current_user)
+        
+        return jsonify({
+            'success': True,
+            'message': f'✅ Recurring bill paid successfully! ₵{amount:.2f} paid for {recurring.biller_name}',
+            'data': {
+                'order_id': order_id,
+                'reference': payment_result.get('client_reference'),
+                'transaction_id': payment_result.get('transaction_id'),
+                'amount': amount,
+                'biller_name': recurring.biller_name,
+                'account_number': recurring.account_number,
+                'status': 'completed',
+                'balance_before': float(balance_before),
+                'amount_paid': float(amount),
+                'new_balance': float(g.current_user.wallet_balance),
+                'next_due_date': recurring.next_due_date.isoformat() if recurring.next_due_date else None,
+                'last_paid_date': recurring.last_paid_date.isoformat() if recurring.last_paid_date else None
+            }
+        }), 200
+        
+    except Exception as e:
+        print(f"❌ Pay recurring bill error: {e}")
+        import traceback
+        traceback.print_exc()
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/user/bills/recurring/<int:bill_id>/auto-pay', methods=['POST'])
+@token_required
+def user_toggle_auto_pay(bill_id):
+    """Toggle auto-pay for a recurring bill"""
+    try:
+        data = request.get_json()
+        auto_pay = data.get('auto_pay', True)
+        
+        print(f"\n📋 TOGGLE AUTO-PAY REQUEST:")
+        print(f"   Bill ID: {bill_id}")
+        print(f"   Auto Pay: {auto_pay}")
+        print(f"   User: {g.current_user.username} (ID: {g.current_user.id})")
+        
+        recurring = RecurringBill.query.get(bill_id)
+        
+        if not recurring:
+            return jsonify({'success': False, 'error': 'Recurring bill not found'}), 404
+        
+        # Check if this bill belongs to the current user
+        if recurring.user_id != g.current_user.id:
+            return jsonify({'success': False, 'error': 'You do not have permission to modify this bill'}), 403
+        
+        # Toggle auto-pay
+        recurring.auto_pay = auto_pay
+        recurring.updated_at = datetime.utcnow()
+        db.session.commit()
+        
+        status = 'enabled' if auto_pay else 'disabled'
+        
+        return jsonify({
+            'success': True,
+            'message': f'Auto-pay {status} for this recurring bill',
+            'data': {
+                'id': recurring.id,
+                'auto_pay': recurring.auto_pay,
+                'enabled': recurring.enabled
+            }
+        })
+        
+    except Exception as e:
+        print(f"Error toggling auto-pay: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/user/bills/recurring/<int:bill_id>/skip', methods=['POST'])
+@token_required
+def user_skip_recurring_bill(bill_id):
+    """Skip the next payment for a recurring bill"""
+    try:
+        print(f"\n📋 SKIP RECURRING BILL REQUEST:")
+        print(f"   Bill ID: {bill_id}")
+        print(f"   User: {g.current_user.username} (ID: {g.current_user.id})")
+        
+        recurring = RecurringBill.query.get(bill_id)
+        
+        if not recurring:
+            return jsonify({'success': False, 'error': 'Recurring bill not found'}), 404
+        
+        # Check if this bill belongs to the current user
+        if recurring.user_id != g.current_user.id:
+            return jsonify({'success': False, 'error': 'You do not have permission to skip this bill'}), 403
+        
+        # Skip the next payment by moving next_due_date forward by one frequency cycle
+        from dateutil.relativedelta import relativedelta
+        current_due = recurring.next_due_date or datetime.utcnow()
+        
+        if recurring.frequency == 'weekly':
+            recurring.next_due_date = current_due + relativedelta(weeks=1)
+        elif recurring.frequency == 'monthly':
+            recurring.next_due_date = current_due + relativedelta(months=1)
+        elif recurring.frequency == 'quarterly':
+            recurring.next_due_date = current_due + relativedelta(months=3)
+        
+        recurring.updated_at = datetime.utcnow()
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': 'Next payment skipped successfully',
+            'data': {
+                'id': recurring.id,
+                'next_due_date': recurring.next_due_date.isoformat() if recurring.next_due_date else None
+            }
+        })
+        
+    except Exception as e:
+        print(f"Error skipping recurring bill: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/user/bills/recurring/check-due', methods=['GET'])
+@token_required
+def user_check_due_recurring_bills():
+    """Check which recurring bills are due for payment"""
+    try:
+        print(f"\n📋 CHECK DUE RECURRING BILLS REQUEST:")
+        print(f"   User: {g.current_user.username} (ID: {g.current_user.id})")
+        
+        today = datetime.utcnow()
+        
+        # Get recurring bills that are due (next_due_date <= today)
+        due_bills = RecurringBill.query.filter(
+            RecurringBill.user_id == g.current_user.id,
+            RecurringBill.enabled == True,
+            RecurringBill.next_due_date <= today
+        ).all()
+        
+        # Get upcoming bills (next_due_date within the next 7 days)
+        upcoming_date = today + timedelta(days=7)
+        upcoming_bills = RecurringBill.query.filter(
+            RecurringBill.user_id == g.current_user.id,
+            RecurringBill.enabled == True,
+            RecurringBill.next_due_date > today,
+            RecurringBill.next_due_date <= upcoming_date
+        ).order_by(RecurringBill.next_due_date.asc()).all()
+        
+        # Format due bills
+        due_list = []
+        for bill in due_bills:
+            due_list.append({
+                'id': bill.id,
+                'biller_name': bill.biller_name,
+                'biller_code': bill.biller_code,
+                'account_number': bill.account_number,
+                'max_amount': float(bill.max_amount) if bill.max_amount else 0,
+                'frequency': bill.frequency,
+                'auto_pay': bill.auto_pay,
+                'next_due_date': bill.next_due_date.isoformat() if bill.next_due_date else None,
+                'days_overdue': (today - bill.next_due_date).days if bill.next_due_date else 0
+            })
+        
+        # Format upcoming bills
+        upcoming_list = []
+        for bill in upcoming_bills:
+            upcoming_list.append({
+                'id': bill.id,
+                'biller_name': bill.biller_name,
+                'biller_code': bill.biller_code,
+                'account_number': bill.account_number,
+                'max_amount': float(bill.max_amount) if bill.max_amount else 0,
+                'frequency': bill.frequency,
+                'auto_pay': bill.auto_pay,
+                'next_due_date': bill.next_due_date.isoformat() if bill.next_due_date else None,
+                'days_until_due': (bill.next_due_date - today).days if bill.next_due_date else 0
+            })
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'due_bills': due_list,
+                'due_count': len(due_list),
+                'upcoming_bills': upcoming_list,
+                'upcoming_count': len(upcoming_list),
+                'total_active': RecurringBill.query.filter(
+                    RecurringBill.user_id == g.current_user.id,
+                    RecurringBill.enabled == True
+                ).count()
+            }
+        })
+        
+    except Exception as e:
+        print(f"Error checking due recurring bills: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/user/permissions', methods=['GET'])
 @token_required
@@ -15889,22 +21642,45 @@ def get_user_price(network, size_gb):
     # Return 0 if not set - admin must configure
     return 0
 
-def get_agent_price(network, size_gb):
-    """Get agent wholesale price from database (set by admin)"""
+def get_agent_price(network, size_gb, delivery_type=None):
+    """Get agent wholesale price from database - supports delivery-specific pricing"""
     from models import PriceSetting
     
+    print(f"🔍 get_agent_price called with: network={network}, size_gb={size_gb}, delivery_type={delivery_type}")
+    
+    # First, try to get delivery-specific price if delivery_type is provided
+    if delivery_type:
+        setting = PriceSetting.query.filter_by(
+            category='agent_price',
+            network=network,
+            size_gb=size_gb,
+            delivery_type=delivery_type,
+            is_available=True
+        ).first()
+        
+        if setting:
+            price = float(setting.price)
+            print(f"   ✅ Found {delivery_type} agent price: ₵{price}")
+            return price
+        else:
+            print(f"   ⚠️ No {delivery_type} price found, checking base price...")
+    
+    # Fallback to base price (no delivery_type)
     setting = PriceSetting.query.filter_by(
         category='agent_price',
         network=network,
-        size_gb=size_gb
+        size_gb=size_gb,
+        delivery_type=None,
+        is_available=True
     ).first()
     
     if setting:
-        return float(setting.price)
+        price = float(setting.price)
+        print(f"   ✅ Found base agent price: ₵{price}")
+        return price
     
-    # Return 0 if not set - admin must configure
+    print(f"   ❌ No price found for {network} {size_gb}GB")
     return 0
-
 # ========== ANNOUNCEMENT ROUTES ==========
 
 @app.route('/api/announcement/active', methods=['GET'])
@@ -17563,7 +23339,7 @@ def debug_agent_orders():
 @token_required
 @agent_required
 def get_agent_orders():
-    """Get all orders for the agent with detailed information"""
+    """Get all orders for the agent with detailed information matching frontend expectations"""
     try:
         agent = g.current_user
         
@@ -17572,19 +23348,17 @@ def get_agent_orders():
         print("="*60)
         print(f"Agent ID: {agent.id}")
         print(f"Agent Username: {agent.username}")
-        print(f"Agent Email: {agent.email}")
-        print(f"Is Agent: {agent.is_agent}")
         
         # Get pagination parameters
         page = request.args.get('page', 1, type=int)
-        per_page = request.args.get('limit', 20, type=int)
+        per_page = request.args.get('limit', 50, type=int)
         status_filter = request.args.get('status', 'all')
         search = request.args.get('search', '')
         
         # Build query
         query = Order.query.filter_by(agent_id=agent.id)
         
-        # Apply status filter
+        # Apply status filter based on delivery_status (frontend expects this)
         if status_filter != 'all':
             if status_filter == 'delivered':
                 query = query.filter(Order.delivery_status == 'delivered')
@@ -17605,13 +23379,10 @@ def get_agent_orders():
                 )
             )
         
-        # Get paginated results
-        paginated = query.order_by(Order.created_at.desc()).paginate(
-            page=page, per_page=per_page, error_out=False
-        )
+        # Get all orders (no pagination for frontend table)
+        orders = query.order_by(Order.created_at.desc()).all()
         
-        orders = paginated.items
-        print(f"\nFound {len(orders)} orders for agent {agent.id} (Page {page} of {paginated.pages})")
+        print(f"\nFound {len(orders)} orders for agent {agent.id}")
         
         orders_list = []
         for order in orders:
@@ -17621,54 +23392,114 @@ def get_agent_orders():
             # Calculate profit (if not already stored)
             profit = order.profit if order.profit else (order.amount - order.cost) if order.cost else 0
             
+            # SAFELY handle None values
+            size_gb = order.size_gb if order.size_gb is not None else 0
+            quantity = order.quantity if order.quantity is not None else 1
+            total_gb = size_gb * quantity
+            
+            # Get customer name from order or user
+            customer_name = order.customer_name
+            if not customer_name and order.user_id:
+                user = User.query.get(order.user_id)
+                if user:
+                    customer_name = user.username
+            
+            # Format delivery status for display
+            delivery_status = order.delivery_status or 'pending'
+            status_display_map = {
+                'pending': '⏳ Pending',
+                'queued': '📋 Queued',
+                'processing': '🔄 Processing',
+                'delivered': '✅ Delivered',
+                'failed': '❌ Failed',
+                'cancelled': '🚫 Cancelled'
+            }
+            
+            # Get the correct amount fields
+            customer_paid = order.amount if order.amount else 0
+            amount_deducted = order.cost if order.cost else (order.amount if order.amount else 0)
+            
             orders_list.append({
-                # Basic Info
+                # Basic Info - matches frontend expectations
                 'id': order.id,
                 'order_id': order.order_id,
-                'customer_name': order.customer_name or 'Customer',
+                'customer_name': customer_name or 'Customer',
                 'customer_phone': order.phone_number,
+                'phone': order.phone_number,  # Alias for compatibility
                 
                 # Product Info
                 'network': order.network,
-                'size_gb': order.size_gb,
-                'quantity': order.quantity,
-                'total_gb': order.size_gb * order.quantity,
+                'size_gb': size_gb,
+                'quantity': quantity,
+                'total_gb': total_gb,
                 
-                # Financial Info
-                'amount': float(order.amount),  # Customer paid
+                # Bill Payment Specific Fields (if applicable)
+                'type': getattr(order, 'type', 'data'),
+                'biller_code': getattr(order, 'biller_code', None),
+                'biller_name': getattr(order, 'biller_name', None),
+                'account_number': getattr(order, 'account_number', None),
+                
+                # Financial Info - MATCHES FRONTEND EXPECTATIONS
+                'customer_paid': float(customer_paid),  # What customer paid
+                'amount': float(customer_paid),  # Alias for compatibility
+                'amount_deducted': float(amount_deducted),  # What was deducted from wallet
                 'cost': float(order.cost) if order.cost else 0,  # Wholesale cost
                 'profit': float(profit),  # Agent profit
-                'balance_before': float(transaction.balance_before) if transaction else 0,
-                'balance_after': float(transaction.balance_after) if transaction else 0,
-                'amount_deducted': float(order.cost) if order.cost else float(order.amount),
+                'balance_before': float(transaction.balance_before) if transaction and transaction.balance_before else 0,
+                'balance_after': float(transaction.balance_after) if transaction and transaction.balance_after else 0,
                 
-                # Status Info
+                # Commission Info
+                'commission_earned': float(order.initiator_commission) if hasattr(order, 'initiator_commission') and order.initiator_commission else 0,
+                'hubtel_commission_rate': float(order.hubtel_commission_rate) if hasattr(order, 'hubtel_commission_rate') and order.hubtel_commission_rate else 0,
+                
+                # Status Info - MATCHES FRONTEND EXPECTATIONS
                 'status': order.status,
-                'delivery_status': order.delivery_status or 'pending',
-                'delivery_status_display': get_status_display(order.delivery_status or 'pending'),
+                'delivery_status': delivery_status,
+                'delivery_status_display': status_display_map.get(delivery_status, delivery_status),
                 'delivery_status_updated_at': order.delivery_status_updated_at.isoformat() if order.delivery_status_updated_at else None,
+                'updated_at': order.delivery_status_updated_at.strftime('%Y-%m-%d %H:%M:%S') if order.delivery_status_updated_at else None,
                 
                 # Provider Info
-                'provider': order.provider,
-                'provider_order_id': order.provider_order_id,
-                'provider_reference': order.provider_reference,
+                'provider': getattr(order, 'provider', 'digimall'),
+                'provider_order_id': getattr(order, 'provider_order_id', None),
+                'provider_reference': getattr(order, 'provider_reference', None),
                 
-                # Source Info
+                # Source Info - FRONTEND USES THIS
                 'source': 'Agent' if order.agent_id else 'User',
-                'payment_method': order.payment_method,
+                'agent_id': order.agent_id,
+                'user_id': order.user_id,
+                'payment_method': getattr(order, 'payment_method', 'wallet'),
                 
-                # Timestamps
+                # Timestamps - FORMATTED FOR DISPLAY
                 'created_at': order.created_at.isoformat() if order.created_at else None,
                 'created_at_display': order.created_at.strftime('%Y-%m-%d %H:%M:%S') if order.created_at else None,
                 'completed_at': order.completed_at.isoformat() if order.completed_at else None,
-                'updated_at': order.delivery_status_updated_at.strftime('%Y-%m-%d %H:%M:%S') if order.delivery_status_updated_at else None,
+                'completed_at_display': order.completed_at.strftime('%Y-%m-%d %H:%M:%S') if order.completed_at else None,
+                'date_created': order.created_at.strftime('%Y-%m-%d') if order.created_at else None,
+                'time_created': order.created_at.strftime('%H:%M:%S') if order.created_at else None,
                 
                 # Error info
-                'error_message': order.last_delivery_error if order.delivery_status == 'failed' else None
+                'error_message': getattr(order, 'last_delivery_error', None) if delivery_status == 'failed' else None,
+                
+                # Additional fields that frontend might need
+                'is_bill_payment': getattr(order, 'type', 'data') == 'bill_payment',
+                'can_retry': delivery_status == 'failed'
             })
         
         print(f"✅ Returning {len(orders_list)} orders to frontend")
+        print(f"Sample order keys: {list(orders_list[0].keys()) if orders_list else []}")
         print("="*60 + "\n")
+        
+        # Calculate stats for the response
+        total_sales = sum(o['customer_paid'] for o in orders_list)
+        total_profit = sum(o['profit'] for o in orders_list)
+        total_orders_count = len(orders_list)
+        
+        # Count orders by delivery status
+        delivered_count = sum(1 for o in orders_list if o['delivery_status'] == 'delivered')
+        pending_count = sum(1 for o in orders_list if o['delivery_status'] in ['pending', 'queued'])
+        processing_count = sum(1 for o in orders_list if o['delivery_status'] == 'processing')
+        failed_count = sum(1 for o in orders_list if o['delivery_status'] == 'failed')
         
         return jsonify({
             'success': True,
@@ -17676,15 +23507,19 @@ def get_agent_orders():
             'pagination': {
                 'page': page,
                 'per_page': per_page,
-                'total': paginated.total,
-                'pages': paginated.pages,
-                'has_next': paginated.has_next,
-                'has_prev': paginated.has_prev
+                'total': total_orders_count,
+                'pages': (total_orders_count + per_page - 1) // per_page if per_page > 0 else 1,
+                'has_next': page * per_page < total_orders_count,
+                'has_prev': page > 1
             },
             'stats': {
-                'total_orders': paginated.total,
-                'total_sales': float(sum(o.amount for o in orders)),
-                'total_profit': float(sum(o.profit if o.profit else 0 for o in orders))
+                'total_orders': total_orders_count,
+                'total_sales': float(total_sales),
+                'total_profit': float(total_profit),
+                'delivered': delivered_count,
+                'pending': pending_count,
+                'processing': processing_count,
+                'failed': failed_count
             }
         })
         
@@ -17694,189 +23529,60 @@ def get_agent_orders():
         traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
-def get_status_display(status):
-    """Get human-readable status display"""
-    status_map = {
-        'pending': '⏳ Pending',
-        'queued': '📋 Queued',
-        'processing': '🔄 Processing',
-        'delivered': '✅ Delivered',
-        'failed': '❌ Failed',
-        'cancelled': '🚫 Cancelled',
-        'refunded': '💰 Refunded',
-        'resolved': '✓ Resolved'
-    }
-    return status_map.get(status, status)
 
-@app.route('/api/agent/orders/stats', methods=['GET'])
+@app.route('/api/agent/orders/<order_id>/retry', methods=['POST'])
 @token_required
 @agent_required
-def get_agent_orders_stats():
-    """Get order statistics summary"""
+def retry_agent_order(order_id):
+    """Retry a failed order"""
     try:
         agent = g.current_user
         
-        # Get all orders
-        orders = Order.query.filter_by(agent_id=agent.id).all()
+        # Find the order
+        order = Order.query.filter_by(order_id=order_id, agent_id=agent.id).first()
+        if not order:
+            return jsonify({'success': False, 'error': 'Order not found'}), 404
         
-        # Calculate stats
-        total_orders = len(orders)
-        total_sales = sum(o.amount for o in orders)
-        total_cost = sum(o.cost for o in orders if o.cost)
-        total_profit = total_sales - total_cost
+        # Check if order can be retried
+        if order.delivery_status != 'failed':
+            return jsonify({'success': False, 'error': 'Only failed orders can be retried'}), 400
         
-        # Status breakdown
-        status_counts = {}
-        delivery_status_counts = {}
-        for order in orders:
-            status = order.status
-            delivery_status = order.delivery_status or 'pending'
-            status_counts[status] = status_counts.get(status, 0) + 1
-            delivery_status_counts[delivery_status] = delivery_status_counts.get(delivery_status, 0) + 1
+        # Reset order status
+        order.delivery_status = 'pending'
+        order.status = 'pending'
+        order.last_delivery_error = None
+        order.delivery_status_updated_at = datetime.utcnow()
         
-        # Network breakdown
-        network_sales = {}
-        for order in orders:
-            network = order.network
-            network_sales[network] = network_sales.get(network, 0) + order.amount
+        db.session.commit()
         
-        # Today's stats
-        today = datetime.utcnow().date()
-        today_start = datetime.combine(today, datetime.min.time())
-        today_orders = [o for o in orders if o.created_at >= today_start]
-        today_sales = sum(o.amount for o in today_orders)
-        today_profit = sum(o.amount - (o.cost or 0) for o in today_orders)
+        # Trigger retry (call network service)
+        from services.network_service import NetworkAPIService
+        network_service = NetworkAPIService()
+        
+        # Send asynchronously
+        import threading
+        thread = threading.Thread(
+            target=network_service.send_data_to_customer,
+            args=(order.network, order.phone_number, order.size_gb, order.quantity or 1, order.order_id)
+        )
+        thread.start()
         
         return jsonify({
             'success': True,
-            'data': {
-                'total_orders': total_orders,
-                'total_sales': float(total_sales),
-                'total_cost': float(total_cost),
-                'total_profit': float(total_profit),
-                'avg_order_value': float(total_sales / total_orders) if total_orders > 0 else 0,
-                'today_orders': len(today_orders),
-                'today_sales': float(today_sales),
-                'today_profit': float(today_profit),
-                'status_breakdown': status_counts,
-                'delivery_status_breakdown': delivery_status_counts,
-                'network_sales': network_sales
-            }
+            'message': 'Order retry initiated successfully'
         })
         
     except Exception as e:
-        print(f"Get agent orders stats error: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@app.route('/api/agent/sell', methods=['POST'])
-@token_required
-@agent_required
-def agent_sell_data():
-    """Agent sells data - supports both methods"""
-    try:
-        data = request.get_json()
-        network = data.get('network')
-        size_gb = data.get('size_gb')
-        phone = data.get('phone')
-        customer_name = data.get('customer_name', '')
-        selling_price = data.get('selling_price')
-        use_inventory = data.get('use_inventory', False)  # Agent chooses
-        
-        agent = g.current_user
-        wholesale_price = get_agent_price(network, size_gb)
-        
-        # Calculate selling price if not provided
-        if not selling_price:
-            retail_price = get_user_price(network, size_gb)
-            selling_price = retail_price if retail_price > 0 else wholesale_price * 1.18
-        
-        profit = selling_price - wholesale_price
-        
-        # METHOD 1: Use Inventory (if agent has stock)
-        if use_inventory:
-            from models import AgentInventory
-            inventory = AgentInventory.query.filter_by(
-                agent_id=agent.id,
-                network=network,
-                size_gb=size_gb
-            ).first()
-            
-            if inventory and inventory.remaining >= 1:
-                # Use inventory - NO wallet deduction
-                inventory.remaining -= 1
-                inventory.sold = (inventory.sold or 0) + 1
-                
-                order = Order(
-                    user_id=agent.id,
-                    agent_id=agent.id,
-                    network=network,
-                    size_gb=size_gb,
-                    phone_number=phone,
-                    amount=selling_price,
-                    status='completed',
-                    payment_method='inventory'  # Paid from inventory
-                )
-                db.session.add(order)
-                db.session.commit()
-                
-                # Call network to send data
-                network_service = NetworkAPIService()
-                network_service.send_data_to_customer(network, phone, size_gb, 1, order.order_id)
-                
-                return jsonify({
-                    'success': True,
-                    'method': 'inventory',
-                    'profit': profit,
-                    'message': f'Sold from inventory. Customer pays you ₵{selling_price:.2f}'
-                })
-        
-        # METHOD 2: Direct Wallet Deduction (Fallback)
-        if agent.wallet_balance >= wholesale_price:
-            # Deduct from wallet
-            agent.wallet_balance -= wholesale_price
-            
-            order = Order(
-                user_id=agent.id,
-                agent_id=agent.id,
-                network=network,
-                size_gb=size_gb,
-                phone_number=phone,
-                amount=selling_price,
-                status='completed',
-                payment_method='wallet'  # Paid from wallet
-            )
-            db.session.add(order)
-            db.session.commit()
-            
-            # Call network to send data
-            network_service = NetworkAPIService()
-            network_service.send_data_to_customer(network, phone, size_gb, 1, order.order_id)
-            
-            return jsonify({
-                'success': True,
-                'method': 'wallet',
-                'new_balance': float(agent.wallet_balance),
-                'profit': profit,
-                'message': f'Sold using wallet. Customer pays you ₵{selling_price:.2f}'
-            })
-        
-        # No inventory AND insufficient wallet
-        return jsonify({
-            'success': False,
-            'error': 'Insufficient wallet balance and no inventory. Please add funds or purchase inventory.'
-        }), 400
-        
-    except Exception as e:
-        print(f"Agent sell error: {e}")
+        print(f"Retry order error: {e}")
         db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
+
 
 @app.route('/api/agent/orders/<int:order_id>/status', methods=['PUT'])
 @token_required
 @agent_required
 def update_order_status(order_id):
-    """Update order status (pending -> processing -> sending -> completed) - Email ONLY for notifications"""
+    """Update order status with proper timestamp tracking"""
     try:
         data = request.get_json()
         new_status = data.get('status')
@@ -17885,69 +23591,179 @@ def update_order_status(order_id):
         if not order or order.agent_id != g.current_user.id:
             return jsonify({'success': False, 'error': 'Order not found'}), 404
         
-        valid_statuses = ['pending', 'processing', 'sending', 'completed', 'failed']
+        # Valid statuses including delivery_status
+        valid_statuses = ['pending', 'queued', 'processing', 'delivered', 'failed', 'cancelled']
         if new_status not in valid_statuses:
             return jsonify({'success': False, 'error': 'Invalid status'}), 400
         
-        old_status = order.status
-        order.status = new_status
+        old_status = order.delivery_status or order.status
+        order.delivery_status = new_status
+        order.delivery_status_updated_at = datetime.utcnow()
         
-        if new_status == 'completed':
+        if new_status == 'delivered':
+            order.status = 'completed'
             order.completed_at = datetime.utcnow()
             
-            customer = User.query.get(order.user_id) if order.user_id else None
-            if customer and customer.email:
-                send_email(
-                    customer.email,
-                    f"Order Completed - {order.order_id} - {COMPANY_NAME}",
-                    f"""
-                    <div style="font-family: Arial, sans-serif;">
-                        <h2 style="color: #28a745;">✅ Your Data Order Has Been Delivered!</h2>
-                        <p>Dear {customer.username},</p>
-                        <p>Your data order has been successfully delivered via {COMPANY_NAME}.</p>
-                        <p><strong>Order ID:</strong> {order.order_id}</p>
-                        <p><strong>Package:</strong> {order.quantity}x {order.size_gb}GB {order.network.upper()}</p>
-                        <p><strong>Phone Number:</strong> {order.phone_number}</p>
-                        <p><strong>Amount:</strong> GHS {order.amount:.2f}</p>
-                        <p><strong>Status:</strong> Delivered ✓</p>
-                        <a href="{COMPANY_WEBSITE}/orders" style="background: #8B0000; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">View Order</a>
-                    </div>
-                    """
-                )
-            else:
-                send_data_delivery_to_provider(order.phone_number, f"✅ Your {order.quantity}x {order.size_gb}GB {order.network.upper()} data has been delivered via {COMPANY_NAME}! Order ID: {order.order_id}")
+            # Send notification
+            if order.user_id:
+                customer = User.query.get(order.user_id)
+                if customer and customer.email:
+                    send_email(
+                        customer.email,
+                        f"Order Delivered - {order.order_id} - {COMPANY_NAME}",
+                        f"""
+                        <div style="font-family: Arial, sans-serif;">
+                            <h2 style="color: #28a745;">✅ Your Order Has Been Delivered!</h2>
+                            <p>Dear {customer.username},</p>
+                            <p>Your data has been successfully delivered.</p>
+                            <p><strong>Order ID:</strong> {order.order_id}</p>
+                            <p><strong>Package:</strong> {order.quantity or 1}x {order.size_gb}GB {order.network.upper()}</p>
+                            <p><strong>Phone:</strong> {order.phone_number}</p>
+                            <p><strong>Amount:</strong> GHS {order.amount:.2f}</p>
+                        </div>
+                        """
+                    )
         
         elif new_status == 'failed':
-            customer = User.query.get(order.user_id) if order.user_id else None
-            if customer and customer.email:
-                send_email(
-                    customer.email,
-                    f"Order Failed - {order.order_id} - {COMPANY_NAME}",
-                    f"""
-                    <div style="font-family: Arial, sans-serif;">
-                        <h2 style="color: #dc3545;">❌ Order Delivery Failed</h2>
-                        <p>Dear {customer.username},</p>
-                        <p>We're sorry, but your data order could not be delivered.</p>
-                        <p><strong>Order ID:</strong> {order.order_id}</p>
-                        <p><strong>Package:</strong> {order.quantity}x {order.size_gb}GB {order.network.upper()}</p>
-                        <p>Please contact our support team for assistance. Your payment will be refunded.</p>
-                        <p>Contact support: {COMPANY_PHONE}</p>
-                    </div>
-                    """
-                )
+            order.last_delivery_error = data.get('error_message', 'Delivery failed')
+            # Refund if needed
+            if order.cost and order.user_id:
+                user = User.query.get(order.user_id)
+                if user:
+                    user.wallet_balance += order.cost
+                    refund_transaction = Transaction(
+                        user_id=user.id,
+                        type='refund',
+                        amount=order.cost,
+                        reference=f"REFUND_{order.order_id}",
+                        balance_before=user.wallet_balance - order.cost,
+                        balance_after=user.wallet_balance,
+                        status='completed'
+                    )
+                    db.session.add(refund_transaction)
         
         db.session.commit()
         
-        log_activity(g.current_user.id, 'update_order_status', 
-                    f'Updated order {order.order_id} status from {old_status} to {new_status}')
-        
-        return jsonify({'success': True, 'message': f'Order status updated to {new_status} on {COMPANY_NAME}'})
+        return jsonify({
+            'success': True,
+            'message': f'Order status updated to {new_status}',
+            'data': {
+                'order_id': order.order_id,
+                'status': new_status,
+                'updated_at': order.delivery_status_updated_at.isoformat()
+            }
+        })
         
     except Exception as e:
         print(f"Update order status error: {e}")
         db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
 
+
+@app.route('/api/agent/orders/bulk-status', methods=['POST'])
+@token_required
+@agent_required
+def bulk_check_order_status():
+    """Check status of multiple orders at once with real-time Digimall updates"""
+    try:
+        data = request.get_json()
+        order_ids = data.get('order_ids', [])
+        
+        if not order_ids:
+            return jsonify({'success': False, 'error': 'No order IDs provided'}), 400
+        
+        agent = g.current_user
+        
+        # Get orders belonging to this agent
+        orders = Order.query.filter(
+            Order.order_id.in_(order_ids),
+            Order.agent_id == agent.id
+        ).all()
+        
+        if not orders:
+            return jsonify({
+                'success': False, 
+                'error': 'No orders found for this agent'
+            }), 404
+        
+        # Initialize Digimall service
+        digimall = DigimallService()
+        status_results = []
+        updated_count = 0
+        
+        for order in orders:
+            order_status = {
+                'order_id': order.order_id,
+                'status': order.delivery_status or order.status,
+                'status_display': get_status_display(order.delivery_status or order.status),
+                'updated_at': order.delivery_status_updated_at.isoformat() if order.delivery_status_updated_at else None,
+                'can_retry': order.delivery_status == 'failed',
+                'provider_order_id': getattr(order, 'provider_order_id', None),
+                'provider_reference': getattr(order, 'provider_reference', None)
+            }
+            
+            # If order has a provider_order_id, check with Digimall for real-time status
+            if order.provider_order_id:
+                try:
+                    # FIXED: Use check_order_status, not check_delivery_status
+                    digimall_result = digimall.check_order_status(order.provider_order_id)
+                    
+                    if digimall_result and digimall_result.get('success'):
+                        # Extract status from Digimall response
+                        digimall_status = digimall_result.get('status')
+                        
+                        if digimall_status and digimall_status != order.delivery_status:
+                            # Update local order status
+                            order.delivery_status = digimall_status
+                            order.delivery_status_updated_at = datetime.utcnow()
+                            
+                            if digimall_status == 'delivered':
+                                order.completed_at = datetime.utcnow()
+                            
+                            db.session.commit()
+                            updated_count += 1
+                            
+                            # Update the response with new status
+                            order_status['status'] = digimall_status
+                            order_status['status_display'] = get_status_display(digimall_status)
+                            order_status['updated_at'] = order.delivery_status_updated_at.isoformat()
+                            order_status['digimall_updated'] = True
+                            
+                            print(f"✅ Updated order {order.order_id}: {old_status} -> {digimall_status}")
+                except Exception as e:
+                    print(f"⚠️ Error checking Digimall status for {order.order_id}: {e}")
+                    # Don't fail the whole request, just log the error
+            
+            status_results.append(order_status)
+        
+        return jsonify({
+            'success': True,
+            'data': status_results,
+            'total': len(status_results),
+            'updated': updated_count,
+            'message': f'Checked {len(status_results)} orders, updated {updated_count} statuses'
+        })
+        
+    except Exception as e:
+        print(f"Bulk status check error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+def get_status_display(status):
+    """Get human-readable status display with emoji"""
+    status_map = {
+        'pending': '⏳ Pending',
+        'queued': '📋 Queued',
+        'processing': '🔄 Processing',
+        'delivered': '✅ Delivered',
+        'failed': '❌ Failed',
+        'cancelled': '🚫 Cancelled',
+        'refunded': '💰 Refunded',
+        'completed': '✅ Completed'
+    }
+    return status_map.get(status, status)
 
 @app.route('/api/agent/order/notify-customer', methods=['POST'])
 @token_required
@@ -19022,6 +24838,308 @@ def update_agent_prices():
     except Exception as e:
         print(f"Update agent price error: {e}")
         db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# app.py - Add these endpoints
+
+@app.route('/api/admin/delivery/pricing', methods=['GET'])
+@token_required
+@admin_required
+@price_session_required
+def get_delivery_pricing():
+    """Get all delivery pricing settings"""
+    try:
+        from models import DeliverySetting
+        
+        networks = ['mtn', 'telecel', 'airteltigo']
+        delivery_types = ['express', 'standard', 'mashup_voice', 'mashup_data']
+        
+        pricing_data = {}
+        
+        for network in networks:
+            pricing_data[network] = {}
+            for d_type in delivery_types:
+                setting = DeliverySetting.query.filter_by(
+                    network=network, 
+                    delivery_type=d_type
+                ).first()
+                
+                if setting:
+                    pricing_data[network][d_type] = setting.to_dict()
+                else:
+                    # Default values for missing settings
+                    default_config = {
+                        'multiplier': 1.0,
+                        'fixed_premium': 0.0,
+                        'min_time': 3,
+                        'max_time': 8,
+                        'avg_time': 5,
+                        'is_active': d_type == 'standard',
+                        'queue_length': 0,
+                        'status': 'normal'
+                    }
+                    
+                    # MTN specific defaults
+                    if network == 'mtn':
+                        if d_type == 'express':
+                            default_config = {
+                                'multiplier': 1.15,
+                                'fixed_premium': 0.5,
+                                'min_time': 5,
+                                'max_time': 10,
+                                'avg_time': 7,
+                                'is_active': True,
+                                'queue_length': 3,
+                                'status': 'very_fast'
+                            }
+                        elif d_type == 'mashup_voice':
+                            default_config = {
+                                'multiplier': 1.1,
+                                'fixed_premium': 0,
+                                'min_time': 30,
+                                'max_time': 60,
+                                'avg_time': 45,
+                                'is_active': True,
+                                'queue_length': 25,
+                                'status': 'delay_expected'
+                            }
+                        elif d_type == 'mashup_data':
+                            default_config = {
+                                'multiplier': 1.0,
+                                'fixed_premium': 0,
+                                'min_time': 25,
+                                'max_time': 50,
+                                'avg_time': 35,
+                                'is_active': True,
+                                'queue_length': 18,
+                                'status': 'delay_expected'
+                            }
+                    
+                    pricing_data[network][d_type] = default_config
+        
+        return jsonify({
+            'success': True,
+            'data': pricing_data
+        })
+        
+    except Exception as e:
+        print(f"Get delivery pricing error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/admin/delivery/pricing', methods=['PUT'])
+@token_required
+@admin_required
+@price_session_required
+def update_delivery_pricing():
+    """Update delivery pricing (similar to price update)"""
+    try:
+        from models import DeliverySetting
+        
+        data = request.get_json()
+        network = data.get('network')
+        delivery_type = data.get('delivery_type')
+        
+        if not network or not delivery_type:
+            return jsonify({'success': False, 'error': 'Missing required fields'}), 400
+        
+        # Find or create setting
+        setting = DeliverySetting.query.filter_by(
+            network=network,
+            delivery_type=delivery_type
+        ).first()
+        
+        if not setting:
+            setting = DeliverySetting(
+                network=network,
+                delivery_type=delivery_type
+            )
+            db.session.add(setting)
+        
+        # Update fields if provided
+        if 'multiplier' in data:
+            setting.multiplier = data['multiplier']
+        if 'fixed_premium' in data:
+            setting.fixed_premium = data['fixed_premium']
+        if 'min_time' in data:
+            setting.min_time = data['min_time']
+        if 'max_time' in data:
+            setting.max_time = data['max_time']
+        if 'avg_time' in data:
+            setting.avg_time = data['avg_time']
+        if 'is_active' in data:
+            setting.is_active = data['is_active']
+        if 'queue_length' in data:
+            setting.queue_length = data['queue_length']
+        if 'status' in data:
+            setting.status = data['status']
+        
+        setting.updated_at = datetime.utcnow()
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': f'Updated {delivery_type} for {network.upper()}',
+            'data': setting.to_dict()
+        })
+        
+    except Exception as e:
+        print(f"Update delivery pricing error: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/admin/delivery/pricing/bulk', methods=['POST'])
+@token_required
+@admin_required
+@price_session_required
+def bulk_update_delivery_pricing():
+    """Bulk update multiple delivery pricing settings"""
+    try:
+        from models import DeliverySetting
+        
+        data = request.get_json()
+        updates = data.get('updates', [])
+        
+        updated_count = 0
+        for update in updates:
+            network = update.get('network')
+            delivery_type = update.get('delivery_type')
+            
+            if not network or not delivery_type:
+                continue
+            
+            setting = DeliverySetting.query.filter_by(
+                network=network,
+                delivery_type=delivery_type
+            ).first()
+            
+            if not setting:
+                setting = DeliverySetting(
+                    network=network,
+                    delivery_type=delivery_type
+                )
+                db.session.add(setting)
+            
+            if 'multiplier' in update:
+                setting.multiplier = update['multiplier']
+            if 'fixed_premium' in update:
+                setting.fixed_premium = update['fixed_premium']
+            if 'min_time' in update:
+                setting.min_time = update['min_time']
+            if 'max_time' in update:
+                setting.max_time = update['max_time']
+            if 'avg_time' in update:
+                setting.avg_time = update['avg_time']
+            if 'is_active' in update:
+                setting.is_active = update['is_active']
+            if 'queue_length' in update:
+                setting.queue_length = update['queue_length']
+            if 'status' in update:
+                setting.status = update['status']
+            
+            setting.updated_at = datetime.utcnow()
+            updated_count += 1
+        
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': f'Updated {updated_count} delivery pricing settings'
+        })
+        
+    except Exception as e:
+        print(f"Bulk update delivery pricing error: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/delivery/options', methods=['GET'])
+@token_required
+def get_delivery_options():
+    """Get available delivery options for user/agent (uses DeliverySetting)"""
+    try:
+        from models import DeliverySetting, PriceSetting
+        
+        network = request.args.get('network', 'mtn')
+        size_gb = request.args.get('size_gb', type=float)
+        
+        if not size_gb:
+            return jsonify({'success': False, 'error': 'size_gb is required'}), 400
+        
+        # Get base price based on user type
+        if g.current_user.is_agent:
+            price_setting = PriceSetting.query.filter_by(
+                category='agent_price',
+                network=network,
+                size_gb=size_gb
+            ).first()
+        else:
+            price_setting = PriceSetting.query.filter_by(
+                category='user_price',
+                network=network,
+                size_gb=size_gb
+            ).first()
+        
+        if not price_setting or not price_setting.is_available:
+            return jsonify({'success': False, 'error': f'No price found for {network} {size_gb}GB'}), 404
+        
+        base_price = float(price_setting.price)
+        
+        # Get all delivery options for this network
+        delivery_types = ['express', 'standard', 'mashup_voice', 'mashup_data']
+        options = []
+        
+        for d_type in delivery_types:
+            setting = DeliverySetting.query.filter_by(
+                network=network,
+                delivery_type=d_type,
+                is_active=True
+            ).first()
+            
+            if setting:
+                calculated_price = base_price * float(setting.multiplier) + float(setting.fixed_premium)
+                
+                # Get option details
+                option_details = {
+                    'express': {'name': 'MTN EXPRESS BUNDLE', 'icon': '⚡', 'color': '#f39c12', 'description': 'Fastest delivery - Priority processing'},
+                    'standard': {'name': 'MTN MASTER BUNDLE', 'icon': '📱', 'color': '#3498db', 'description': 'Standard delivery - Best value'},
+                    'mashup_voice': {'name': 'MTN MASHUP (VOICE + DATA)', 'icon': '🎵', 'color': '#9b59b6', 'description': 'Voice minutes + Data bundle'},
+                    'mashup_data': {'name': 'MTN MASHUP (DATA ONLY)', 'icon': '📦', 'color': '#3498db', 'description': 'Data-only bundle'}
+                }.get(d_type, {})
+                
+                options.append({
+                    'type': d_type,
+                    'name': option_details.get('name', d_type),
+                    'icon': option_details.get('icon', '📱'),
+                    'color': option_details.get('color', '#3498db'),
+                    'description': option_details.get('description', ''),
+                    'delivery_time': {
+                        'min': setting.min_time,
+                        'max': setting.max_time,
+                        'avg': setting.avg_time
+                    },
+                    'price_multiplier': float(setting.multiplier),
+                    'fixed_premium': float(setting.fixed_premium),
+                    'final_price': round(calculated_price, 2),
+                    'base_price': base_price,
+                    'queue_length': setting.queue_length,
+                    'status': setting.status
+                })
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'network': network,
+                'size_gb': size_gb,
+                'base_price': base_price,
+                'options': options
+            }
+        })
+        
+    except Exception as e:
+        print(f"Get delivery options error: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/admin/prices/waec', methods=['PUT'])
@@ -20272,7 +26390,7 @@ def get_loyalty_info():
 
 @app.route('/api/user/loyalty/redeem', methods=['POST'])
 @token_required
-def redeem_points():
+def redeem_royalty_points():
     """Redeem loyalty points for discount (Email ONLY)"""
     try:
         data = request.get_json()
@@ -20720,34 +26838,189 @@ class BillPaymentService:
 @app.route('/api/user/orders', methods=['GET'])
 @token_required
 def get_user_orders():
-    """Get user's orders with delivery status"""
+    """Get user's orders with detailed information matching frontend expectations"""
     try:
-        limit = request.args.get('limit', 50, type=int)
+        user = g.current_user
         
-        orders = Order.query.filter_by(
-            user_id=g.current_user.id
-        ).order_by(Order.created_at.desc()).limit(limit).all()
+        print("\n" + "="*60)
+        print("DEBUG: /api/user/orders called")
+        print("="*60)
+        print(f"User ID: {user.id}")
+        print(f"Username: {user.username}")
+        
+        # Get pagination parameters
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('limit', 50, type=int)
+        status_filter = request.args.get('status', 'all')
+        search = request.args.get('search', '')
+        
+        # Build query - get orders where user is the buyer
+        query = Order.query.filter_by(user_id=user.id)
+        
+        # Apply status filter based on delivery_status
+        if status_filter != 'all':
+            if status_filter == 'delivered':
+                query = query.filter(Order.delivery_status == 'delivered')
+            elif status_filter == 'pending':
+                query = query.filter(Order.delivery_status.in_(['pending', 'queued']))
+            elif status_filter == 'processing':
+                query = query.filter(Order.delivery_status == 'processing')
+            elif status_filter == 'failed':
+                query = query.filter(Order.delivery_status == 'failed')
+        
+        # Apply search filter
+        if search:
+            query = query.filter(
+                db.or_(
+                    Order.order_id.ilike(f'%{search}%'),
+                    Order.phone_number.ilike(f'%{search}%'),
+                    Order.customer_name.ilike(f'%{search}%')
+                )
+            )
+        
+        # Get all orders
+        orders = query.order_by(Order.created_at.desc()).all()
+        
+        print(f"\nFound {len(orders)} orders for user {user.id}")
+        
+        orders_list = []
+        for order in orders:
+            # Get transaction details for balance info
+            transaction = Transaction.query.filter_by(reference=order.order_id).first()
+            
+            # Calculate profit (if agent sale)
+            profit = order.profit if order.profit else 0
+            
+            # SAFELY handle None values
+            size_gb = order.size_gb if order.size_gb is not None else 0
+            quantity = order.quantity if order.quantity is not None else 1
+            total_gb = size_gb * quantity
+            
+            # Get customer name from order
+            customer_name = order.customer_name or user.username
+            
+            # Format delivery status for display
+            delivery_status = order.delivery_status or 'pending'
+            status_display_map = {
+                'pending': '⏳ Pending',
+                'queued': '📋 Queued',
+                'processing': '🔄 Processing',
+                'delivered': '✅ Delivered',
+                'failed': '❌ Failed',
+                'cancelled': '🚫 Cancelled'
+            }
+            
+            # Get the correct amount fields
+            customer_paid = order.amount if order.amount else 0
+            amount_deducted = order.cost if order.cost else (order.amount if order.amount else 0)
+            
+            orders_list.append({
+                # Basic Info
+                'id': order.id,
+                'order_id': order.order_id,
+                'customer_name': customer_name,
+                'customer_phone': order.phone_number,
+                'phone': order.phone_number,  # Alias for compatibility
+                
+                # Product Info
+                'network': order.network,
+                'size_gb': size_gb,
+                'quantity': quantity,
+                'total_gb': total_gb,
+                
+                # Bill Payment Specific Fields
+                'type': getattr(order, 'type', 'data'),
+                'biller_code': getattr(order, 'biller_code', None),
+                'biller_name': getattr(order, 'biller_name', None),
+                'account_number': getattr(order, 'account_number', None),
+                'is_bill_payment': getattr(order, 'type', 'data') == 'bill_payment',
+                
+                # Financial Info
+                'customer_paid': float(customer_paid),
+                'amount': float(customer_paid),  # Alias for compatibility
+                'amount_deducted': float(amount_deducted),
+                'cost': float(order.cost) if order.cost else 0,
+                'profit': float(profit),
+                'balance_before': float(transaction.balance_before) if transaction and transaction.balance_before else 0,
+                'balance_after': float(transaction.balance_after) if transaction and transaction.balance_after else 0,
+                
+                # Commission Info (if user is agent)
+                'commission_earned': float(order.initiator_commission) if hasattr(order, 'initiator_commission') and order.initiator_commission else 0,
+                
+                # Status Info
+                'status': order.status,
+                'delivery_status': delivery_status,
+                'delivery_status_display': status_display_map.get(delivery_status, delivery_status),
+                'delivery_status_updated_at': order.delivery_status_updated_at.isoformat() if order.delivery_status_updated_at else None,
+                'updated_at': order.delivery_status_updated_at.strftime('%Y-%m-%d %H:%M:%S') if order.delivery_status_updated_at else None,
+                
+                # Provider Info
+                'provider': getattr(order, 'provider', 'digimall'),
+                'provider_order_id': getattr(order, 'provider_order_id', None),
+                'provider_reference': getattr(order, 'provider_reference', None),
+                
+                # Source Info
+                'source': 'Agent' if order.agent_id else 'User',
+                'agent_id': order.agent_id,
+                'user_id': order.user_id,
+                'payment_method': getattr(order, 'payment_method', 'wallet'),
+                
+                # Timestamps
+                'created_at': order.created_at.isoformat() if order.created_at else None,
+                'created_at_display': order.created_at.strftime('%Y-%m-%d %H:%M:%S') if order.created_at else None,
+                'completed_at': order.completed_at.isoformat() if order.completed_at else None,
+                'completed_at_display': order.completed_at.strftime('%Y-%m-%d %H:%M:%S') if order.completed_at else None,
+                'date_created': order.created_at.strftime('%Y-%m-%d') if order.created_at else None,
+                'time_created': order.created_at.strftime('%H:%M:%S') if order.created_at else None,
+                
+                # Error info
+                'error_message': getattr(order, 'last_delivery_error', None) if delivery_status == 'failed' else None,
+                
+                # Additional fields
+                'can_retry': delivery_status == 'failed'
+            })
+        
+        print(f"✅ Returning {len(orders_list)} orders to frontend")
+        print(f"Sample order keys: {list(orders_list[0].keys()) if orders_list else []}")
+        print("="*60 + "\n")
+        
+        # Calculate stats
+        total_spent = sum(o['customer_paid'] for o in orders_list)
+        total_orders_count = len(orders_list)
+        
+        # Count orders by delivery status
+        delivered_count = sum(1 for o in orders_list if o['delivery_status'] == 'delivered')
+        pending_count = sum(1 for o in orders_list if o['delivery_status'] in ['pending', 'queued'])
+        processing_count = sum(1 for o in orders_list if o['delivery_status'] == 'processing')
+        failed_count = sum(1 for o in orders_list if o['delivery_status'] == 'failed')
         
         return jsonify({
             'success': True,
-            'data': [{
-                'order_id': o.order_id,
-                'network': o.network,
-                'size_gb': o.size_gb,
-                'amount': o.amount,
-                'status': o.status,
-                'delivery_status': o.delivery_status,  # NEW
-                'delivery_status_updated_at': o.delivery_status_updated_at.isoformat() if o.delivery_status_updated_at else None,
-                'phone': o.phone_number,
-                'date': o.created_at.strftime('%Y-%m-%d %H:%M:%S')
-            } for o in orders]
+            'data': orders_list,
+            'pagination': {
+                'page': page,
+                'per_page': per_page,
+                'total': total_orders_count,
+                'pages': (total_orders_count + per_page - 1) // per_page if per_page > 0 else 1,
+                'has_next': page * per_page < total_orders_count,
+                'has_prev': page > 1
+            },
+            'stats': {
+                'total_orders': total_orders_count,
+                'total_spent': float(total_spent),
+                'delivered': delivered_count,
+                'pending': pending_count,
+                'processing': processing_count,
+                'failed': failed_count
+            }
         })
         
     except Exception as e:
-        print(f"Get user orders error: {e}")
+        print(f"❌ Get user orders error: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
-
-
+    
 @app.route('/api/order/<order_id>/status', methods=['GET'])
 @token_required
 def get_order_status(order_id):
@@ -20821,88 +27094,158 @@ def get_wallet_history():
         return jsonify({'success': False, 'error': 'Failed to fetch history'}), 500
 
 
+# app.py - Add these endpoints
+
+# ========== REFERRAL ENDPOINTS ==========
+
 @app.route('/api/referrals', methods=['GET'])
 @token_required
 def get_referrals():
-    """Get user's referral statistics"""
+    """Get user's referral data"""
     try:
         user = g.current_user
         
-        # Get referred users (users who signed up using this user's referral code)
-        referred_users = User.query.filter_by(referred_by=user.id).all()
-        
-        # Calculate earnings from completed referrals
-        total_earnings = 0
-        pending_earnings = 0
-        
-        for referred in referred_users:
-            # Check if referred user has made a purchase (completed order)
-            has_purchase = Order.query.filter(
-                Order.user_id == referred.id,
-                Order.status == 'completed'
-            ).first() is not None
-            
-            if has_purchase:
-                # Check if reward was already given
-                reward_given = ReferralReward.query.filter_by(
-                    referrer_id=user.id,
-                    referred_id=referred.id,
-                    status='paid'
-                ).first()
-                
-                if not reward_given:
-                    pending_earnings += 5.00  # GHS 5 per qualified referral
-                else:
-                    total_earnings += 5.00
-            else:
-                pending_earnings += 5.00  # Pending until they make a purchase
-        
-        # Get referral code
+        # Get user's referral code
         referral_code = user.referral_code
         
-        # If no referral code exists, generate one
-        if not referral_code:
-            import string
-            import random
-            referral_code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
-            user.referral_code = referral_code
-            db.session.commit()
+        # Get all referrals made by this user
+        referrals = Referral.query.filter_by(referrer_id=user.id).order_by(
+            Referral.created_at.desc()
+        ).all()
         
-        # Build referrals list for display
-        referrals_list = []
-        for referred in referred_users:
-            has_purchase = Order.query.filter(
-                Order.user_id == referred.id,
-                Order.status == 'completed'
-            ).first() is not None
-            
-            status = 'completed' if has_purchase else 'pending'
-            
-            referrals_list.append({
-                'id': referred.id,
-                'referred_user': referred.username,
-                'referred_phone': referred.phone,
-                'reward_amount': 5.00,
-                'status': status,
-                'created_at': referred.created_at.isoformat() if referred.created_at else None
+        # Calculate stats
+        total_referrals = len(referrals)
+        total_points = sum(r.points_earned for r in referrals if r.status == 'completed')
+        pending_points = sum(r.points_earned for r in referrals if r.status == 'pending')
+        
+        # Format referral list
+        referral_list = []
+        for ref in referrals:
+            referred_user = User.query.get(ref.referred_user_id)
+            referral_list.append({
+                'id': ref.id,
+                'name': referred_user.username if referred_user else 'Anonymous',
+                'email': referred_user.email if referred_user else '',
+                'phone': referred_user.phone if referred_user else '',
+                'created_at': ref.created_at.isoformat(),
+                'status': ref.status,
+                'points_earned': ref.points_earned
             })
         
         return jsonify({
             'success': True,
-            'data': {
-                'referral_code': referral_code,
-                'total_referrals': len(referred_users),
-                'total_earnings': float(total_earnings),
-                'pending_earnings': float(pending_earnings),
-                'bonus_per_referral': 5.00,
-                'referrals_list': referrals_list
+            'referral_code': referral_code,
+            'referrals': referral_list,
+            'stats': {
+                'total': total_referrals,
+                'points_earned': total_points,
+                'pending_points': pending_points
             }
         })
         
     except Exception as e:
-        print(f"Referrals error: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"Error fetching referrals: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/referrals/register', methods=['POST'])
+def register_referral():
+    """Register a referral when a new user signs up with a referral code"""
+    try:
+        data = request.get_json()
+        referral_code = data.get('referral_code')
+        new_user_id = data.get('user_id')
+        
+        if not referral_code or not new_user_id:
+            return jsonify({'success': False, 'error': 'Referral code and user ID required'}), 400
+        
+        # Find referrer by referral code
+        referrer = User.query.filter_by(referral_code=referral_code).first()
+        if not referrer:
+            return jsonify({'success': False, 'error': 'Invalid referral code'}), 404
+        
+        # Check if referral already exists
+        existing = Referral.query.filter_by(referred_user_id=new_user_id).first()
+        if existing:
+            return jsonify({'success': False, 'error': 'Referral already registered'}), 400
+        
+        # Create referral record
+        referral = Referral(
+            referrer_id=referrer.id,
+            referred_user_id=new_user_id,
+            referral_code=referral_code,
+            status='pending',
+            points_earned=POINTS_CONFIG['REFERRAL_POINTS']
+        )
+        db.session.add(referral)
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': 'Referral registered successfully',
+            'data': {'referral_id': referral.id}
+        })
+        
+    except Exception as e:
+        print(f"Error registering referral: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/referrals/complete', methods=['POST'])
+@token_required
+def complete_referral():
+    """Complete a referral when referred user makes first purchase"""
+    try:
+        data = request.get_json()
+        referral_id = data.get('referral_id')
+        
+        if not referral_id:
+            return jsonify({'success': False, 'error': 'Referral ID required'}), 400
+        
+        referral = Referral.query.get(referral_id)
+        if not referral:
+            return jsonify({'success': False, 'error': 'Referral not found'}), 404
+        
+        if referral.status != 'pending':
+            return jsonify({'success': False, 'error': 'Referral already completed'}), 400
+        
+        # Update referral status
+        referral.status = 'completed'
+        referral.completed_at = datetime.utcnow()
+        
+        # Award points to referrer
+        referrer = User.query.get(referral.referrer_id)
+        if referrer:
+            points_to_award = referral.points_earned
+            referrer.points_balance = (referrer.points_balance or 0) + points_to_award
+            referrer.total_points_earned = (referrer.total_points_earned or 0) + points_to_award
+            
+            # Create points transaction
+            transaction = PointsTransaction(
+                user_id=referrer.id,
+                points=points_to_award,
+                type='referral_bonus',
+                description=f'Referral bonus for {referral.referred_user.username}',
+                reference=f'REF-{referral.id}',
+                balance_after=referrer.points_balance
+            )
+            db.session.add(transaction)
+        
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': f'Referral completed! {referral.points_earned} point awarded!',
+            'data': {
+                'points_awarded': referral.points_earned,
+                'new_balance': referrer.points_balance if referrer else 0
+            }
+        })
+        
+    except Exception as e:
+        print(f"Error completing referral: {e}")
+        db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
     
 @app.route('/api/referral/<int:referral_id>/claim', methods=['POST'])
@@ -20973,8 +27316,292 @@ def claim_referral_bonus(referral_id):
         db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
 
+# app.py - Points endpoints
+
+# ========== POINTS ENDPOINTS ==========
+
+@app.route('/api/points', methods=['GET'])
+@token_required
+def get_points():
+    """Get user's points balance and history"""
+    try:
+        user = g.current_user
+        
+        # Get recent transactions
+        transactions = PointsTransaction.query.filter_by(
+            user_id=user.id
+        ).order_by(PointsTransaction.created_at.desc()).limit(50).all()
+        
+        # Calculate value
+        points_value = user.points_balance / POINTS_CONFIG['POINTS_TO_GHS_RATE']
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'balance': user.points_balance or 0,
+                'total_earned': user.total_points_earned or 0,
+                'total_redeemed': user.total_points_redeemed or 0,
+                'value_in_ghs': round(points_value, 2),
+                'transactions': [{
+                    'id': t.id,
+                    'points': t.points,
+                    'type': t.type,
+                    'description': t.description,
+                    'balance_after': t.balance_after,
+                    'created_at': t.created_at.isoformat()
+                } for t in transactions]
+            }
+        })
+        
+    except Exception as e:
+        print(f"Error getting points: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
+def get_bundle_price(network, size_gb, delivery_type=None):
+    """
+    Get bundle price from database dynamically
+    
+    Args:
+        network: 'mtn', 'telecel', 'airteltigo'
+        size_gb: int (1, 2, 5, 10, 20, etc.)
+        delivery_type: 'master', 'express', etc. (optional)
+    
+    Returns:
+        float: Price in GHS, or 0 if not found
+    """
+    try:
+        from models import PriceSetting
+        
+        # Try with delivery_type first if provided
+        if delivery_type:
+            price_record = PriceSetting.query.filter_by(
+                category='user_price',
+                network=network.lower(),
+                size_gb=size_gb,
+                delivery_type=delivery_type,
+                is_available=True
+            ).first()
+            
+            if price_record:
+                return float(price_record.price)
+        
+        # Try without delivery_type (base price)
+        price_record = PriceSetting.query.filter_by(
+            category='user_price',
+            network=network.lower(),
+            size_gb=size_gb,
+            is_available=True
+        ).filter(
+            PriceSetting.delivery_type.is_(None)
+        ).first()
+        
+        if price_record:
+            return float(price_record.price)
+        
+        # If not found, try agent_price as fallback
+        price_record = PriceSetting.query.filter_by(
+            category='agent_price',
+            network=network.lower(),
+            size_gb=size_gb,
+            is_available=True
+        ).filter(
+            PriceSetting.delivery_type.is_(None)
+        ).first()
+        
+        if price_record:
+            return float(price_record.price)
+        
+        # Fallback to hardcoded prices if nothing found
+        print(f"⚠️ Price not found for {network} {size_gb}GB, using fallback")
+        fallback_prices = {
+            'mtn': {1: 6.00, 2: 10.00, 3: 15.00, 4: 19.00, 5: 23.00, 
+                    6: 27.00, 8: 36.00, 10: 45.00, 15: 64.00, 20: 85.00,
+                    25: 108.00, 30: 130.00, 40: 160.00, 50: 220.00},
+            'telecel': {1: 6.00, 2: 10.00, 3: 15.00, 4: 19.00, 5: 23.00, 
+                        6: 27.00, 8: 36.00, 10: 45.00, 15: 64.00, 20: 85.00,
+                        25: 108.00, 30: 130.00, 40: 160.00, 50: 220.00},
+            'airteltigo': {1: 6.00, 2: 10.00, 3: 15.00, 4: 19.00, 5: 23.00, 
+                           6: 27.00, 8: 36.00, 10: 45.00, 15: 64.00, 20: 85.00,
+                           25: 108.00, 30: 130.00, 40: 160.00, 50: 220.00}
+        }
+        return fallback_prices.get(network.lower(), {}).get(size_gb, 0)
+        
+    except Exception as e:
+        print(f"Error getting bundle price: {e}")
+        return 0
+
+
+@app.route('/api/points/redeem', methods=['POST'])
+@token_required
+def redeem_points():
+    """Redeem points for data bundle or bill payment"""
+    try:
+        data = request.get_json()
+        user = g.current_user
+        
+        points_to_redeem = data.get('points')
+        redemption_type = data.get('redemption_type')  # 'data_bundle' or 'bill_payment'
+        details = data.get('details', {})
+        
+        # Validate points
+        if not points_to_redeem:
+            return jsonify({'success': False, 'error': 'Points required'}), 400
+        
+        if points_to_redeem < POINTS_CONFIG['MIN_REDEMPTION_POINTS']:
+            return jsonify({
+                'success': False, 
+                'error': f'Minimum redemption is {POINTS_CONFIG["MIN_REDEMPTION_POINTS"]} points (₵{POINTS_CONFIG["MIN_REDEMPTION_POINTS"] / POINTS_CONFIG["POINTS_TO_GHS_RATE"]:.2f})'
+            }), 400
+        
+        if points_to_redeem > POINTS_CONFIG['MAX_REDEMPTION_POINTS']:
+            return jsonify({
+                'success': False, 
+                'error': f'Maximum redemption is {POINTS_CONFIG["MAX_REDEMPTION_POINTS"]} points per transaction'
+            }), 400
+        
+        if user.points_balance < points_to_redeem:
+            return jsonify({
+                'success': False, 
+                'error': f'Insufficient points. You have {user.points_balance} points'
+            }), 400
+        
+        # Calculate GHS value
+        ghs_value = points_to_redeem / POINTS_CONFIG['POINTS_TO_GHS_RATE']
+        
+        # Create redemption record
+        redemption = PointsRedemption(
+            user_id=user.id,
+            points_used=points_to_redeem,
+            redeemed_value=ghs_value,
+            redemption_type=redemption_type,
+            details=details,
+            status='pending'
+        )
+        db.session.add(redemption)
+        
+        # Deduct points
+        user.points_balance -= points_to_redeem
+        user.total_points_redeemed = (user.total_points_redeemed or 0) + points_to_redeem
+        
+        # Create points transaction
+        transaction = PointsTransaction(
+            user_id=user.id,
+            points=-points_to_redeem,
+            type='redemption',
+            description=f'Redeemed {points_to_redeem} points for {redemption_type.replace("_", " ")}',
+            balance_after=user.points_balance
+        )
+        db.session.add(transaction)
+        
+        db.session.commit()
+        
+        # Process redemption based on type
+        if redemption_type == 'bill_payment':
+            # Add to wallet as bonus (non-withdrawable)
+            user.wallet_balance = (user.wallet_balance or 0) + ghs_value
+            
+            wallet_transaction = Transaction(
+                user_id=user.id,
+                type='points_bonus',
+                amount=ghs_value,
+                is_withdrawable=False,
+                description=f'Points redemption: {points_to_redeem} points = ₵{ghs_value:.2f}',
+                reference=f'PTS-{redemption.id}',
+                status='completed'
+            )
+            db.session.add(wallet_transaction)
+            
+            redemption.status = 'completed'
+            redemption.completed_at = datetime.utcnow()
+            db.session.commit()
+            
+            return jsonify({
+                'success': True,
+                'message': f'Redeemed {points_to_redeem} points for ₵{ghs_value:.2f} bill payment credit!',
+                'data': {
+                    'new_balance': user.points_balance,
+                    'bonus_added': ghs_value,
+                    'wallet_balance': user.wallet_balance,
+                    'redemption_id': redemption.id
+                }
+            })
+            
+        elif redemption_type == 'data_bundle':
+            # Get data bundle details
+            network = details.get('network')
+            size_gb = details.get('size_gb')
+            delivery_type = details.get('delivery_type', 'master')
+            
+            if not network or not size_gb:
+                return jsonify({'success': False, 'error': 'Network and size required for data bundle'}), 400
+            
+            # Get price for the bundle from database
+            price = get_bundle_price(network, size_gb, delivery_type)
+            
+            if price <= 0:
+                return jsonify({
+                    'success': False, 
+                    'error': f'Price not found for {size_gb}GB {network}'
+                }), 400
+            
+            # Check if user has enough value
+            if price > ghs_value:
+                return jsonify({
+                    'success': False, 
+                    'error': f'Insufficient value. {size_gb}GB {network} costs ₵{price:.2f}, you have ₵{ghs_value:.2f}'
+                }), 400
+            
+            # Create data order
+            order = Order(
+                user_id=user.id,
+                order_id=f"PTS-{uuid.uuid4().hex[:8].upper()}",
+                type='data',
+                network=network.lower(),
+                size_gb=size_gb,
+                quantity=1,
+                phone_number=user.phone,
+                customer_name=user.username,
+                amount=0,  # Free for user (paid by points)
+                cost=price,  # Cost covered by points
+                profit=0,
+                status='completed',
+                delivery_status='delivered',
+                payment_method='points',
+                provider='roamsmart',
+                completed_at=datetime.utcnow(),
+                created_at=datetime.utcnow()
+            )
+            db.session.add(order)
+            
+            redemption.status = 'completed'
+            redemption.completed_at = datetime.utcnow()
+            db.session.commit()
+            
+            return jsonify({
+                'success': True,
+                'message': f'Redeemed {points_to_redeem} points for {size_gb}GB {network.upper()}!',
+                'data': {
+                    'new_balance': user.points_balance,
+                    'order_id': order.order_id,
+                    'redemption_id': redemption.id,
+                    'bundle': f'{size_gb}GB {network.upper()}'
+                }
+            })
+        
+        else:
+            return jsonify({
+                'success': False, 
+                'error': f'Invalid redemption type: {redemption_type}. Must be "data_bundle" or "bill_payment"'
+            }), 400
+        
+    except Exception as e:
+        print(f"Error redeeming points: {e}")
+        import traceback
+        traceback.print_exc()
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+    
 @app.route('/api/user/withdrawals', methods=['GET'])
 @token_required
 def get_user_withdrawals():
@@ -21270,11 +27897,6 @@ class WAECService:
         except Exception as e:
             print(f"Get user vouchers error: {e}")
             return []
-
-
-# ========== ADMIN WAEC MANAGEMENT ==========
-
-# ========== USER WAEC VOUCHER ENDPOINTS ==========
 
 @app.route('/api/waec/vouchers', methods=['GET'])
 @token_required
