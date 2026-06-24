@@ -350,143 +350,98 @@ class DataBundle(db.Model):
         }
 
 # ========== ORDER MODEL ==========
-class Order(db.Model):
-    __tablename__ = 'orders'
-    id = db.Column(db.Integer, primary_key=True)
-    order_id = db.Column(db.String(20), unique=True, default=lambda: f"RS-{uuid.uuid4().hex[:8].upper()}")
-    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
-    agent_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
-    type = db.Column(db.String(20), default='data') 
-    network = db.Column(db.String(20), nullable=True)
-    size_gb = db.Column(db.Float, nullable=True)
-    quantity = db.Column(db.Integer, default=1)
-    phone_number = db.Column(db.String(20), nullable=True)
-    customer_name = db.Column(db.String(100), nullable=True)
-    biller_code = db.Column(db.String(20), nullable=True)  
-    biller_name = db.Column(db.String(100), nullable=True)
-    account_number = db.Column(db.String(50), nullable=True)
-    amount = db.Column(db.Float, nullable=False)  
-    cost = db.Column(db.Float, default=0.0)  
-    profit = db.Column(db.Float, default=0.0)  
-    payment_method = db.Column(db.String(20), default='wallet')
-    payment_reference = db.Column(db.String(100), nullable=True)
-    provider = db.Column(db.String(50), nullable=True) 
-    provider_order_id = db.Column(db.String(100), nullable=True)  
-    provider_reference = db.Column(db.String(100), nullable=True)  
-    provider_cost = db.Column(db.Float, default=0.0)  
-    delivery_status = db.Column(db.String(30), default='pending') 
-    delivery_status_updated_at = db.Column(db.DateTime, nullable=True)
-    delivery_attempts = db.Column(db.Integer, default=0)
-    last_delivery_error = db.Column(db.String(500), nullable=True)
-    webhook_received = db.Column(db.Boolean, default=False)
-    webhook_last_payload = db.Column(db.JSON, nullable=True)
-    webhook_retry_count = db.Column(db.Integer, default=0)
-    status = db.Column(db.String(20), default='pending')  
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    completed_at = db.Column(db.DateTime, nullable=True)
-    last_status_check = db.Column(db.DateTime, nullable=True)
-    
-    # ========== COMMISSION FIELDS (ADD THESE) ==========
-    hubtel_commission_rate = db.Column(db.Float, default=0.0)  # Hubtel's commission rate (%)
-    total_commission = db.Column(db.Float, default=0.0)  # Total commission from Hubtel
-    admin_commission = db.Column(db.Float, default=0.0)  # Admin's share (30%)
-    initiator_commission = db.Column(db.Float, default=0.0)  # Initiator's share (70%)
-    initiator_type = db.Column(db.String(20), default='user')  # 'user' or 'agent'
-    initiator_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)  # Who initiated
-    delivery_type = db.Column(db.String(50), nullable=True)  # 'master', 'express', etc.
-    offer_slug = db.Column(db.String(100), nullable=True)  # Digimall offer slug
-    
-    # ========== RELATIONSHIPS ==========
-    customer = db.relationship('User', foreign_keys=[user_id], backref='purchases')
-    agent = db.relationship('User', foreign_keys=[agent_id], backref='sales')
-    initiator = db.relationship('User', foreign_keys=[initiator_id], backref='initiated_orders')
-    
-    def to_dict(self):
-        return {
-            'id': self.id,
-            'order_id': self.order_id,
-            'user_id': self.user_id,
-            'agent_id': self.agent_id,
-            'type': self.type,
-            'network': self.network,
-            'size_gb': self.size_gb,
-            'quantity': self.quantity,
-            'phone': self.phone_number,
-            'customer_name': self.customer_name,
-            'biller_code': self.biller_code,
-            'biller_name': self.biller_name,
-            'account_number': self.account_number,
-            'amount': self.amount,
-            'cost': self.cost,
-            'profit': self.profit,
-            'payment_method': self.payment_method,
-            'provider': self.provider,
-            'provider_order_id': self.provider_order_id,
-            'status': self.status,
-            'delivery_status': self.delivery_status,
-            'delivery_status_updated_at': self.delivery_status_updated_at.isoformat() if self.delivery_status_updated_at else None,
-            'created_at': self.created_at.isoformat() if self.created_at else None,
-            'date': self.created_at.strftime('%Y-%m-%d %H:%M:%S') if self.created_at else None,
-            'completed_at': self.completed_at.isoformat() if self.completed_at else None,
-            # Commission fields
-            'commission': {
-                'hubtel_rate': self.hubtel_commission_rate,
-                'total': self.total_commission,
-                'admin': self.admin_commission,
-                'initiator': self.initiator_commission,
-                'initiator_type': self.initiator_type
-            } if self.total_commission > 0 else None
-        }
-    
-    def get_delivery_status_display(self):
-        """Get human-readable delivery status"""
-        status_map = {
-            'pending': '⏳ Pending',
-            'queued': '📋 Queued',
-            'processing': '🔄 Processing',
-            'delivered': '✅ Delivered',
-            'failed': '❌ Failed',
-            'cancelled': '🚫 Cancelled',
-            'refunded': '💰 Refunded',
-            'resolved': '✓ Resolved'
-        }
-        return status_map.get(self.delivery_status, self.delivery_status or 'Unknown')
-    
-    def update_delivery_status(self, new_status, error=None):
-        """Update delivery status with timestamp"""
-        self.delivery_status = new_status
-        self.delivery_status_updated_at = datetime.utcnow()
-        if error:
-            self.last_delivery_error = error
-        db.session.commit()
-    
-    def set_safe_values(self, **kwargs):
-        """Set values with safe truncation"""
-        max_lengths = {
-            'order_id': 100,
-            'provider_order_id': 200,
-            'provider_reference': 200,
-            'customer_name': 200,
-            'phone_number': 20,
-            'network': 20,
-            'biller_code': 50,
-            'account_number': 100
-        }
+@app.route('/api/admin/failed-bill-payments', methods=['GET'])
+@token_required
+@admin_required
+def get_failed_bill_payments():
+    """
+    GET /api/admin/failed-bill-payments
+    Get list of failed bill payments with pagination
+    """
+    try:
+        page = request.args.get('page', 1, type=int)
+        limit = request.args.get('limit', 20, type=int)
         
-        for key, value in kwargs.items():
-            if key in max_lengths and value and len(str(value)) > max_lengths[key]:
-                value = str(value)[:max_lengths[key]]
-            setattr(self, key, value)
-    
-    def set_commission(self, commission_data, initiator_id, initiator_type='user'):
-        """Set commission fields on the order"""
-        self.hubtel_commission_rate = commission_data.get('hubtel_rate', 0)
-        self.total_commission = commission_data.get('total_commission', 0)
-        self.admin_commission = commission_data.get('admin_commission', 0)
-        self.initiator_commission = commission_data.get('initiator_commission', 0)
-        self.initiator_type = initiator_type
-        self.initiator_id = initiator_id
-
+        # Get failed bill payments from Order table
+        query = Order.query.filter(
+            Order.type == 'bill_payment',
+            Order.status == 'failed'
+        ).order_by(Order.created_at.desc())
+        
+        # Get total count for summary
+        total_failed = query.count()
+        
+        # Get total amount of failed payments
+        total_amount = db.session.query(db.func.sum(Order.amount)).filter(
+            Order.type == 'bill_payment',
+            Order.status == 'failed'
+        ).scalar() or 0
+        
+        # Paginate
+        paginated = query.paginate(page=page, per_page=limit, error_out=False)
+        
+        # Build response data
+        failed_bills = []
+        for order in paginated.items:
+            user = User.query.get(order.user_id) if order.user_id else None
+            
+            # Get error message
+            error_msg = order.last_delivery_error or 'Unknown error'
+            
+            failed_bills.append({
+                'id': order.id,
+                'order_id': order.order_id,
+                'biller_code': order.biller_code,
+                'biller_name': order.biller_name or 'Unknown',
+                'account_number': order.account_number,
+                'amount': float(order.amount or 0),
+                'customer_name': order.customer_name or (user.username if user else 'Unknown'),
+                'customer_phone': order.phone_number or (user.phone if user else 'N/A'),
+                'error_message': error_msg,
+                'status': order.status,
+                'delivery_status': order.delivery_status,
+                'created_at': order.created_at.isoformat() if order.created_at else None,
+                'initiator_commission': float(order.initiator_commission or 0),
+                'user_id': order.user_id,
+                'username': user.username if user else 'Unknown',
+                'provider_reference': order.provider_reference,
+                'provider_order_id': order.provider_order_id,
+                'resolved_at': order.resolved_at.isoformat() if order.resolved_at else None,
+                'resolution_note': order.resolution_note
+            })
+        
+        # Count pending resolution (not resolved)
+        pending_resolution = Order.query.filter(
+            Order.type == 'bill_payment',
+            Order.status == 'failed',
+            Order.resolved_at.is_(None)
+        ).count()
+        
+        return jsonify({
+            'success': True,
+            'data': failed_bills,
+            'summary': {
+                'total_failed': total_failed,
+                'total_amount': float(total_amount),
+                'pending_resolution': pending_resolution
+            },
+            'pagination': {
+                'page': page,
+                'total': paginated.total,
+                'pages': paginated.pages,
+                'has_prev': paginated.has_prev,
+                'has_next': paginated.has_next
+            }
+        })
+        
+    except Exception as e:
+        print(f"Failed bill payments error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
 
 class RecurringBill(db.Model):
     __tablename__ = 'recurring_bills'
