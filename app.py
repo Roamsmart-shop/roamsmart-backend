@@ -18517,12 +18517,49 @@ def agent_pay_bill():
             if not session_id:
                 return jsonify({'success': False, 'error': 'Session ID required for Water bill. Please validate first.'}), 400
         
-        # Check agent wallet balance
+        # ========== CHECK HUBTEL BALANCE FIRST ==========
+        hubtel = HubtelService()
+        
+        if not hubtel.is_configured():
+            return jsonify({
+                'success': False,
+                'error': 'Hubtel service is not configured. Please contact support.',
+                'code': 'HUBTEL_NOT_CONFIGURED'
+            }), 503
+        
+        # Check disbursement balance
+        balance_result = hubtel.get_disbursement_balance()
+        hubtel_balance = 0
+        balance_available = False
+        
+        if balance_result.get('success'):
+            hubtel_balance = balance_result.get('balance', 0)
+            balance_available = True
+            print(f"[Hubtel] Current disbursement balance: GHS {hubtel_balance}")
+            
+            # Check if enough balance for this transaction
+            if hubtel_balance < amount:
+                return jsonify({
+                    'success': False,
+                    'error': f'Hubtel account balance is insufficient. Available: GHS {hubtel_balance:.2f}, Required: GHS {amount:.2f}',
+                    'suggestion': 'Please contact the admin to top up the Hubtel account.',
+                    'code': 'INSUFFICIENT_HUBTEL_BALANCE',
+                    'data': {
+                        'hubtel_balance': hubtel_balance,
+                        'required': amount,
+                        'shortfall': amount - hubtel_balance
+                    }
+                }), 400
+        else:
+            print(f"[Hubtel] Could not fetch balance: {balance_result.get('error')}")
+        
+        # ========== CHECK AGENT WALLET BALANCE ==========
+        # Store balance BEFORE any deduction
         balance_before = g.current_user.wallet_balance
         if balance_before < amount:
             return jsonify({
                 'success': False,
-                'error': f'Insufficient balance. Need GHS {amount:.2f}. Your balance: GHS {balance_before:.2f}'
+                'error': f'Insufficient wallet balance. Need GHS {amount:.2f}. Your balance: GHS {balance_before:.2f}'
             }), 400
         
         # Calculate commission
@@ -18543,13 +18580,15 @@ def agent_pay_bill():
         print(f"Total Commission: GHS {commission['total_commission']:.4f}")
         print(f"Admin gets: GHS {commission['admin_commission']:.4f} (30%)")
         print(f"Agent gets: GHS {commission['initiator_commission']:.4f} (70%)")
+        if balance_available:
+            print(f"Hubtel Balance: GHS {hubtel_balance:.2f}")
         
         # Process payment via Hubtel
-        hubtel = HubtelService()
         callback_url = f"{os.environ.get('BASE_URL')}/api/webhooks/hubtel"
         client_reference = f"AGENT-{uuid.uuid4().hex[:12].upper()}"
         
         payment_result = None
+        response_code = None
         
         try:
             if biller_code == 'DSTV':
@@ -18570,24 +18609,77 @@ def agent_pay_bill():
                 return jsonify({'success': False, 'error': f'Unsupported biller: {biller_code}'}), 400
         except Exception as hubtel_error:
             print(f"❌ Hubtel payment error: {hubtel_error}")
-            return jsonify({'success': False, 'error': f'Hubtel payment failed: {str(hubtel_error)}'}), 400
+            return jsonify({
+                'success': False, 
+                'error': f'Hubtel payment failed: {str(hubtel_error)}',
+                'code': 'HUBTEL_API_ERROR'
+            }), 400
         
-        if not payment_result or not payment_result.get('success'):
-            error_msg = payment_result.get('error', 'Payment failed') if payment_result else 'Unknown error'
-            return jsonify({'success': False, 'error': error_msg}), 400
+        # ========== HANDLE HUBTEL PAYMENT RESULT ==========
+        if not payment_result:
+            return jsonify({
+                'success': False,
+                'error': 'No response from Hubtel. Please try again.',
+                'code': 'HUBTEL_NO_RESPONSE'
+            }), 400
+        
+        # Check for specific Hubtel error codes
+        response_code = payment_result.get('response_code') if isinstance(payment_result, dict) else None
+        
+        # ========== CHECK FOR FAILURE BEFORE DEDUCTING ==========
+        # Handle insufficient balance error (4075) - NO DEDUCTION
+        if response_code == '4075' or (isinstance(payment_result, dict) and 'Insufficient' in str(payment_result)):
+            # IMPORTANT: Do NOT deduct from wallet
+            return jsonify({
+                'success': False,
+                'error': 'Hubtel account balance is insufficient to process this payment.',
+                'suggestion': 'Please contact the admin to top up the Hubtel account.',
+                'code': 'INSUFFICIENT_HUBTEL_BALANCE',
+                'data': {
+                    'response_code': response_code,
+                    'response': payment_result,
+                    'wallet_balance': balance_before  # Balance unchanged
+                }
+            }), 400
+        
+        # Check if payment was successful
+        if not payment_result.get('success'):
+            error_msg = payment_result.get('error', 'Payment failed') if isinstance(payment_result, dict) else 'Unknown error'
+            
+            # IMPORTANT: Do NOT deduct from wallet on ANY failure
+            return jsonify({
+                'success': False,
+                'error': error_msg,
+                'code': response_code or 'PAYMENT_FAILED',
+                'data': {
+                    'wallet_balance': balance_before  # Balance unchanged
+                }
+            }), 400
+        
+        # ========== ONLY DEDUCT IF PAYMENT WAS SUCCESSFUL ==========
+        # Now we know the payment was successful, deduct from agent wallet
+        g.current_user.wallet_balance -= amount
+        balance_after = g.current_user.wallet_balance
         
         # Determine status based on response code
-        response_code = payment_result.get('response_code')
         if response_code == '0000':
             status = 'completed'
         elif response_code == '0001':
             status = 'pending'
         else:
             status = 'failed'
-        
-        # Deduct from agent wallet
-        g.current_user.wallet_balance -= amount
-        balance_after = g.current_user.wallet_balance
+            # If status is failed but payment_result said success, something is wrong
+            # Refund the amount
+            g.current_user.wallet_balance += amount
+            return jsonify({
+                'success': False,
+                'error': f'Payment failed with code: {response_code}',
+                'code': 'PAYMENT_STATUS_FAILED',
+                'data': {
+                    'refunded': True,
+                    'wallet_balance': g.current_user.wallet_balance
+                }
+            }), 400
         
         # Generate order ID
         order_id = f"BILL-{uuid.uuid4().hex[:8].upper()}"
@@ -18600,7 +18692,7 @@ def agent_pay_bill():
             'GWCL': 'Ghana Water'
         }
         
-        # Create order record - REMOVE balance_before/after from Order
+        # Create order record
         order = Order(
             user_id=g.current_user.id,
             agent_id=g.current_user.id,
@@ -18612,14 +18704,13 @@ def agent_pay_bill():
             customer_name=customer_name,
             phone_number=customer_phone,
             amount=amount,
-            cost=0,  # No wholesale cost for bill payments
-            profit=commission['initiator_commission'] if status == 'completed' else 0,  # Agent profit is commission
+            cost=0,
+            profit=commission['initiator_commission'] if status == 'completed' else 0,
             status=status,
             payment_method='wallet',
             provider='hubtel',
             provider_reference=payment_result.get('client_reference'),
             provider_order_id=payment_result.get('transaction_id'),
-            # Commission fields
             hubtel_commission_rate=commission['hubtel_rate'],
             total_commission=commission['total_commission'],
             admin_commission=commission['admin_commission'],
@@ -18631,7 +18722,7 @@ def agent_pay_bill():
         )
         db.session.add(order)
         
-        # Create transaction record with balance info (Transaction model has balance_before/after)
+        # Create transaction record
         transaction = Transaction(
             user_id=g.current_user.id,
             type='bill_payment_agent',
@@ -18649,6 +18740,7 @@ def agent_pay_bill():
                 'customer_name': customer_name,
                 'customer_phone': customer_phone,
                 'response_code': response_code,
+                'hubtel_balance': hubtel_balance if balance_available else None,
                 'commission': {
                     'hubtel_rate': commission['hubtel_rate'],
                     'total': commission['total_commission'],
@@ -18661,15 +18753,11 @@ def agent_pay_bill():
         
         db.session.commit()
         
-        # ========== CHECK REFERRAL COMPLETION ==========
-        # Check if the customer (phone number) is a user who was referred
-        # and this is their first bill payment
+        # Check referral completion
         if status == 'completed':
-            # Find the customer by phone number
             customer_user = User.query.filter_by(phone=customer_phone).first()
             
             if customer_user:
-                # Check if this is the customer's first completed order (bill payment counts)
                 previous_orders = Order.query.filter(
                     Order.user_id == customer_user.id,
                     Order.status == 'completed'
@@ -18680,7 +18768,6 @@ def agent_pay_bill():
                 print(f"  Previous completed orders: {previous_orders}")
                 print(f"  Referred by: {customer_user.referred_by}")
                 
-                # If this is the first purchase and user was referred
                 if previous_orders == 0 and customer_user.referred_by:
                     referrer = User.query.get(customer_user.referred_by)
                     if referrer:
@@ -18691,16 +18778,13 @@ def agent_pay_bill():
                         ).first()
                         
                         if referral:
-                            # Complete the referral
                             referral.status = 'completed'
                             referral.completed_at = datetime.utcnow()
                             
-                            # Award points to referrer
-                            points_awarded = POINTS_CONFIG['REFERRAL_POINTS']  # 1 point
+                            points_awarded = POINTS_CONFIG['REFERRAL_POINTS']
                             referrer.points_balance = (referrer.points_balance or 0) + points_awarded
                             referrer.total_points_earned = (referrer.total_points_earned or 0) + points_awarded
                             
-                            # Create points transaction for referrer
                             points_trans = PointsTransaction(
                                 user_id=referrer.id,
                                 points=points_awarded,
@@ -18714,7 +18798,7 @@ def agent_pay_bill():
                             db.session.commit()
                             print(f"✅ Referral completed! {referrer.username} earned {points_awarded} point(s)")
         
-        # Distribute commission (only if completed)
+        # Distribute commission
         if status == 'completed':
             distribution = commission_service.distribute_commission(
                 order_id=order_id,
@@ -18722,7 +18806,6 @@ def agent_pay_bill():
                 initiator_id=g.current_user.id,
                 initiator_type='agent'
             )
-            # Refresh agent balance
             db.session.refresh(g.current_user)
             balance_after_with_commission = g.current_user.wallet_balance
         else:
@@ -18762,7 +18845,15 @@ def agent_pay_bill():
         import traceback
         traceback.print_exc()
         db.session.rollback()
-        return jsonify({'success': False, 'error': str(e)}), 500
+        # Ensure we don't leave any partial deductions
+        return jsonify({
+            'success': False, 
+            'error': 'An unexpected error occurred. Please try again.',
+            'code': 'INTERNAL_ERROR',
+            'data': {
+                'wallet_balance': g.current_user.wallet_balance
+            }
+        }), 500
     
 @app.route('/api/agent/bills/validate', methods=['POST'])
 @token_required
