@@ -5530,7 +5530,7 @@ def get_failed_bill_payments():
         # Get total count for summary
         total_failed = query.count()
         
-        # FIXED: Remove ORDER BY from aggregate query
+        # Get total amount of failed payments
         total_amount = db.session.query(db.func.sum(Order.amount)).filter(
             Order.type == 'bill_payment',
             Order.status == 'failed'
@@ -5544,6 +5544,9 @@ def get_failed_bill_payments():
         for order in paginated.items:
             user = User.query.get(order.user_id) if order.user_id else None
             
+            # Get error message - try different possible fields
+            error_msg = order.last_delivery_error or order.error_message or 'Unknown error'
+            
             failed_bills.append({
                 'id': order.id,
                 'order_id': order.order_id,
@@ -5552,13 +5555,15 @@ def get_failed_bill_payments():
                 'account_number': order.account_number,
                 'amount': float(order.amount or 0),
                 'customer_name': order.customer_name or (user.username if user else 'Unknown'),
-                'customer_phone': order.customer_phone or (user.phone if user else 'N/A'),
-                'error_message': order.error_message or 'Unknown error',
+                'customer_phone': order.phone_number or (user.phone if user else 'N/A'),  # FIXED: use phone_number
+                'error_message': error_msg,
                 'status': order.status,
                 'created_at': order.created_at.isoformat() if order.created_at else None,
                 'initiator_commission': float(order.initiator_commission or 0),
                 'user_id': order.user_id,
-                'username': user.username if user else 'Unknown'
+                'username': user.username if user else 'Unknown',
+                'provider_reference': order.provider_reference,
+                'provider_order_id': order.provider_order_id
             })
         
         pending_resolution = Order.query.filter(
