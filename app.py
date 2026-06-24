@@ -6395,70 +6395,193 @@ def hubtel_webhook():
         data = request.get_json()
         print(f"[Hubtel Webhook] Received: {data}")
         
-        response_code = data.get('ResponseCode')
-        transaction_data = data.get('Data', {})
-        client_reference = transaction_data.get('ClientReference')
-        transaction_id = transaction_data.get('TransactionId')
-        amount = transaction_data.get('Amount')
-        description = transaction_data.get('Description')
-        commission = transaction_data.get('Meta', {}).get('Commission')
-        external_transaction_id = transaction_data.get('ExternalTransactionId')
+        # ========== SAFELY EXTRACT DATA WITH NULL CHECKS ==========
+        response_code = data.get('ResponseCode') if data else None
+        
+        # Handle case where Data is None or missing
+        transaction_data = data.get('Data') if data else None
+        
+        # If Data is None but we have data at root level, use root
+        if transaction_data is None and data:
+            # Check if we have transaction data at root level
+            if data.get('TransactionId') or data.get('ClientReference'):
+                transaction_data = data
+            else:
+                # No transaction data found
+                print(f"[Hubtel Webhook] No transaction data found in webhook")
+                return jsonify({'success': True, 'message': 'No transaction data'}), 200
+        
+        # If transaction_data is still None, create empty dict
+        if transaction_data is None:
+            transaction_data = {}
+        
+        # ========== SAFELY EXTRACT VALUES ==========
+        client_reference = transaction_data.get('ClientReference') if transaction_data else None
+        transaction_id = transaction_data.get('TransactionId') if transaction_data else None
+        amount = transaction_data.get('Amount') if transaction_data else 0
+        description = transaction_data.get('Description') if transaction_data else None
+        external_transaction_id = transaction_data.get('ExternalTransactionId') if transaction_data else None
+        
+        # ========== SAFELY EXTRACT COMMISSION ==========
+        commission = None
+        
+        # Try to get commission from Meta
+        if transaction_data:
+            meta = transaction_data.get('Meta')
+            if meta and isinstance(meta, dict):
+                commission = meta.get('Commission')
+            # If not in Meta, try root level
+            if commission is None:
+                commission = transaction_data.get('commission')
+            if commission is None:
+                commission = transaction_data.get('Commission')
+        
+        # If still None, try from data root
+        if commission is None and data:
+            commission = data.get('commission')
+            if commission is None:
+                commission = data.get('Commission')
+        
+        # Default if still None
+        if commission is None:
+            commission = 0
+        
+        # ========== CONVERT TO FLOAT SAFELY ==========
+        try:
+            commission = float(commission)
+        except (ValueError, TypeError):
+            commission = 0
+        
+        try:
+            amount = float(amount) if amount else 0
+        except (ValueError, TypeError):
+            amount = 0
         
         print(f"[Hubtel] Processing callback for reference: {client_reference}")
+        print(f"[Hubtel] Transaction ID: {transaction_id}")
         print(f"[Hubtel] Status: {'SUCCESS' if response_code == '0000' else 'PENDING/FAILED'}")
         print(f"[Hubtel] Amount: GHS {amount}, Commission: GHS {commission}")
         
+        # ========== FIND ORDER ==========
+        order = None
+        
         if client_reference:
-            # Find the order by provider_reference
+            # Try by provider_reference first
             order = Order.query.filter_by(provider_reference=client_reference).first()
             
-            if order:
-                print(f"[Hubtel] Found order: {order.order_id}")
-                
-                if response_code == '0000':  # Success
-                    order.status = 'completed'
-                    order.completed_at = datetime.utcnow()
-                    order.delivery_status = 'delivered'
-                    order.provider_order_id = transaction_id
-                    order.provider_reference = external_transaction_id
-                    
-                    # Update the transaction record
-                    transaction = Transaction.query.filter_by(reference=order.order_id).first()
-                    if transaction:
-                        transaction.status = 'completed'
-                        transaction.meta_data = {
-                            'hubtel_transaction_id': transaction_id,
-                            'external_transaction_id': external_transaction_id,
-                            'commission': commission
-                        }
-                    
-                    print(f"[Hubtel] ✅ Order {order.order_id} marked as completed")
-                    
-                elif response_code == '0001':  # Pending
-                    order.status = 'processing'
-                    print(f"[Hubtel] ⏳ Order {order.order_id} is pending")
-                    
-                else:  # Failed
-                    order.status = 'failed'
-                    order.last_delivery_error = description or f'Payment failed with code {response_code}'
-                    print(f"[Hubtel] ❌ Order {order.order_id} failed: {description}")
-                
-                db.session.commit()
-                print(f"[Hubtel] Database updated successfully")
-                
-            else:
-                print(f"[Hubtel] ⚠️ Order not found for reference: {client_reference}")
-        else:
-            print(f"[Hubtel] ⚠️ No client reference in webhook data")
+            if not order and client_reference.startswith('USER-'):
+                # Try by order_id (remove USER- prefix)
+                order_id = client_reference.replace('USER-', '')
+                order = Order.query.filter_by(order_id=order_id).first()
+            
+            if not order:
+                # Try by provider_order_id
+                order = Order.query.filter_by(provider_order_id=client_reference).first()
         
-        return jsonify({'success': True, 'message': 'Webhook processed'}), 200
+        if not order and transaction_id:
+            order = Order.query.filter_by(provider_order_id=transaction_id).first()
+            if not order:
+                order = Order.query.filter_by(provider_reference=transaction_id).first()
+        
+        if order:
+            old_status = order.status
+            print(f"[Hubtel] Found order: {order.order_id}, Current status: {old_status}")
+            
+            # ========== UPDATE ORDER STATUS ==========
+            if response_code == '0000':  # Success
+                order.status = 'completed'
+                order.completed_at = datetime.utcnow()
+                order.delivery_status = 'delivered'
+                order.delivery_status_updated_at = datetime.utcnow()
+                
+                if transaction_id:
+                    order.provider_order_id = transaction_id
+                if external_transaction_id:
+                    order.provider_reference = external_transaction_id
+                
+                # Update commission
+                if commission > 0:
+                    order.total_commission = commission
+                    order.initiator_commission = commission * 0.7  # 70% to initiator
+                    order.admin_commission = commission * 0.3      # 30% to admin
+                
+                # Update the transaction record
+                transaction = Transaction.query.filter_by(reference=order.order_id).first()
+                if transaction:
+                    transaction.status = 'completed'
+                    if transaction.meta_data is None:
+                        transaction.meta_data = {}
+                    transaction.meta_data['hubtel_transaction_id'] = transaction_id
+                    transaction.meta_data['external_transaction_id'] = external_transaction_id
+                    transaction.meta_data['commission'] = commission
+                
+                print(f"[Hubtel] ✅ Order {order.order_id} marked as completed")
+                
+            elif response_code == '0001':  # Pending
+                order.status = 'processing'
+                order.delivery_status = 'pending'
+                order.delivery_status_updated_at = datetime.utcnow()
+                print(f"[Hubtel] ⏳ Order {order.order_id} is pending")
+                
+            else:  # Failed or other status
+                order.status = 'failed'
+                order.delivery_status = 'failed'
+                order.delivery_status_updated_at = datetime.utcnow()
+                order.last_delivery_error = description or f'Payment failed with code {response_code}'
+                print(f"[Hubtel] ❌ Order {order.order_id} failed: {description}")
+            
+            db.session.commit()
+            print(f"[Hubtel] Database updated successfully")
+            
+            return jsonify({
+                'success': True,
+                'message': 'Order updated',
+                'data': {
+                    'order_id': order.order_id,
+                    'old_status': old_status,
+                    'new_status': order.status,
+                    'commission': commission
+                }
+            }), 200
+            
+        else:
+            print(f"[Hubtel] ⚠️ Order not found for reference: {client_reference}")
+            
+            # Create a pending transaction record for the webhook
+            # This helps track webhooks for orders we don't have yet
+            try:
+                # Log the webhook data for manual review
+                webhook_log = WebhookLog(
+                    provider='hubtel',
+                    reference=client_reference,
+                    transaction_id=transaction_id,
+                    payload=data,
+                    status='pending',
+                    created_at=datetime.utcnow()
+                )
+                db.session.add(webhook_log)
+                db.session.commit()
+                print(f"[Hubtel] Webhook logged for reference: {client_reference}")
+            except Exception as log_error:
+                print(f"[Hubtel] Failed to log webhook: {log_error}")
+            
+            return jsonify({
+                'success': True,
+                'message': 'Webhook received but order not found',
+                'data': {
+                    'client_reference': client_reference,
+                    'transaction_id': transaction_id,
+                    'status': 'order_not_found'
+                }
+            }), 200
         
     except Exception as e:
         print(f"[Hubtel Webhook Error] {e}")
         import traceback
         traceback.print_exc()
         db.session.rollback()
-        return jsonify({'success': False, 'error': str(e)}), 500
+        # Always return 200 to prevent Hubtel from retrying
+        return jsonify({'success': False, 'error': str(e)}), 200
 
 # ========== RECURRING BILLS ENDPOINTS ==========
 
@@ -17993,31 +18116,67 @@ def agent_recurring_bills():
     try:
         # Get all customers of this agent
         customers = Customer.query.filter_by(agent_id=g.current_user.id).all()
-        customer_ids = [c.id for c in customers]
         
-        # Find recurring bills for these customers
+        # If no customers found, return empty list
+        if not customers:
+            return jsonify({
+                'success': True,
+                'data': [],
+                'message': 'No customers found for this agent'
+            })
+        
+        # Get customer phone numbers
+        customer_phones = [c.phone for c in customers]
+        
+        # Get all users that are customers of this agent
+        users = User.query.filter(User.phone.in_(customer_phones)).all()
+        user_ids = [u.id for u in users]
+        
+        if not user_ids:
+            return jsonify({
+                'success': True,
+                'data': [],
+                'message': 'No users found for customers'
+            })
+        
+        # Get recurring bills for these users
+        # Using user_id (correct field name)
         recurring_bills = RecurringBill.query.filter(
-            RecurringBill.customer_id.in_(customer_ids)
+            RecurringBill.user_id.in_(user_ids),
+            RecurringBill.enabled == True
         ).order_by(RecurringBill.next_due_date.asc()).all()
+        
+        # Format response
+        result = []
+        for bill in recurring_bills:
+            result.append({
+                'id': bill.id,
+                'user_id': bill.user_id,
+                'customer_name': bill.customer_name or 'N/A',
+                'customer_phone': next((c.phone for c in customers if c.id == bill.user_id), 'N/A'),
+                'biller_code': bill.biller_code,
+                'biller_name': bill.biller_name,
+                'account_number': bill.account_number,
+                'amount': float(bill.max_amount or 0),
+                'frequency': bill.frequency,
+                'auto_pay': bill.auto_pay,
+                'enabled': bill.enabled,
+                'next_due_date': bill.next_due_date.isoformat() if bill.next_due_date else None,
+                'last_paid_date': bill.last_paid_date.isoformat() if bill.last_paid_date else None,
+                'created_at': bill.created_at.isoformat() if bill.created_at else None,
+                'updated_at': bill.updated_at.isoformat() if bill.updated_at else None
+            })
         
         return jsonify({
             'success': True,
-            'data': [{
-                'id': r.id,
-                'customer_name': r.customer_name,
-                'customer_phone': r.customer_phone,
-                'biller_code': r.biller_code,
-                'biller_name': r.biller_name,
-                'account_number': r.account_number,
-                'amount': float(r.amount),
-                'frequency': r.frequency,
-                'next_due_date': r.next_due_date.isoformat(),
-                'status': r.status
-            } for r in recurring_bills]
+            'data': result,
+            'total': len(result)
         })
         
     except Exception as e:
         print(f"Error fetching recurring bills: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
@@ -18034,29 +18193,35 @@ def create_recurring_bill():
         biller_code = data.get('biller_code')
         biller_name = data.get('biller_name')
         account_number = data.get('account_number')
-        amount = float(data.get('amount'))
-        frequency = data.get('frequency', 'monthly')  # weekly, monthly, quarterly
+        amount = float(data.get('amount', 0))
+        frequency = data.get('frequency', 'monthly')
+        auto_pay = data.get('auto_pay', True)
         
-        # Find or create customer
+        if not customer_phone:
+            return jsonify({'success': False, 'error': 'Customer phone is required'}), 400
+        
+        if not biller_code or not account_number:
+            return jsonify({'success': False, 'error': 'Biller code and account number required'}), 400
+        
+        # Find the user by phone
+        user = User.query.filter_by(phone=customer_phone).first()
+        
+        if not user:
+            return jsonify({'success': False, 'error': f'User with phone {customer_phone} not found'}), 404
+        
+        # Check if this customer belongs to this agent
         customer = Customer.query.filter_by(
             phone=customer_phone,
             agent_id=g.current_user.id
         ).first()
         
         if not customer:
-            customer = Customer(
-                name=customer_name,
-                phone=customer_phone,
-                agent_id=g.current_user.id,
-                created_at=datetime.utcnow()
-            )
-            db.session.add(customer)
-            db.session.commit()
+            return jsonify({'success': False, 'error': 'This customer is not associated with you'}), 403
         
         # Calculate next due date based on frequency
         from dateutil.relativedelta import relativedelta
         
-        today = datetime.utcnow().date()
+        today = datetime.utcnow()
         if frequency == 'weekly':
             next_due = today + relativedelta(weeks=1)
         elif frequency == 'monthly':
@@ -18068,19 +18233,18 @@ def create_recurring_bill():
         
         # Create recurring bill
         recurring = RecurringBill(
-            customer_id=customer.id,
-            customer_name=customer_name,
-            customer_phone=customer_phone,
+            user_id=user.id,
             biller_code=biller_code,
             biller_name=biller_name,
             account_number=account_number,
-            amount=amount,
+            customer_name=customer_name or user.username,
             frequency=frequency,
-            next_due_date=next_due,
-            status='active',
-            created_by=g.current_user.id,
-            created_at=datetime.utcnow()
+            auto_pay=auto_pay,
+            max_amount=amount,
+            enabled=True,
+            next_due_date=next_due
         )
+        
         db.session.add(recurring)
         db.session.commit()
         
@@ -18089,7 +18253,9 @@ def create_recurring_bill():
             'message': 'Recurring bill created successfully',
             'data': {
                 'id': recurring.id,
+                'user_id': recurring.user_id,
                 'customer_phone': customer_phone,
+                'customer_name': recurring.customer_name,
                 'biller_name': biller_name,
                 'amount': amount,
                 'frequency': frequency,
@@ -18099,6 +18265,108 @@ def create_recurring_bill():
         
     except Exception as e:
         print(f"Error creating recurring bill: {e}")
+        db.session.rollback()
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/agent/bills/recurring/<int:bill_id>', methods=['PUT'])
+@token_required
+@agent_required
+def update_recurring_bill(bill_id):
+    """Update a recurring bill"""
+    try:
+        data = request.get_json()
+        
+        recurring = RecurringBill.query.get(bill_id)
+        if not recurring:
+            return jsonify({'success': False, 'error': 'Recurring bill not found'}), 404
+        
+        # Check if this bill belongs to a customer of this agent
+        user = User.query.get(recurring.user_id)
+        if not user:
+            return jsonify({'success': False, 'error': 'User not found'}), 404
+        
+        customer = Customer.query.filter_by(
+            phone=user.phone,
+            agent_id=g.current_user.id
+        ).first()
+        
+        if not customer:
+            return jsonify({'success': False, 'error': 'You do not have permission to modify this bill'}), 403
+        
+        # Update fields
+        if 'enabled' in data:
+            recurring.enabled = data['enabled']
+        if 'auto_pay' in data:
+            recurring.auto_pay = data['auto_pay']
+        if 'max_amount' in data:
+            recurring.max_amount = float(data['max_amount'])
+        if 'frequency' in data:
+            recurring.frequency = data['frequency']
+        if 'account_number' in data:
+            recurring.account_number = data['account_number']
+        if 'customer_name' in data:
+            recurring.customer_name = data['customer_name']
+        
+        recurring.updated_at = datetime.utcnow()
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': 'Recurring bill updated successfully',
+            'data': {
+                'id': recurring.id,
+                'enabled': recurring.enabled,
+                'auto_pay': recurring.auto_pay,
+                'max_amount': float(recurring.max_amount or 0),
+                'frequency': recurring.frequency,
+                'next_due_date': recurring.next_due_date.isoformat() if recurring.next_due_date else None
+            }
+        })
+        
+    except Exception as e:
+        print(f"Error updating recurring bill: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/agent/bills/recurring/<int:bill_id>', methods=['DELETE'])
+@token_required
+@agent_required
+def delete_recurring_bill(bill_id):
+    """Delete a recurring bill (soft delete by setting enabled=False)"""
+    try:
+        recurring = RecurringBill.query.get(bill_id)
+        if not recurring:
+            return jsonify({'success': False, 'error': 'Recurring bill not found'}), 404
+        
+        # Check if this bill belongs to a customer of this agent
+        user = User.query.get(recurring.user_id)
+        if not user:
+            return jsonify({'success': False, 'error': 'User not found'}), 404
+        
+        customer = Customer.query.filter_by(
+            phone=user.phone,
+            agent_id=g.current_user.id
+        ).first()
+        
+        if not customer:
+            return jsonify({'success': False, 'error': 'You do not have permission to delete this bill'}), 403
+        
+        # Soft delete - disable the recurring bill
+        recurring.enabled = False
+        recurring.updated_at = datetime.utcnow()
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': 'Recurring bill disabled successfully'
+        })
+        
+    except Exception as e:
+        print(f"Error deleting recurring bill: {e}")
         db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
 
@@ -18154,6 +18422,19 @@ def agent_bill_stats():
             Order.created_at >= seven_days_ago
         ).count()
         
+        # Get recurring bills count
+        customers = Customer.query.filter_by(agent_id=g.current_user.id).all()
+        customer_phones = [c.phone for c in customers]
+        users = User.query.filter(User.phone.in_(customer_phones)).all()
+        user_ids = [u.id for u in users]
+        
+        recurring_count = 0
+        if user_ids:
+            recurring_count = RecurringBill.query.filter(
+                RecurringBill.user_id.in_(user_ids),
+                RecurringBill.enabled == True
+            ).count()
+        
         return jsonify({
             'success': True,
             'data': {
@@ -18163,12 +18444,15 @@ def agent_bill_stats():
                 'completed_bills': completed_bills,
                 'pending_bills': pending_bills,
                 'failed_bills': failed_bills,
-                'recent_bills': recent_bills
+                'recent_bills': recent_bills,
+                'recurring_bills': recurring_count
             }
         })
         
     except Exception as e:
         print(f"Error fetching bill stats: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
@@ -18705,41 +18989,7 @@ def agent_validate_bill():
         }), 500
 
 
-@app.route('/api/agent/bills/recurring/<int:bill_id>', methods=['DELETE'])
-@token_required
-@agent_required
-def delete_recurring_bill(bill_id):
-    """Delete a recurring bill"""
-    try:
-        recurring = RecurringBill.query.get(bill_id)
-        if not recurring:
-            return jsonify({'success': False, 'error': 'Recurring bill not found'}), 404
-        
-        # Check if this bill belongs to a customer of this agent
-        user = User.query.get(recurring.user_id)
-        if not user:
-            return jsonify({'success': False, 'error': 'User not found'}), 404
-        
-        customer = Customer.query.filter_by(
-            phone=user.phone,
-            agent_id=g.current_user.id
-        ).first()
-        
-        if not customer:
-            return jsonify({'success': False, 'error': 'You do not have permission to delete this bill'}), 403
-        
-        db.session.delete(recurring)
-        db.session.commit()
-        
-        return jsonify({
-            'success': True,
-            'message': 'Recurring bill deleted successfully'
-        })
-        
-    except Exception as e:
-        print(f"Error deleting recurring bill: {e}")
-        db.session.rollback()
-        return jsonify({'success': False, 'error': str(e)}), 500
+
 
 
 @app.route('/api/user/commission-stats', methods=['GET'])
