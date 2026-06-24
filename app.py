@@ -5509,7 +5509,6 @@ def get_bill_commission_stats():
         }), 500
 
 
-# ========== FAILED BILL PAYMENTS LIST ENDPOINT ==========
 @app.route('/api/admin/failed-bill-payments', methods=['GET'])
 @token_required
 @admin_required
@@ -5530,8 +5529,11 @@ def get_failed_bill_payments():
         
         # Get total count for summary
         total_failed = query.count()
-        total_amount = query.with_entities(
-            db.func.sum(Order.amount)
+        
+        # FIXED: Remove ORDER BY from aggregate query
+        total_amount = db.session.query(db.func.sum(Order.amount)).filter(
+            Order.type == 'bill_payment',
+            Order.status == 'failed'
         ).scalar() or 0
         
         # Paginate
@@ -5540,7 +5542,6 @@ def get_failed_bill_payments():
         # Build response data
         failed_bills = []
         for order in paginated.items:
-            # Get user details
             user = User.query.get(order.user_id) if order.user_id else None
             
             failed_bills.append({
@@ -5560,7 +5561,6 @@ def get_failed_bill_payments():
                 'username': user.username if user else 'Unknown'
             })
         
-        # Pending resolution count (failed bills that haven't been resolved)
         pending_resolution = Order.query.filter(
             Order.type == 'bill_payment',
             Order.status == 'failed',
