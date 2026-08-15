@@ -1,5 +1,7 @@
 # ========== DNS FIX FOR EVENTLET - MUST BE FIRST ==========
 import os
+
+
 os.environ["EVENTLET_NO_GREENDNS"] = "yes"  # Disable eventlet's DNS resolver
 
 import eventlet
@@ -59,7 +61,7 @@ from werkzeug.utils import secure_filename
 from flask_session import Session
 import secrets
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError, DataError
-
+from sqlalchemy import inspect
 # ========== LOCAL IMPORTS ==========
 from config import config
 from models import *
@@ -194,7 +196,8 @@ print("[DEBUG] ===== RATE LIMITER INITIALIZATION COMPLETE =====\n")
 # ========== CORS CONFIGURATION ==========
 def get_allowed_origins():
     origins = [
-        'http://localhost:3000',
+        'http://localhost:3000',      # ✅ ADD THIS - your frontend port
+        'http://localhost:3001',      # Keep this too
         'http://localhost:5000',
         'http://127.0.0.1:3000',
         'http://127.0.0.1:5000',
@@ -203,6 +206,12 @@ def get_allowed_origins():
         'https://api.roamsmart.shop',
         'https://roamsmart-frontend.vercel.app',
         'https://roamsmart-frontend-cgggs8bm4-roamsmart-shops-projects.vercel.app',
+        'https://abigalisticstudious.com',
+        'https://www.abigalisticstudious.com',
+        'https://api.abigalisticstudious.com',
+        'https://afdalnova-frontend.vercel.app',
+        'https://afdalnova-frontend-git-main-abigalistic-studious.vercel.app',
+        'https://afdalnova-frontend-o5v7jlou0-abigalistic-studious.vercel.app',
     ]
     railway_frontend = os.environ.get('RAILWAY_FRONTEND_URL')
     if railway_frontend:
@@ -231,7 +240,7 @@ CORS(app,
 # ========== SOCKET.IO ==========
 socketio = SocketIO(
     app,
-    cors_allowed_origins=ALLOWED_ORIGINS,
+    cors_allowed_origins=ALLOWED_ORIGINS,  # Use the same list
     async_mode='eventlet',
     ping_timeout=60,
     ping_interval=25,
@@ -356,6 +365,132 @@ def validate_network(network):
     valid_networks = ['mtn', 'telecel', 'airteltigo', 'vodafone']
     return network and network.lower() in valid_networks
 
+POINTS_CONFIG = {
+    'REFERRAL_POINTS': 1,  # 1 point per referral
+    'POINTS_TO_GHS_RATE': 10,  # 10 points = ₵1
+    'MIN_REDEMPTION_POINTS': 50,  # Minimum 50 points (₵5) to redeem
+    'MAX_REDEMPTION_POINTS': 1000,  # Max 1000 points per redemption
+}
+
+PLATFORMS = {
+    'platform_a': {
+        'name': 'AFDALNOVA',
+        'domain': 'abigalisticstudious.com',
+        'brand_name': 'AFDALNOVA',
+        'brand_tagline': 'Innovation Meets Excellence',
+        'primary_color': '#1A2A6C',
+        'secondary_color': '#C9A84C',
+        'support_email': 'support@abigalisticstudious.com',
+        'support_phone': '0548247241',
+        'support_phone_2': '0599874865',
+        'whatsapp': '233599874865',
+        'logo': '/logo192.png',
+        'favicon': '/favicon.ico',
+        'base_url': 'https://abigalisticstudious.com',
+        'api_url': 'https://api.abigalisticstudious.com',
+        'is_active': True,
+        'paystack_public_key': 'pk_live_xxx',
+        'paystack_secret_key': 'sk_live_xxx',
+        'paystack_webhook_secret': 'whsec_xxx',
+        'default_currency': 'GHS'
+    },
+    'platform_b': {
+        'name': 'Roamsmart',
+        'domain': 'roamsmart.shop',
+        'brand_name': 'Roamsmart',
+        'brand_tagline': 'Smart Data, Simpler Life',
+        'primary_color': '#8B0000',
+        'secondary_color': '#FFC107',
+        'support_email': 'support@roamsmart.shop',
+        'support_phone': '0557388622',
+        'support_phone_2': None,
+        'whatsapp': '233557388622',
+        'logo': '/logo192.png',
+        'favicon': '/favicon.ico',
+        'base_url': 'https://roamsmart.shop',
+        'api_url': 'https://api.roamsmart.shop',
+        'is_active': True,
+        'paystack_public_key': 'pk_live_yyy',
+        'paystack_secret_key': 'sk_live_yyy',
+        'paystack_webhook_secret': 'whsec_yyy',
+        'default_currency': 'GHS'
+    }
+}
+
+def get_platform(platform_key):
+    """Get platform configuration"""
+    return PLATFORMS.get(platform_key)
+
+def get_platform_by_domain(domain):
+    """Get platform by domain"""
+    for key, config in PLATFORMS.items():
+        if config['domain'] in domain:
+            return key, config
+    return 'platform_a', PLATFORMS['platform_a']  # Default to AFDALNOVA
+
+def get_platform_by_email(email):
+    """Detect platform from email domain"""
+    for key, config in PLATFORMS.items():
+        if config['domain'] in email:
+            return key
+    return 'platform_a'  # Default to AFDALNOVA
+
+def get_default_platform():
+    """Get default platform"""
+    return 'platform_a', PLATFORMS['platform_a']
+
+def get_all_active_platforms():
+    """Get all active platforms"""
+    return {k: v for k, v in PLATFORMS.items() if v['is_active']}
+
+@app.before_request
+def detect_platform():
+    """Detect platform from request origin"""
+    # Skip for static files
+    if request.path.startswith('/static') or request.path.startswith('/uploads'):
+        return
+    
+    # Get origin from request
+    origin = request.headers.get('Origin', '')
+    referer = request.headers.get('Referer', '')
+    host = request.host
+    
+    # Default to AFDALNOVA
+    g.platform = 'platform_a'
+    g.platform_config = PLATFORMS['platform_a']
+    
+    # Check if request is from a known platform
+    for platform_key, platform_config in PLATFORMS.items():
+        if platform_config['domain'] in origin or platform_config['domain'] in host:
+            g.platform = platform_key
+            g.platform_config = platform_config
+            print(f"[PLATFORM] Detected: {platform_key} ({platform_config['name']})")
+            break
+    
+    # For API requests, check Authorization token
+    if 'Authorization' in request.headers:
+        token = request.headers.get('Authorization')
+        try:
+            import jwt
+            payload = jwt.decode(token.replace('Bearer ', ''), app.config['SECRET_KEY'], algorithms=['HS256'])
+            user = User.query.get(payload.get('user_id'))
+            if user and user.platform:
+                g.platform = user.platform
+                g.platform_config = PLATFORMS.get(user.platform, PLATFORMS['platform_a'])
+                print(f"[PLATFORM] Detected from token: {g.platform}")
+        except:
+            pass
+
+@app.after_request
+def add_platform_headers(response):
+    """Add platform headers to response"""
+    if hasattr(g, 'platform'):
+        response.headers['X-Platform'] = g.platform
+        if hasattr(g, 'platform_config'):
+            response.headers['X-Platform-Name'] = g.platform_config.get('name', '')
+            response.headers['X-Brand-Name'] = g.platform_config.get('brand_name', '')
+    return response
+
 class PhoneVerificationService:
     """Handle phone number verification - SMS first, Email only if SMS fails or resend requested"""
     
@@ -377,22 +512,32 @@ class PhoneVerificationService:
         # If it's 9 digits, add 233 prefix
         elif len(phone) == 9:
             phone = '233' + phone
-        # If it starts with 233, keep as is
+        # If it starts with 233 and is 12 digits, keep as is
         elif phone.startswith('233') and len(phone) == 12:
             return phone
         return phone
     
-    def send_sms(self, phone_number, code):
-        """Send SMS using Africa's Talking direct API (working method)"""
+    def get_platform_config(self, platform='platform_a'):
+        """Get platform configuration for branding"""
+        from platform_config import PLATFORMS
+        return PLATFORMS.get(platform, PLATFORMS.get('platform_a'))
+    
+    def send_sms(self, phone_number, code, platform='platform_a'):
+        """Send SMS using Africa's Talking direct API - AFDALNOVA"""
         try:
+            # Get platform config
+            platform_config = self.get_platform_config(platform)
+            platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+            platform_short = platform_config.get('short_name', 'AFDALNOVA')
+            
             api_key = os.environ.get('AFRICASTALKING_API_KEY')
             username = os.environ.get('AFRICASTALKING_USERNAME', 'Roamsmart')
-            sender_id = os.environ.get('AFRICASTALKING_SENDER_ID', 'Roamsmart')
+            sender_id = os.environ.get('AFRICASTALKING_SENDER_ID', platform_short)
             
-            # Format phone number correctly using normalize
+            # Format phone number correctly
             formatted_phone = self.normalize_phone(phone_number)
             
-            message = f"Your Roamsmart verification code is: {code}. Valid for 10 minutes."
+            message = f"Your {platform_short} verification code is: {code}. Valid for 10 minutes."
             
             url = "https://api.africastalking.com/version1/messaging"
             
@@ -400,7 +545,6 @@ class PhoneVerificationService:
                 "username": username,
                 "to": formatted_phone,
                 "message": message,
-                #"from": sender_id
             }
             
             headers = {
@@ -415,44 +559,125 @@ class PhoneVerificationService:
                 result = response.json()
                 recipients = result.get('SMSMessageData', {}).get('Recipients', [])
                 if recipients and recipients[0].get('status') == 'Success':
-                    print(f"[SMS] ✅ Sent to {phone_number}")
-                    return {'success': True, 'method': 'sms'}
+                    print(f"[SMS] ✅ Sent to {phone_number} on {platform_name}")
+                    return {'success': True, 'method': 'sms', 'platform': platform}
             
             print(f"[SMS] ❌ Failed: {response.text}")
-            return {'success': False, 'error': 'SMS sending failed', 'method': 'sms'}
+            return {'success': False, 'error': 'SMS sending failed', 'method': 'sms', 'platform': platform}
             
         except Exception as e:
             print(f"[SMS] ❌ Error: {e}")
-            return {'success': False, 'error': str(e), 'method': 'sms'}
+            return {'success': False, 'error': str(e), 'method': 'sms', 'platform': platform}
     
-    def send_email_fallback(self, email, phone_number, code):
-        """Send verification code via email (SMS fallback or resend)"""
+    def send_email_fallback(self, email, phone_number, code, platform='platform_a'):
+        """Send verification code via email (SMS fallback or resend) - AFDALNOVA"""
+        platform_config = self.get_platform_config(platform)
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        platform_short = platform_config.get('short_name', 'AFDALNOVA')
+        primary_color = platform_config.get('primary_color', '#1A2A6C')
+        secondary_color = platform_config.get('secondary_color', '#C9A84C')
+        support_phone = platform_config.get('support_phone', '0548247241')
+        tagline = platform_config.get('tagline', 'Innovation Meets Excellence')
+        website_url = platform_config.get('base_url', 'https://abigalisticstudious.com')
+        
         html_content = f"""
-        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-            <div style="background: #8B0000; padding: 20px; text-align: center; border-radius: 10px 10px 0 0;">
-                <h2 style="color: white;">📱 Phone Verification Code</h2>
-                <p style="color: white;">{COMPANY_NAME}</p>
-            </div>
-            <div style="background: #f5f5f5; padding: 30px; border-radius: 0 0 10px 10px;">
-                <p>Your verification code for <strong>{phone_number}</strong> is:</p>
-                <div style="background: white; font-size: 36px; font-weight: bold; text-align: center; padding: 20px; border-radius: 10px; margin: 20px 0; letter-spacing: 5px;">
-                    {code}
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+                body {{ font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.6; }}
+                .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+                .header {{ background: {primary_color}; color: white; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }}
+                .content {{ background: #f9f9f9; padding: 30px; border-radius: 0 0 10px 10px; }}
+                .code-box {{ background: white; font-size: 36px; font-weight: bold; text-align: center; padding: 20px; border-radius: 10px; margin: 20px 0; letter-spacing: 5px; color: {primary_color}; }}
+                .footer {{ text-align: center; padding: 20px; color: #666; font-size: 12px; }}
+                .tagline {{ color: {secondary_color}; }}
+                .note {{ background: #fff3cd; padding: 12px; border-radius: 8px; border-left: 4px solid #ffc107; margin: 15px 0; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h2>📱 Phone Verification Code</h2>
+                    <p>{platform_name}</p>
                 </div>
-                <p style="color: #666;">This code expires in <strong>10 minutes</strong>.</p>
-                <p style="color: #666; font-size: 12px;">(SMS delivery failed, so we're sending this code via email)</p>
-                <hr style="margin: 20px 0; border: none; border-top: 1px solid #ddd;">
-                <p style="color: #999; font-size: 11px; text-align: center;">
-                    {COMPANY_NAME} - Smart Data, Simpler Life<br>
-                    Need help? Contact us: {COMPANY_PHONE}
-                </p>
+                <div class="content">
+                    <p>Your verification code for <strong>{phone_number}</strong> is:</p>
+                    <div class="code-box">
+                        {code}
+                    </div>
+                    <p style="color: #666;">This code expires in <strong>10 minutes</strong>.</p>
+                    
+                    <div class="note">
+                        <p style="margin: 0; color: #856404;">
+                            ⚠️ <strong>Note:</strong> SMS delivery failed, so we're sending this code via email.
+                        </p>
+                    </div>
+                    
+                    <hr style="margin: 20px 0; border: none; border-top: 1px solid #ddd;">
+                    <p style="color: #999; font-size: 11px; text-align: center;">
+                        {platform_name} - {tagline}<br>
+                        Need help? Contact us: {support_phone}
+                    </p>
+                </div>
+                <div class="footer">
+                    <p>© {datetime.utcnow().year} {platform_name}. All rights reserved.</p>
+                    <p class="tagline">{tagline}</p>
+                </div>
             </div>
-        </div>
+        </body>
+        </html>
         """
-        send_email(email, f"Phone Verification Code - {COMPANY_NAME}", html_content)
-        return {'success': True, 'method': 'email'}
+        send_email(email, f"Phone Verification Code - {platform_name}", html_content)
+        return {'success': True, 'method': 'email', 'platform': platform}
     
+    def send_verification_code(self, phone_number, email, platform='platform_a'):
+        """Send verification code - SMS first, Email only if SMS fails"""
+        # Normalize phone number
+        normalized_phone = self.normalize_phone(phone_number)
+        
+        # Generate code
+        code = self.generate_verification_code()
+        expires_at = datetime.utcnow() + timedelta(minutes=10)
+        
+        # Store the code
+        self.verification_codes[normalized_phone] = {
+            'code': code,
+            'expires_at': expires_at,
+            'verified': False,
+            'attempts': 0,
+            'sms_sent': False,
+            'platform': platform
+        }
+        
+        print(f"[VERIFICATION] Code for {normalized_phone}: {code}")
+        
+        # Try SMS first
+        sms_result = self.send_sms(phone_number, code, platform)
+        
+        if sms_result['success']:
+            self.verification_codes[normalized_phone]['sms_sent'] = True
+            return {
+                'success': True,
+                'message': 'Verification code sent via SMS',
+                'method': 'sms',
+                'expires_in': 10,
+                'platform': platform
+            }
+        else:
+            # SMS failed - send email fallback
+            print(f"[VERIFICATION] SMS failed, sending email fallback...")
+            email_result = self.send_email_fallback(email, phone_number, code, platform)
+            
+            return {
+                'success': True,
+                'message': 'SMS delivery failed. Verification code sent via email.',
+                'method': 'email',
+                'expires_in': 10,
+                'platform': platform
+            }
     
-    def resend_verification_code(self, phone_number, email):
+    def resend_verification_code(self, phone_number, email, platform='platform_a'):
         """Resend verification code - ALWAYS try SMS first again"""
         # Normalize phone number
         normalized_phone = self.normalize_phone(phone_number)
@@ -462,72 +687,126 @@ class PhoneVerificationService:
             del self.verification_codes[normalized_phone]
         
         # Try SMS first again
-        return self.send_verification_code(phone_number, email)
+        return self.send_verification_code(phone_number, email, platform)
     
-    def verify_code(self, phone_number, code):
+    def verify_code(self, phone_number, code, platform='platform_a'):
         """Verify the code entered by user"""
         # Normalize phone number to match the key used when storing
         normalized_phone = self.normalize_phone(phone_number)
         
         stored = self.verification_codes.get(normalized_phone)
         
+        # Get platform info for logging
+        platform_config = self.get_platform_config(platform)
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        
         # Debug logging
         print(f"[VERIFY] Original phone: {phone_number} → Normalized: {normalized_phone}")
         print(f"[VERIFY] Input code: {code}")
         print(f"[VERIFY] Stored data: {stored}")
+        print(f"[VERIFY] Platform: {platform} ({platform_name})")
         
         if not stored:
             return {'success': False, 'error': 'No verification code sent to this number'}
         
-        if stored['verified']:
+        if stored.get('verified', False):
             return {'success': False, 'error': 'Code already used'}
+        
+        # Check if platform matches
+        if stored.get('platform') and stored['platform'] != platform:
+            print(f"[VERIFY] Platform mismatch: stored={stored['platform']}, request={platform}")
+            # Still allow verification but log the mismatch
         
         current_time = datetime.utcnow()
         expires_at = stored['expires_at']
         
         print(f"[VERIFY] Current UTC: {current_time}")
         print(f"[VERIFY] Expires at: {expires_at}")
-        print(f"[VERIFY] Time difference: {(expires_at - current_time).total_seconds()} seconds")
+        print(f"[VERIFY] Time remaining: {(expires_at - current_time).total_seconds()} seconds")
         
         if current_time > expires_at:
             del self.verification_codes[normalized_phone]
             return {'success': False, 'error': 'Verification code expired'}
         
-        stored['attempts'] += 1
+        stored['attempts'] = stored.get('attempts', 0) + 1
         
         if stored['attempts'] > 5:
             del self.verification_codes[normalized_phone]
             return {'success': False, 'error': 'Too many failed attempts'}
         
         if stored['code'] != code:
-            return {'success': False, 'error': f'Invalid code. {5 - stored["attempts"]} attempts left'}
+            remaining = 5 - stored['attempts']
+            return {'success': False, 'error': f'Invalid code. {remaining} attempt(s) left'}
         
         stored['verified'] = True
+        
         return {
             'success': True, 
-            'message': 'Phone verified successfully',
-            'method': 'sms' if stored['sms_sent'] else 'email'
+            'message': f'Phone verified successfully on {platform_name}',
+            'method': 'sms' if stored.get('sms_sent', False) else 'email',
+            'platform': platform,
+            'platform_name': platform_name
+        }
+    
+    def is_phone_verified(self, phone_number):
+        """Check if a phone number is already verified"""
+        normalized_phone = self.normalize_phone(phone_number)
+        stored = self.verification_codes.get(normalized_phone)
+        return stored and stored.get('verified', False)
+    
+    def clear_verification(self, phone_number):
+        """Clear verification data for a phone number"""
+        normalized_phone = self.normalize_phone(phone_number)
+        if normalized_phone in self.verification_codes:
+            del self.verification_codes[normalized_phone]
+            return True
+        return False
+    
+    def get_verification_status(self, phone_number):
+        """Get verification status for a phone number"""
+        normalized_phone = self.normalize_phone(phone_number)
+        stored = self.verification_codes.get(normalized_phone)
+        
+        if not stored:
+            return {'verified': False, 'exists': False}
+        
+        return {
+            'verified': stored.get('verified', False),
+            'exists': True,
+            'sms_sent': stored.get('sms_sent', False),
+            'attempts': stored.get('attempts', 0),
+            'platform': stored.get('platform', 'platform_a'),
+            'expires_at': stored['expires_at'].isoformat() if stored.get('expires_at') else None
         }
 
 
+# Initialize verification service
 verification_service = PhoneVerificationService()
 
 # ========== PAYSTACK CONFIGURATION ==========
-PAYSTACK_SECRET_KEY = os.environ.get('PAYSTACK_SECRET_KEY')
-PAYSTACK_PUBLIC_KEY = os.environ.get('PAYSTACK_PUBLIC_KEY')
-PAYSTACK_BASE_URL = os.environ.get('PAYSTACK_BASE_URL')
+ROAMSMART_PAYSTACK_PUBLIC_KEY = os.environ.get('ROAMSMART_PAYSTACK_PUBLIC_KEY')
+ROAMSMART_PAYSTACK_SECRET_KEY = os.environ.get('ROAMSMART_PAYSTACK_SECRET_KEY')
+
+# ========== AFDALNOVA PAYSTACK (New) ==========
+AFDALNOVA_PAYSTACK_PUBLIC_KEY = os.environ.get('AFDALNOVA_PAYSTACK_PUBLIC_KEY')
+AFDALNOVA_PAYSTACK_SECRET_KEY = os.environ.get('AFDALNOVA_PAYSTACK_SECRET_KEY')
+
+PAYSTACK_BASE_URL = os.environ.get('PAYSTACK_BASE_URL', 'https://api.paystack.co')
 
 # ========== PAYSTACK HELPER FUNCTIONS ==========
-def initialize_paystack_transaction(email, amount, reference=None, metadata=None):
-    """Initialize a Paystack transaction"""
+def initialize_paystack_transaction(email, amount, reference=None, metadata=None, secret_key=None, callback_url=None):
+    """Initialize a Paystack transaction with optional secret key"""
     try:
         if not reference:
             reference = f"PAY-{uuid.uuid4().hex[:12].upper()}"
         
+        # Use provided secret_key or fallback to default
+        secret_key = secret_key or PAYSTACK_SECRET_KEY
+        
         url = f"{PAYSTACK_BASE_URL}/transaction/initialize"
         
         headers = {
-            "Authorization": f"Bearer {PAYSTACK_SECRET_KEY}",
+            "Authorization": f"Bearer {secret_key}",
             "Content-Type": "application/json"
         }
         
@@ -535,11 +814,15 @@ def initialize_paystack_transaction(email, amount, reference=None, metadata=None
             "email": email,
             "amount": int(amount * 100),  # Paystack uses kobo (multiply by 100)
             "reference": reference,
-            "callback_url": f"{COMPANY_WEBSITE}/wallet"
+            "callback_url": callback_url or f"{COMPANY_WEBSITE}/wallet"
         }
         
         if metadata:
             data["metadata"] = metadata
+        
+        print(f"[PAYSTACK] Initializing with secret: {secret_key[:20]}...")
+        print(f"[PAYSTACK] Reference: {reference}")
+        print(f"[PAYSTACK] Amount: {amount}")
         
         response = requests.post(url, json=data, headers=headers, timeout=30)
         
@@ -558,18 +841,26 @@ def initialize_paystack_transaction(email, amount, reference=None, metadata=None
         
     except Exception as e:
         print(f"Paystack error: {e}")
+        import traceback
+        traceback.print_exc()
         return {'success': False, 'error': str(e)}
 
 
-def verify_paystack_transaction(reference):
-    """Verify a Paystack transaction"""
+def verify_paystack_transaction(reference, secret_key=None):
+    """Verify a Paystack transaction with optional secret key"""
     try:
+        # Use provided secret_key or fallback to default
+        secret_key = secret_key or PAYSTACK_SECRET_KEY
+        
         url = f"{PAYSTACK_BASE_URL}/transaction/verify/{reference}"
         
         headers = {
-            "Authorization": f"Bearer {PAYSTACK_SECRET_KEY}",
+            "Authorization": f"Bearer {secret_key}",
             "Content-Type": "application/json"
         }
+        
+        print(f"[PAYSTACK] Verifying with secret: {secret_key[:20]}...")
+        print(f"[PAYSTACK] Reference: {reference}")
         
         response = requests.get(url, headers=headers, timeout=30)
         
@@ -590,6 +881,8 @@ def verify_paystack_transaction(reference):
         
     except Exception as e:
         print(f"Paystack verification error: {e}")
+        import traceback
+        traceback.print_exc()
         return {'success': False, 'error': str(e)}
 
 def send_mobile_data(phone_number, quantity, unit='MB', validity='Day'):
@@ -914,18 +1207,37 @@ def broadcast_announcement_update(action, announcement_data=None):
 
 # ========== EMAIL FUNCTIONS ==========
 
+def get_platform_config(platform='platform_a'):
+    """Get platform configuration for branding"""
+    from platform_config import PLATFORMS
+    return PLATFORMS.get(platform, PLATFORMS.get('platform_a'))
+
+# ============================================================
+# GENERATE VERIFICATION CODE
+# ============================================================
+
 def generate_verification_code():
     """Generate a 6-digit verification code"""
     return str(random.randint(100000, 999999))
 
+# ============================================================
+# SEND EMAIL - AFDALNOVA
+# ============================================================
 
-def send_email(to, subject, body):
-    """Send email using SendGrid (works on Railway)"""
+def send_email(to, subject, body, platform='platform_a'):
+    """Send email using SendGrid - AFDALNOVA"""
     try:
+        platform_config = get_platform_config(platform)
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        primary_color = platform_config.get('primary_color', '#1A2A6C')
+        secondary_color = platform_config.get('secondary_color', '#C9A84C')
+        
         sg = sendgrid.SendGridAPIClient(api_key=os.environ.get('SENDGRID_API_KEY'))
         
-        from_email = Email(os.environ.get('FROM_EMAIL', 'noreply@roamsmart.shop'), 
-                          os.environ.get('FROM_NAME', 'Roamsmart Digital Service'))
+        from_email = Email(
+            os.environ.get('FROM_EMAIL', 'noreply@abigalisticstudious.com'), 
+            os.environ.get('FROM_NAME', platform_name)
+        )
         to_email = To(to)
         
         # Create plain text version (strip HTML tags)
@@ -942,48 +1254,82 @@ def send_email(to, subject, body):
         response = sg.send(message)
         
         if response.status_code == 202:
-            print(f"[EMAIL] ✅ Sent to {to}")
-            log_email(to, subject, 'sent')
+            print(f"[EMAIL] ✅ Sent to {to} on {platform_name}")
+            log_email(to, subject, 'sent', platform)
             return True
         else:
             print(f"[EMAIL] ❌ Failed: Status {response.status_code}")
-            log_email(to, subject, 'failed', str(response.status_code))
+            log_email(to, subject, 'failed', str(response.status_code), platform)
             return False
             
     except Exception as e:
         print(f"[EMAIL] ❌ Error: {e}")
-        log_email(to, subject, 'error', str(e))
+        log_email(to, subject, 'error', str(e), platform)
         return False
+
+# ============================================================
+# SEND VERIFICATION EMAIL - AFDALNOVA
+# ============================================================
+
+def send_verification_email(email, username, code, platform='platform_a'):
+    """Send email verification code to user with AFDALNOVA branding"""
     
-def send_verification_email(email, username, code):
-    """Send email verification code to user with proper HTML"""
+    platform_config = get_platform_config(platform)
+    platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+    platform_short = platform_config.get('short_name', 'AFDALNOVA')
+    primary_color = platform_config.get('primary_color', '#1A2A6C')
+    secondary_color = platform_config.get('secondary_color', '#C9A84C')
+    support_phone = platform_config.get('support_phone', '0548247241')
+    support_email = platform_config.get('support_email', 'support@abigalisticstudious.com')
+    tagline = platform_config.get('tagline', 'Innovation Meets Excellence')
+    website_url = platform_config.get('base_url', 'https://abigalisticstudious.com')
     
     print(f"\n{'='*60}")
-    print(f"🔐 ROAMSMART VERIFICATION CODE")
+    print(f"🔐 {platform_name} VERIFICATION CODE")
     print(f"📧 Email: {email}")
     print(f"👤 Username: {username}")
     print(f"🔢 Code: {code}")
     print(f"⏰ Expires: 10 minutes")
+    print(f"📱 Platform: {platform_name}")
     print(f"{'='*60}\n")
     
     html_content = f"""
-<div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: 0 auto; background-color: #f5f7fa;">
-    <div style="background: linear-gradient(135deg, #8B0000, #D2691E); padding: 30px; text-align: center; border-radius: 10px 10px 0 0;">
-        <h1 style="color: white; margin: 0; font-size: 28px;">🔐 Email Verification</h1>
-        <p style="color: white; margin: 10px 0 0; opacity: 0.9;">{COMPANY_NAME}</p>
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body {{ font-family: 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: 0 auto; background-color: #f5f7fa; }}
+        .header {{ background: {primary_color}; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }}
+        .header h1 {{ color: white; margin: 0; font-size: 28px; }}
+        .header p {{ color: white; margin: 10px 0 0; opacity: 0.9; }}
+        .content {{ background: white; padding: 30px; border-radius: 0 0 10px 10px; }}
+        .code-box {{ background: #f8f9fa; font-size: 36px; font-weight: bold; letter-spacing: 8px; color: {primary_color}; text-align: center; padding: 25px; border-radius: 12px; margin: 25px 0; border: 2px dashed {secondary_color}; }}
+        .warning {{ background: #fff3cd; border-left: 4px solid #ffc107; padding: 15px 20px; margin: 25px 0; border-radius: 8px; }}
+        .warning p {{ margin: 0; color: #856404; }}
+        .warning ul {{ margin: 10px 0 0 20px; color: #856404; }}
+        .button {{ display: inline-block; background: {primary_color}; color: white; padding: 12px 30px; text-decoration: none; border-radius: 30px; }}
+        .button:hover {{ background: {secondary_color}; }}
+        .footer {{ text-align: center; padding: 20px; background: #f8f9fa; color: #666; font-size: 12px; border-radius: 0 0 10px 10px; }}
+        .tagline {{ color: {secondary_color}; font-weight: 600; }}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🔐 Email Verification</h1>
+        <p>{platform_name}</p>
     </div>
     
-    <div style="background: white; padding: 30px; border-radius: 0 0 10px 10px;">
+    <div class="content">
         <p style="font-size: 16px; color: #333;">Hello <strong>{username}</strong>,</p>
-        <p style="font-size: 16px; color: #333;">Thank you for registering with <strong style="color: #8B0000;">{COMPANY_NAME}</strong>! Please use the verification code below to complete your registration.</p>
+        <p style="font-size: 16px; color: #333;">Thank you for registering with <strong style="color: {primary_color};">{platform_name}</strong>! Please use the verification code below to complete your registration.</p>
         
-        <div style="background: #f8f9fa; font-size: 36px; font-weight: bold; letter-spacing: 8px; color: #8B0000; text-align: center; padding: 25px; border-radius: 12px; margin: 25px 0; border: 2px dashed #8B0000;">
+        <div class="code-box">
             {code}
         </div>
         
-        <div style="background: #fff3cd; border-left: 4px solid #ffc107; padding: 15px 20px; margin: 25px 0; border-radius: 8px;">
-            <p style="margin: 0; color: #856404;"><strong>⚠️ Important:</strong></p>
-            <ul style="margin: 10px 0 0 20px; color: #856404;">
+        <div class="warning">
+            <p><strong>⚠️ Important:</strong></p>
+            <ul>
                 <li>This code expires in <strong>10 minutes</strong></li>
                 <li>Do not share this code with anyone</li>
                 <li>If you didn't request this, please ignore this email</li>
@@ -991,63 +1337,96 @@ def send_verification_email(email, username, code):
         </div>
         
         <div style="text-align: center; margin: 25px 0;">
-            <a href="{COMPANY_WEBSITE}/verify" style="display: inline-block; background: #8B0000; color: white; padding: 12px 30px; text-decoration: none; border-radius: 30px;">Verify Now</a>
+            <a href="{website_url}/verify" class="button">Verify Now</a>
         </div>
         
-        <p style="font-size: 14px; color: #666;">Or copy and paste this code: <strong style="color: #8B0000;">{code}</strong></p>
+        <p style="font-size: 14px; color: #666;">Or copy and paste this code: <strong style="color: {primary_color};">{code}</strong></p>
     </div>
     
-    <div style="text-align: center; padding: 20px; background: #f8f9fa; color: #666; font-size: 12px; border-radius: 0 0 10px 10px;">
+    <div class="footer">
         <p style="margin: 0;">Need help? Contact us:</p>
-        <p style="margin: 5px 0 0;">📞 WhatsApp: <strong>{COMPANY_PHONE}</strong> | 📧 Email: <strong>{COMPANY_EMAIL}</strong></p>
-        <p style="margin: 10px 0 0;">© 2025 {COMPANY_NAME}. All rights reserved. | Accra, Ghana</p>
+        <p style="margin: 5px 0 0;">📞 Call/WhatsApp: <strong>{support_phone}</strong> | 📧 Email: <strong>{support_email}</strong></p>
+        <p style="margin: 10px 0 0;">© 2025 {platform_name}. All rights reserved.</p>
+        <p class="tagline">{tagline}</p>
     </div>
-</div>
+</body>
+</html>
 """
     
-    return send_email(email, "🔐 Email Verification - Roamsmart", html_content)
+    return send_email(email, f"🔐 Email Verification - {platform_name}", html_content, platform)
 
 
-def send_welcome_email(email, username, role='user'):
-    """Send welcome email to new user or agent with proper HTML"""
+# ============================================================
+# SEND WELCOME EMAIL - AFDALNOVA
+# ============================================================
+
+def send_welcome_email(email, username, role='user', platform='platform_a'):
+    """Send welcome email to new user or agent with AFDALNOVA branding"""
     
-    print(f"[EMAIL] Sending welcome email to: {email} (Role: {role})")
+    platform_config = get_platform_config(platform)
+    platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+    platform_short = platform_config.get('short_name', 'AFDALNOVA')
+    primary_color = platform_config.get('primary_color', '#1A2A6C')
+    secondary_color = platform_config.get('secondary_color', '#C9A84C')
+    support_phone = platform_config.get('support_phone', '0548247241')
+    support_email = platform_config.get('support_email', 'support@abigalisticstudious.com')
+    tagline = platform_config.get('tagline', 'Innovation Meets Excellence')
+    website_url = platform_config.get('base_url', 'https://abigalisticstudious.com')
+    
+    print(f"[EMAIL] Sending welcome email to: {email} (Role: {role}, Platform: {platform_name})")
     
     if role == 'agent':
-        subject = f"🎉 Welcome to {COMPANY_NAME} Agent Program!"
+        subject = f"🎉 Welcome to {platform_name} Agent Program!"
         
         html_content = f"""
-<div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: 0 auto; background-color: #f5f7fa;">
-    <div style="background: linear-gradient(135deg, #8B0000, #D2691E); padding: 30px; text-align: center; border-radius: 10px 10px 0 0;">
-        <h1 style="color: white; margin: 0; font-size: 28px;">🎉 Welcome, Agent {username}!</h1>
-        <p style="color: white; margin: 10px 0 0;">Your journey to earning starts here on {COMPANY_NAME}</p>
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body {{ font-family: 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: 0 auto; background-color: #f5f7fa; }}
+        .header {{ background: {primary_color}; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }}
+        .header h1 {{ color: white; margin: 0; font-size: 28px; }}
+        .header p {{ color: white; margin: 10px 0 0; opacity: 0.9; }}
+        .content {{ background: white; padding: 30px; border-radius: 0 0 10px 10px; }}
+        .feature-box {{ background: #f8f9fa; padding: 15px; margin: 15px 0; border-radius: 10px; border-left: 4px solid {primary_color}; }}
+        .feature-box strong {{ color: {primary_color}; }}
+        .button {{ display: inline-block; background: {primary_color}; color: white; padding: 12px 30px; text-decoration: none; border-radius: 30px; }}
+        .button:hover {{ background: {secondary_color}; }}
+        .footer {{ text-align: center; padding: 20px; background: #f8f9fa; color: #666; font-size: 12px; }}
+        .tagline {{ color: {secondary_color}; font-weight: 600; }}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🎉 Welcome, Agent {username}!</h1>
+        <p>Your journey to earning starts here on {platform_name}</p>
     </div>
     
-    <div style="background: white; padding: 30px; border-radius: 0 0 10px 10px;">
+    <div class="content">
         <p style="font-size: 16px;">Congratulations! Your agent application has been <strong style="color: #28a745;">approved</strong>. You now have access to:</p>
         
-        <div style="background: #f8f9fa; padding: 15px; margin: 15px 0; border-radius: 10px; border-left: 4px solid #8B0000;">
+        <div class="feature-box">
             <strong>✅ Wholesale Prices</strong><br>
             Save up to 40% on data bundles
         </div>
         
-        <div style="background: #f8f9fa; padding: 15px; margin: 15px 0; border-radius: 10px; border-left: 4px solid #8B0000;">
+        <div class="feature-box">
             <strong>✅ Your Own Store</strong><br>
             Get a branded online store to sell to customers
         </div>
         
-        <div style="background: #f8f9fa; padding: 15px; margin: 15px 0; border-radius: 10px; border-left: 4px solid #8B0000;">
+        <div class="feature-box">
             <strong>✅ Earn Commission</strong><br>
             Earn up to 25% commission on every sale
         </div>
         
-        <div style="background: #f8f9fa; padding: 15px; margin: 15px 0; border-radius: 10px; border-left: 4px solid #8B0000;">
+        <div class="feature-box">
             <strong>✅ Instant Withdrawals</strong><br>
             Withdraw your earnings to mobile money anytime
         </div>
         
         <div style="text-align: center; margin: 25px 0;">
-            <a href="{COMPANY_WEBSITE}/agent" style="display: inline-block; background: #8B0000; color: white; padding: 12px 30px; text-decoration: none; border-radius: 30px;">Go to Agent Dashboard</a>
+            <a href="{website_url}/agent" class="button">Go to Agent Dashboard</a>
         </div>
         
         <h3 style="color: #333;">📊 Quick Start Guide:</h3>
@@ -1058,30 +1437,48 @@ def send_welcome_email(email, username, role='user'):
             <li><strong>Start selling!</strong> - Share your store link with customers</li>
         </ol>
         
-        <p>Need help? Contact us on WhatsApp: <strong>{COMPANY_PHONE}</strong></p>
+        <p>Need help? Contact us on WhatsApp: <strong>{support_phone}</strong></p>
     </div>
     
-    <div style="text-align: center; padding: 20px; background: #f8f9fa; color: #666; font-size: 12px;">
-        <p>© 2025 {COMPANY_NAME}. All rights reserved. | Accra, Ghana</p>
+    <div class="footer">
+        <p>© 2025 {platform_name}. All rights reserved.</p>
+        <p class="tagline">{tagline}</p>
     </div>
-</div>
+</body>
+</html>
 """
     else:
-        subject = f"🎉 Welcome to {COMPANY_NAME}!"
+        subject = f"🎉 Welcome to {platform_name}!"
         
         html_content = f"""
-<div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: 0 auto; background-color: #f5f7fa;">
-    <div style="background: linear-gradient(135deg, #8B0000, #D2691E); padding: 30px; text-align: center; border-radius: 10px 10px 0 0;">
-        <h1 style="color: white; margin: 0; font-size: 28px;">Welcome to {COMPANY_NAME}!</h1>
-        <p style="color: white; margin: 10px 0 0;">Smart Data, Simpler Life</p>
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body {{ font-family: 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: 0 auto; background-color: #f5f7fa; }}
+        .header {{ background: {primary_color}; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }}
+        .header h1 {{ color: white; margin: 0; font-size: 28px; }}
+        .header p {{ color: white; margin: 10px 0 0; opacity: 0.9; }}
+        .content {{ background: white; padding: 30px; border-radius: 0 0 10px 10px; }}
+        .feature-box {{ background: #f8f9fa; padding: 15px; margin: 15px 0; border-radius: 10px; border-left: 4px solid {primary_color}; }}
+        .button {{ display: inline-block; background: {primary_color}; color: white; padding: 12px 30px; text-decoration: none; border-radius: 30px; }}
+        .button:hover {{ background: {secondary_color}; }}
+        .footer {{ text-align: center; padding: 20px; background: #f8f9fa; color: #666; font-size: 12px; }}
+        .tagline {{ color: {secondary_color}; font-weight: 600; }}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Welcome to {platform_name}!</h1>
+        <p>{tagline}</p>
     </div>
     
-    <div style="background: white; padding: 30px; border-radius: 0 0 10px 10px;">
+    <div class="content">
         <p style="font-size: 16px;">Hello <strong>{username}</strong>,</p>
-        <p style="font-size: 16px;">Thank you for joining <strong style="color: #8B0000;">{COMPANY_NAME}</strong>! You can now purchase data bundles instantly with <strong>2-second delivery</strong>.</p>
+        <p style="font-size: 16px;">Thank you for joining <strong style="color: {primary_color};">{platform_name}</strong>! You can now purchase data bundles instantly with <strong>2-second delivery</strong>.</p>
         
         <div style="text-align: center; margin: 25px 0;">
-            <a href="{COMPANY_WEBSITE}/dashboard" style="display: inline-block; background: #8B0000; color: white; padding: 12px 30px; text-decoration: none; border-radius: 30px;">Go to Dashboard</a>
+            <a href="{website_url}/dashboard" class="button">Go to Dashboard</a>
         </div>
         
         <h3 style="color: #333;">📱 What you can do:</h3>
@@ -1095,68 +1492,34 @@ def send_welcome_email(email, username, role='user'):
         <h3 style="color: #333;">💰 Refer & Earn:</h3>
         <p>Share your referral code with friends and earn <strong style="color: #28a745;">GHS 5</strong> for every friend who joins!</p>
         
-        <p>Need help? Contact us on WhatsApp: <strong>{COMPANY_PHONE}</strong></p>
+        <p>Need help? Contact us on WhatsApp: <strong>{support_phone}</strong></p>
     </div>
     
-    <div style="text-align: center; padding: 20px; background: #f8f9fa; color: #666; font-size: 12px;">
-        <p>© 2025 {COMPANY_NAME}. All rights reserved. | Accra, Ghana</p>
+    <div class="footer">
+        <p>© 2025 {platform_name}. All rights reserved.</p>
+        <p class="tagline">{tagline}</p>
     </div>
-</div>
+</body>
+</html>
 """
     
-    return send_email(email, subject, html_content)
+    return send_email(email, subject, html_content, platform)
 
 
-# ========== HELPER FUNCTIONS ==========
+# ============================================================
+# SEND VERIFICATION SMS - AFDALNOVA
+# ============================================================
 
-def send_notification(notification_type, recipient, subject=None, message=None, phone=None, email=None, is_verification=False, is_data_delivery=False):
-    """
-    Unified notification system - SMS first, Email fallback for phone verification
-    
-    - Phone verification: ALWAYS try SMS first, email only if SMS fails
-    - Email verification: Email only (existing system)
-    - Data delivery: Network provider API only
-    - General notifications: Email only
-    """
-    
-    # Case 1: Phone Verification (SMS first, Email fallback)
-    if is_verification and notification_type == 'phone_verification':
-        if phone and email:
-            result = verification_service.send_verification_code(phone, email)
-            return result.get('success', False)
-        return False
-    
-    # Case 2: Phone Verification Resend (SMS first again)
-    elif is_verification and notification_type == 'phone_resend':
-        if phone and email:
-            result = verification_service.resend_verification_code(phone, email)
-            return result.get('success', False)
-        return False
-    
-    # Case 3: Email Verification (your existing system)
-    elif is_verification and notification_type == 'email_verification':
-        if recipient and subject and message:
-            return send_email(recipient, subject, message)
-        return False
-    
-    # Case 4: Data delivery - Send to network provider ONLY
-    elif is_data_delivery:
-        if phone:
-            return send_data_delivery_to_provider(phone, message)
-        return False
-    
-    # Case 5: General notifications - Email ONLY
-    else:
-        if recipient and subject and message:
-            return send_email(recipient, subject, message)
-        return False
-
-def send_verification_sms(phone, message):
-    """Send verification SMS using Africa's Talking API (LIVE)"""
+def send_verification_sms(phone, message, platform='platform_a'):
+    """Send verification SMS using Africa's Talking API - AFDALNOVA"""
     try:
+        platform_config = get_platform_config(platform)
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        platform_short = platform_config.get('short_name', 'AFDALNOVA')
+        
         api_key = os.environ.get('AFRICASTALKING_API_KEY')
         username = os.environ.get('AFRICASTALKING_USERNAME', 'Roamsmart')
-        sender_id = os.environ.get('AFRICASTALKING_SENDER_ID', 'Roamsmart')
+        sender_id = os.environ.get('AFRICASTALKING_SENDER_ID', platform_short)
         
         # Format phone number - remove leading zero and add 233
         formatted_phone = str(phone).strip()
@@ -1167,6 +1530,8 @@ def send_verification_sms(phone, message):
         
         print(f"[VERIFICATION SMS] Original: {phone}")
         print(f"[VERIFICATION SMS] Formatted: {formatted_phone}")
+        print(f"[VERIFICATION SMS] Platform: {platform_name}")
+        print(f"[VERIFICATION SMS] Sender ID: {sender_id}")
         
         url = "https://api.africastalking.com/version1/messaging"
         
@@ -1189,8 +1554,8 @@ def send_verification_sms(phone, message):
             result = response.json()
             recipients = result.get('SMSMessageData', {}).get('Recipients', [])
             if recipients and recipients[0].get('status') == 'Success':
-                log_sms(phone, message[:100], 'verification', 'africastalking')
-                print(f"[VERIFICATION SMS] ✅ Sent to {phone}")
+                log_sms(phone, message[:100], 'verification', 'africastalking', platform)
+                print(f"[VERIFICATION SMS] ✅ Sent to {phone} on {platform_name}")
                 return True
         
         print(f"[VERIFICATION SMS] ❌ Failed: {response.text}")
@@ -1199,6 +1564,60 @@ def send_verification_sms(phone, message):
     except Exception as e:
         print(f"[VERIFICATION SMS] ❌ Error: {e}")
         return False
+
+
+# ============================================================
+# UNIFIED NOTIFICATION SYSTEM - AFDALNOVA
+# ============================================================
+
+def send_notification(notification_type, recipient, subject=None, message=None, 
+                      phone=None, email=None, is_verification=False, 
+                      is_data_delivery=False, platform='platform_a'):
+    """
+    Unified notification system - SMS first, Email fallback for phone verification
+    
+    - Phone verification: ALWAYS try SMS first, email only if SMS fails
+    - Email verification: Email only (existing system)
+    - Data delivery: Network provider API only
+    - General notifications: Email only
+    """
+    
+    platform_config = get_platform_config(platform)
+    platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+    
+    # Case 1: Phone Verification (SMS first, Email fallback)
+    if is_verification and notification_type == 'phone_verification':
+        if phone and email:
+            result = verification_service.send_verification_code(phone, email, platform)
+            return result.get('success', False)
+        return False
+    
+    # Case 2: Phone Verification Resend (SMS first again)
+    elif is_verification and notification_type == 'phone_resend':
+        if phone and email:
+            result = verification_service.resend_verification_code(phone, email, platform)
+            return result.get('success', False)
+        return False
+    
+    # Case 3: Email Verification (your existing system)
+    elif is_verification and notification_type == 'email_verification':
+        if recipient and subject and message:
+            return send_email(recipient, subject, message, platform)
+        return False
+    
+    # Case 4: Data delivery - Send to network provider ONLY
+    elif is_data_delivery:
+        if phone:
+            return send_data_delivery_to_provider(phone, message)
+        return False
+    
+    # Case 5: General notifications - Email ONLY
+    else:
+        if recipient and subject and message:
+            return send_email(recipient, subject, message, platform)
+        return False
+
+
 
 def send_data_delivery_to_provider(phone, message):
     """
@@ -1510,8 +1929,25 @@ def init_db():
                 # ===== ORDERS TABLE MIGRATION =====
                 print("\n📋 Checking Orders table columns...")
                 
+                # Check if platform column exists in orders
+                if 'platform' not in orders_columns:
+                    conn.execute(text("ALTER TABLE orders ADD COLUMN platform VARCHAR(20) DEFAULT 'platform_a'"))
+                    print("✅ Added 'platform' column to orders table")
                 
+                # Check if platform column exists in users
+                if 'platform' not in users_columns:
+                    conn.execute(text("ALTER TABLE users ADD COLUMN platform VARCHAR(20) DEFAULT 'platform_a'"))
+                    print("✅ Added 'platform' column to users table")
                 
+                # Check if platform_id exists in users
+                if 'platform_id' not in users_columns:
+                    conn.execute(text("ALTER TABLE users ADD COLUMN platform_id INTEGER REFERENCES platforms(id)"))
+                    print("✅ Added 'platform_id' column to users table")
+                
+                # Check if full_name exists in users (for admin)
+                if 'full_name' not in users_columns:
+                    conn.execute(text("ALTER TABLE users ADD COLUMN full_name VARCHAR(100)"))
+                    print("✅ Added 'full_name' column to users table")
                 
                 conn.commit()
                 print("✅ Database migration completed")
@@ -1519,11 +1955,56 @@ def init_db():
             print(f"⚠️ Migration note: {e}")
         # ========== END OF MIGRATION ==========
         
-        # Create ONLY ONE Super Admin (no support admin, no demo users/agents)
-        if not User.query.filter_by(email=COMPANY_ADMIN_EMAIL).first():
-            admin = User(
-                username='Administrator',
-                email=COMPANY_ADMIN_EMAIL,
+        # ========== CREATE PLATFORMS ==========
+        # Check if platforms exist
+        platform_a = Platform.query.filter_by(platform_key='platform_a').first()
+        if not platform_a:
+            platform_a = Platform(
+                platform_key='platform_a',
+                name='AFDALNOVA Main',
+                domain='abigalisticstudious.com',
+                brand_name='AFDALNOVA',
+                brand_tagline='Innovation Meets Excellence',
+                brand_color='#1A2A6C',
+                brand_primary_color='#1A2A6C',
+                brand_secondary_color='#C9A84C',
+                support_email='support@abigalisticstudious.com',
+                support_phone='0548247241',
+                support_phone_2='0599874865',
+                whatsapp='233599874865',
+                is_active=True
+            )
+            db.session.add(platform_a)
+            print("✅ Platform A created")
+        
+        platform_b = Platform.query.filter_by(platform_key='platform_b').first()
+        if not platform_b:
+            platform_b = Platform(
+                platform_key='platform_b',
+                name='AFDALNOVA Partner',
+                domain='app2.abigalisticstudious.com',
+                brand_name='AFDALNOVA Partner',
+                brand_tagline='Innovation Meets Excellence',
+                brand_color='#1A2A6C',
+                brand_primary_color='#1A2A6C',
+                brand_secondary_color='#C9A84C',
+                support_email='support@abigalisticstudious.com',
+                support_phone='0548247241',
+                support_phone_2='0599874865',
+                whatsapp='233599874865',
+                is_active=True
+            )
+            db.session.add(platform_b)
+            print("✅ Platform B created")
+        
+        # ========== CREATE/FIX ADMIN USERS ==========
+        
+        # 1. OLD ADMIN (Roamsmart Legacy - Keep for backward compatibility)
+        old_admin = User.query.filter_by(email='admin@roamsmart.shop').first()
+        if not old_admin:
+            old_admin = User(
+                username='administrator',
+                email='admin@roamsmart.shop',
                 phone='0557388622',
                 role='super_admin',
                 wallet_balance=0,
@@ -1531,76 +2012,76 @@ def init_db():
                 agent_approved=True,
                 referral_code='ADMIN001',
                 email_verified=True,
-                phone_verified=True
+                phone_verified=True,
+                platform='platform_b',  # Roamsmart admin should be on platform_b
+                full_name='System Administrator'
             )
-            admin.set_password('Roamsmart123@$')
-            db.session.add(admin)
-            print("✅ Super Admin created with password: Roamsmart123@$")
+            old_admin.set_password('Roamsmart123@$')
+            db.session.add(old_admin)
+            print("✅ Legacy Admin created (admin@roamsmart.shop / Roamsmart123@$)")
         else:
-            # Update existing admin password if needed
-            admin = User.query.filter_by(email=COMPANY_ADMIN_EMAIL).first()
-            admin.set_password('Roamsmart123@$')
+            # Only update password, PRESERVE platform
+            if not old_admin.check_password('Roamsmart123@$'):
+                old_admin.set_password('Roamsmart123@$')
+                print("✅ Legacy Admin password updated (admin@roamsmart.shop / Roamsmart123@$)")
+            
+            # Set platform only if NULL
+            if not old_admin.platform:
+                old_admin.platform = 'platform_b'
+                print("   ⚠️ Legacy Admin had no platform, set to platform_b")
+            else:
+                print(f"   ℹ️ Legacy Admin platform preserved: {old_admin.platform}")
+            
             db.session.commit()
-            print("✅ Super Admin password updated to: Roamsmart123@$")
         
-        # Create PendingTransaction table if it doesn't exist (ensure it's created)
-        # This is handled by db.create_all() above, but let's verify
+        # 2. NEW ADMIN (AFDALNOVA)
+        new_admin = User.query.filter_by(email='afdalnova0@gmail.com').first()
+        if not new_admin:
+            new_admin = User(
+                username='afdalnova_admin',
+                email='afdalnova0@gmail.com',
+                phone='0548247241',
+                role='super_admin',
+                wallet_balance=0,
+                is_agent=True,
+                agent_approved=True,
+                referral_code='ADMIN002',
+                email_verified=True,
+                phone_verified=True,
+                platform='platform_a',  # AFDALNOVA admin should be on platform_a
+                full_name='AFDALNOVA Admin'
+            )
+            new_admin.set_password('Afdal@2026')
+            db.session.add(new_admin)
+            print("✅ AFDALNOVA Admin created (afdalnova0@gmail.com / Afdal@2026)")
+        else:
+            # Only update password, PRESERVE platform
+            if not new_admin.check_password('Afdal@2026'):
+                new_admin.set_password('Afdal@2026')
+                print("✅ AFDALNOVA Admin password updated (afdalnova0@gmail.com / Afdal@2026)")
+            
+            # Set platform only if NULL
+            if not new_admin.platform:
+                new_admin.platform = 'platform_a'
+                print("   ⚠️ AFDALNOVA Admin had no platform, set to platform_a")
+            else:
+                print(f"   ℹ️ AFDALNOVA Admin platform preserved: {new_admin.platform}")
+            
+            db.session.commit()
+        
+        # Create PendingTransaction table if it doesn't exist
         from sqlalchemy import inspect
         inspector = inspect(db.engine)
         if 'pending_transactions' not in inspector.get_table_names():
             print("⚠️ pending_transactions table not found, creating...")
-            # Create table directly if model exists
             PendingTransaction.__table__.create(db.engine)
             print("✅ pending_transactions table created")
         else:
             print("✅ pending_transactions table already exists")
         
-        # Create default price settings if none exist
-        if PriceSetting.query.count() == 0:
-            default_prices = [
-                # User prices (retail)
-                ('user_price', 'mtn', 1, 6.50),
-                ('user_price', 'mtn', 2, 12.00),
-                ('user_price', 'mtn', 5, 25.00),
-                ('user_price', 'mtn', 10, 48.00),
-                ('user_price', 'mtn', 20, 90.00),
-                ('user_price', 'telecel', 1, 6.00),
-                ('user_price', 'telecel', 2, 11.00),
-                ('user_price', 'telecel', 5, 23.00),
-                ('user_price', 'telecel', 10, 44.00),
-                ('user_price', 'telecel', 20, 85.00),
-                ('user_price', 'airteltigo', 1, 6.00),
-                ('user_price', 'airteltigo', 2, 11.00),
-                ('user_price', 'airteltigo', 5, 23.00),
-                ('user_price', 'airteltigo', 10, 44.00),
-                ('user_price', 'airteltigo', 20, 85.00),
-                # Agent prices (wholesale)
-                ('agent_price', 'mtn', 1, 5.50),
-                ('agent_price', 'mtn', 2, 10.00),
-                ('agent_price', 'mtn', 5, 22.00),
-                ('agent_price', 'mtn', 10, 42.00),
-                ('agent_price', 'mtn', 20, 80.00),
-                ('agent_price', 'telecel', 1, 5.00),
-                ('agent_price', 'telecel', 2, 9.00),
-                ('agent_price', 'telecel', 5, 20.00),
-                ('agent_price', 'telecel', 10, 38.00),
-                ('agent_price', 'telecel', 20, 75.00),
-                ('agent_price', 'airteltigo', 1, 5.00),
-                ('agent_price', 'airteltigo', 2, 9.00),
-                ('agent_price', 'airteltigo', 5, 20.00),
-                ('agent_price', 'airteltigo', 10, 38.00),
-                ('agent_price', 'airteltigo', 20, 75.00),
-            ]
-            
-            for cat, net, size, price in default_prices:
-                setting = PriceSetting(
-                    category=cat,
-                    network=net,
-                    size_gb=size,
-                    price=price
-                )
-                db.session.add(setting)
-            print(f"✅ Created {len(default_prices)} default price settings")
+        # ========== REMOVED HARD-CODED PRICES ==========
+        # Prices should be set via admin panel or seed script
+        # Uncomment and use a separate seed script if needed
         
         # Create master inventory if empty
         if MasterInventory.query.count() == 0:
@@ -1621,8 +2102,8 @@ def init_db():
         # Create active announcement if none exists
         if Announcement.query.count() == 0:
             announcement = Announcement(
-                title=f'Welcome to {COMPANY_NAME}!',
-                message=f'Get instant data bundles with 2-second delivery on {COMPANY_NAME}. Become an agent and earn up to 25% commission!',
+                title='Welcome to AFDALNOVA!',
+                message='Get instant data bundles with 2-second delivery on AFDALNOVA. Become an agent and earn up to 25% commission! Innovation Meets Excellence.',
                 type='success',
                 is_active=True,
                 expires_at=datetime.utcnow() + timedelta(days=30)
@@ -1636,15 +2117,35 @@ def init_db():
         print("\n" + "="*60)
         print("✅ DATABASE INITIALIZATION COMPLETE")
         print("="*60)
-        print(f"🔐 Super Admin Email: {COMPANY_ADMIN_EMAIL}")
-        print(f"🔐 Super Admin Password: Roamsmart123@$")
+        print("\n🔐 SUPER ADMIN ACCOUNTS:")
+        
+        # Show actual admin platforms
+        admins = User.query.filter(
+            (User.role.in_(['admin', 'super_admin'])) | (User.is_super_admin == True)
+        ).all()
+        
+        for admin in admins:
+            platform_name = "AFDALNOVA" if admin.platform == 'platform_a' else "Roamsmart" if admin.platform == 'platform_b' else admin.platform
+            password = 'Roamsmart123@$' if admin.email == 'admin@roamsmart.shop' else 'Afdal@2026'
+            print(f"   ┌─────────────────────────────────────────────────────────┐")
+            print(f"   │  Email: {admin.email:<45} │")
+            print(f"   │  Password: {password:<36} │")
+            print(f"   │  Role: super_admin                                     │")
+            print(f"   │  Platform: {admin.platform:<11} ({platform_name:<8}) │")
+            print(f"   │  Status: ✅ Active                                    │")
+            print(f"   └─────────────────────────────────────────────────────────┘")
         
         # List all tables
         inspector = inspect(db.engine)
         tables = inspector.get_table_names()
         print(f"\n📋 Database Tables ({len(tables)}):")
         for table in sorted(tables):
-            print(f"   - {table}")
+            try:
+                result = db.session.execute(text(f"SELECT COUNT(*) FROM {table}"))
+                count = result.scalar()
+                print(f"   - {table} ({count} rows)")
+            except:
+                print(f"   - {table}")
         print("="*60 + "\n")
 # ========== PROFILE PICTURE UPLOAD ==========
 
@@ -1663,7 +2164,14 @@ def init_database_endpoint():
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
-    
+
+
+delivery_estimates_cache = {
+    'data': None,
+    'last_updated': None,
+    'ttl': 30  # Cache for 30 seconds
+} 
+
 @app.route('/api/user/avatar', methods=['POST'])
 @token_required
 def upload_avatar():
@@ -1795,74 +2303,6 @@ def get_avatar(filename):
         return send_from_directory(UPLOAD_FOLDER, filename)
     except Exception as e:
         return jsonify({'success': False, 'error': 'File not found'}), 404
-
-# ========== PAYSTACK PAYMENT ENDPOINTS ==========
-
-@app.route('/api/payment/paystack/initialize', methods=['POST'])
-@token_required
-@limiter.limit("10 per minute")
-@limiter.limit("30 per hour")
-def initialize_paystack_payment():
-    """Initialize Paystack payment for wallet funding"""
-    try:
-        data = request.get_json()
-        amount = data.get('amount')
-        email = data.get('email')
-        phone = data.get('phone')
-        
-        if not amount or amount < 10:
-            return jsonify({'success': False, 'error': 'Minimum amount is GHS 10'}), 400
-        
-        if not email:
-            return jsonify({'success': False, 'error': 'Email is required'}), 400
-        
-        user = g.current_user
-        
-        # Generate unique reference
-        reference = f"PAYSTACK_{int(datetime.utcnow().timestamp())}_{user.id}_{secrets.token_hex(4)}"
-        
-        # Initialize transaction with Paystack
-        result = initialize_paystack_transaction(
-            email=email,
-            amount=amount,
-            reference=reference,
-            metadata={
-                'user_id': user.id,
-                'username': user.username,
-                'phone': phone,
-                'type': 'wallet_funding'
-            }
-        )
-        
-        if result['success']:
-            # Store pending transaction using your existing model
-            pending_tx = PendingTransaction(
-                user_id=user.id,
-                reference=reference,
-                amount=amount,
-                payment_method='paystack',
-                status='pending',
-                created_at=datetime.utcnow()
-            )
-            db.session.add(pending_tx)
-            db.session.commit()
-            
-            return jsonify({
-                'success': True,
-                'data': {
-                    'authorization_url': result['authorization_url'],
-                    'reference': reference,
-                    'amount': amount
-                }
-            })
-        else:
-            return jsonify({'success': False, 'error': result.get('error', 'Payment initialization failed')}), 500
-        
-    except Exception as e:
-        print(f"Initialize Paystack payment error: {e}")
-        db.session.rollback()
-        return jsonify({'success': False, 'error': str(e)}), 500
-
 
 
 
@@ -2102,76 +2542,7 @@ def momo_webhook():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
-# Helper Functions
 
-def initialize_paystack_transaction(email, amount, reference, metadata):
-    """Initialize Paystack transaction"""
-    try:
-        import requests
-        
-        url = "https://api.paystack.co/transaction/initialize"
-        headers = {
-            "Authorization": f"Bearer {PAYSTACK_SECRET_KEY}",
-            "Content-Type": "application/json"
-        }
-        data = {
-            "email": email,
-            "amount": int(amount * 100),  # Convert to pesewas
-            "reference": reference,
-            "metadata": metadata,
-            "callback_url": f"{COMPANY_WEBSITE}/wallet"
-        }
-        
-        response = requests.post(url, json=data, headers=headers, timeout=30)
-        result = response.json()
-        
-        if result.get('status'):
-            return {
-                'success': True,
-                'authorization_url': result['data']['authorization_url'],
-                'reference': result['data']['reference']
-            }
-        else:
-            return {
-                'success': False,
-                'error': result.get('message', 'Paystack initialization failed')
-            }
-            
-    except Exception as e:
-        print(f"Paystack initialization error: {e}")
-        return {'success': False, 'error': str(e)}
-
-
-def verify_paystack_transaction(reference):
-    """Verify Paystack transaction"""
-    try:
-        import requests
-        
-        url = f"https://api.paystack.co/transaction/verify/{reference}"
-        headers = {
-            "Authorization": f"Bearer {PAYSTACK_SECRET_KEY}"
-        }
-        
-        response = requests.get(url, headers=headers, timeout=30)
-        result = response.json()
-        
-        if result.get('status') and result['data']['status'] == 'success':
-            return {
-                'success': True,
-                'status': 'success',
-                'amount': result['data']['amount'] / 100,
-                'reference': reference
-            }
-        else:
-            return {
-                'success': True,
-                'status': 'failed',
-                'message': result.get('message', 'Payment not successful')
-            }
-            
-    except Exception as e:
-        print(f"Paystack verification error: {e}")
-        return {'success': False, 'error': str(e)}
 
 
 def initialize_momo_transaction(amount, phone, reference, name, metadata):
@@ -2351,23 +2722,55 @@ def verify_2fa_code():
 @token_required
 @limiter.limit("60 per minute")  # Allow frequent checks
 def get_current_user():
-    """Get current user info"""
+    """Get current user info - Unified for both platforms"""
     try:
-        user_data = g.current_user.to_dict()
+        user = g.current_user
+        
+        # Get platform info
+        platform = getattr(g, 'platform', user.platform or 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        
+        print(f"\n{'='*60}")
+        print(f"[GET CURRENT USER]")
+        print(f"  User: {user.email}")
+        print(f"  Platform: {platform} ({platform_name})")
+        print(f"{'='*60}")
+        
+        user_data = user.to_dict()
         
         # Add additional security info
-        user_data['two_factor_enabled'] = g.current_user.two_factor_enabled
+        user_data['two_factor_enabled'] = user.two_factor_enabled
+        user_data['platform'] = platform
+        user_data['platform_name'] = platform_name
         
         # Add last login info if available
-        if hasattr(g.current_user, 'last_login'):
-            user_data['last_login'] = g.current_user.last_login.isoformat() if g.current_user.last_login else None
+        if hasattr(user, 'last_login'):
+            user_data['last_login'] = user.last_login.isoformat() if user.last_login else None
         
         return jsonify({
             'success': True, 
-            'user': user_data
+            'user': user_data,
+            'platform': platform,
+            'platform_name': platform_name,
+            'branding': {
+                'name': platform_config.get('brand_name', platform_name),
+                'tagline': platform_config.get('brand_tagline', ''),
+                'primary_color': platform_config.get('primary_color', '#1A2A6C'),
+                'secondary_color': platform_config.get('secondary_color', '#C9A84C'),
+                'logo': platform_config.get('logo', '/logo192.png'),
+                'support_email': platform_config.get('support_email', 'support@abigalisticstudious.com'),
+                'support_phone': platform_config.get('support_phone', '0548247241'),
+                'support_phone_2': platform_config.get('support_phone_2', '0599874865'),
+                'whatsapp': platform_config.get('whatsapp', '233599874865'),
+                'base_url': platform_config.get('base_url', 'https://abigalisticstudious.com')
+            }
         })
+        
     except Exception as e:
-        print(f"Get current user error: {e}")
+        print(f"[GET CURRENT USER ERROR] {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
@@ -2376,15 +2779,24 @@ def get_current_user():
 @limiter.limit("5 per minute")
 @limiter.limit("10 per hour")
 def change_password():
-    """Change user password"""
+    """Change user password - Unified for both platforms"""
     print("\n" + "="*60)
     print("[DEBUG] CHANGE PASSWORD ENDPOINT CALLED")
     print("="*60)
     
     try:
         data = request.get_json()
+        user = g.current_user
+        
+        # Get platform info
+        platform = getattr(g, 'platform', user.platform or 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        
+        print(f"[DEBUG] User: {user.username} (ID: {user.id})")
+        print(f"[DEBUG] Email: {user.email}")
+        print(f"[DEBUG] Platform: {platform} ({platform_name})")
         print(f"[DEBUG] Request data: {data}")
-        print(f"[DEBUG] User: {g.current_user.username} (ID: {g.current_user.id})")
         
         current_password = data.get('current_password')
         new_password = data.get('new_password')
@@ -2394,42 +2806,69 @@ def change_password():
         
         if not current_password or not new_password:
             print("[DEBUG] ERROR: Missing password fields")
-            return jsonify({'success': False, 'error': 'Current password and new password are required'}), 400
+            return jsonify({
+                'success': False, 
+                'error': 'Current password and new password are required',
+                'platform': platform,
+                'platform_name': platform_name
+            }), 400
         
         if len(new_password) < 6:
             print("[DEBUG] ERROR: New password too short")
-            return jsonify({'success': False, 'error': 'New password must be at least 6 characters'}), 400
+            return jsonify({
+                'success': False, 
+                'error': 'New password must be at least 6 characters',
+                'platform': platform,
+                'platform_name': platform_name
+            }), 400
         
         # Check current password
         print("[DEBUG] Checking current password...")
-        password_valid = g.current_user.check_password(current_password)
+        password_valid = user.check_password(current_password)
         print(f"[DEBUG] Password valid: {password_valid}")
         
         if not password_valid:
             print("[DEBUG] ERROR: Current password incorrect")
-            log_activity(g.current_user.id, 'change_password_failed', 'Incorrect current password')
-            return jsonify({'success': False, 'error': 'Current password is incorrect'}), 401
+            log_activity(user.id, 'change_password_failed', f'Incorrect current password on {platform_name}', request.remote_addr, platform)
+            return jsonify({
+                'success': False, 
+                'error': 'Current password is incorrect',
+                'platform': platform,
+                'platform_name': platform_name
+            }), 401
         
         # Prevent using same password
         if current_password == new_password:
             print("[DEBUG] ERROR: New password same as current")
-            return jsonify({'success': False, 'error': 'New password must be different from current password'}), 400
+            return jsonify({
+                'success': False, 
+                'error': 'New password must be different from current password',
+                'platform': platform,
+                'platform_name': platform_name
+            }), 400
         
         # Update password
         print("[DEBUG] Setting new password...")
-        g.current_user.set_password(new_password)
+        user.set_password(new_password)
+        user.updated_at = datetime.utcnow()
         db.session.commit()
         print("[DEBUG] Password changed successfully")
         
         # Log successful change
-        log_activity(g.current_user.id, 'change_password', 'Password changed successfully')
+        log_activity(user.id, 'change_password', f'Password changed successfully on {platform_name}', request.remote_addr, platform)
         
         print("[DEBUG] CHANGE PASSWORD SUCCESS")
         print("="*60 + "\n")
         
         return jsonify({
             'success': True, 
-            'message': 'Password changed successfully. Use your new password to login.'
+            'message': f'Password changed successfully on {platform_name}. Use your new password to login.',
+            'platform': platform,
+            'platform_name': platform_name,
+            'branding': {
+                'name': platform_config.get('brand_name', platform_name),
+                'primary_color': platform_config.get('primary_color', '#1A2A6C')
+            }
         })
         
     except Exception as e:
@@ -2438,7 +2877,10 @@ def change_password():
         traceback.print_exc()
         db.session.rollback()
         print("="*60 + "\n")
-        return jsonify({'success': False, 'error': str(e)}), 500
+        return jsonify({
+            'success': False, 
+            'error': str(e)
+        }), 500
 
 
 @app.route('/api/user/change-password', methods=['POST'])
@@ -2446,7 +2888,7 @@ def change_password():
 @limiter.limit("5 per minute")
 @limiter.limit("10 per hour")
 def change_password_user():
-    """Alias for change-password endpoint"""
+    """Alias for change-password endpoint - Unified for both platforms"""
     print("\n" + "="*60)
     print("[DEBUG] CHANGE PASSWORD (USER ALIAS) CALLED")
     print(f"[DEBUG] Request path: {request.path}")
@@ -2605,16 +3047,29 @@ def generate_recovery_codes(user_id):
 @token_required
 @limiter.limit("30 per minute")
 def get_sessions():
-    """Get user's active sessions (USES REDIS)"""
+    """Get user's active sessions - Unified for both platforms"""
     try:
+        user = g.current_user
+        
+        # Get platform info
+        platform = getattr(g, 'platform', user.platform or 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        
+        print(f"\n{'='*60}")
+        print(f"[GET SESSIONS]")
+        print(f"  User: {user.email}")
+        print(f"  Platform: {platform} ({platform_name})")
+        print(f"{'='*60}")
+        
         # Get sessions from Redis instead of database for better performance
-        session_key = f"user_sessions:{g.current_user.id}"
+        session_key = f"user_sessions:{user.id}"
         sessions = get_temp_data(session_key)
         
         if not sessions:
             # Fallback to database
             sessions = UserSession.query.filter_by(
-                user_id=g.current_user.id
+                user_id=user.id
             ).order_by(UserSession.created_at.desc()).limit(10).all()
             
             sessions_data = [{
@@ -2622,8 +3077,10 @@ def get_sessions():
                 'device': s.device_info,
                 'ip_address': s.ip_address,
                 'location': s.location,
-                'last_active': s.last_active.isoformat() if s.last_active else s.created_at.isoformat(),
-                'is_current': s.id == getattr(g, 'current_session_id', None)
+                'platform': s.platform if hasattr(s, 'platform') else platform,
+                'last_active': s.last_active.isoformat() if hasattr(s, 'last_active') and s.last_active else s.created_at.isoformat(),
+                'is_current': s.id == getattr(g, 'current_session_id', None),
+                'created_at': s.created_at.isoformat() if s.created_at else None
             } for s in sessions]
         else:
             sessions_data = sessions
@@ -2631,11 +3088,15 @@ def get_sessions():
         return jsonify({
             'success': True,
             'sessions': sessions_data,
-            'total': len(sessions_data)
+            'total': len(sessions_data),
+            'platform': platform,
+            'platform_name': platform_name
         })
         
     except Exception as e:
-        print(f"Get sessions error: {e}")
+        print(f"[GET SESSIONS ERROR] {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
@@ -2644,12 +3105,26 @@ def get_sessions():
 @limiter.limit("10 per minute")
 @limiter.limit("30 per hour")
 def revoke_session(session_id):
-    """Revoke a user session (USES REDIS)"""
+    """Revoke a user session - Unified for both platforms"""
     try:
+        user = g.current_user
+        
+        # Get platform info
+        platform = getattr(g, 'platform', user.platform or 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        
+        print(f"\n{'='*60}")
+        print(f"[REVOKE SESSION]")
+        print(f"  User: {user.email}")
+        print(f"  Session ID: {session_id}")
+        print(f"  Platform: {platform} ({platform_name})")
+        print(f"{'='*60}")
+        
         # Check if session exists and belongs to user
         session = UserSession.query.filter_by(
             id=session_id, 
-            user_id=g.current_user.id
+            user_id=user.id
         ).first()
         
         if not session:
@@ -2657,21 +3132,23 @@ def revoke_session(session_id):
             session_key = f"session:{session_id}"
             session_data = get_temp_data(session_key)
             
-            if session_data and session_data.get('user_id') == g.current_user.id:
+            if session_data and session_data.get('user_id') == user.id:
                 delete_temp_data(session_key)
                 # Also remove from user's sessions list
-                user_sessions_key = f"user_sessions:{g.current_user.id}"
+                user_sessions_key = f"user_sessions:{user.id}"
                 user_sessions = get_temp_data(user_sessions_key)
                 if user_sessions:
                     user_sessions = [s for s in user_sessions if s.get('id') != session_id]
                     set_temp_data(user_sessions_key, user_sessions, 3600)
                 
                 # Log activity
-                log_activity(g.current_user.id, 'session_revoked', f'Session {session_id} revoked')
+                log_activity(user.id, 'session_revoked', f'Session {session_id} revoked on {platform_name}')
                 
                 return jsonify({
                     'success': True, 
-                    'message': 'Session revoked successfully'
+                    'message': f'Session revoked successfully on {platform_name}',
+                    'platform': platform,
+                    'platform_name': platform_name
                 })
             
             return jsonify({'success': False, 'error': 'Session not found'}), 404
@@ -2685,22 +3162,26 @@ def revoke_session(session_id):
         delete_temp_data(session_key)
         
         # Remove from user's sessions list
-        user_sessions_key = f"user_sessions:{g.current_user.id}"
+        user_sessions_key = f"user_sessions:{user.id}"
         user_sessions = get_temp_data(user_sessions_key)
         if user_sessions:
             user_sessions = [s for s in user_sessions if s.get('id') != session_id]
             set_temp_data(user_sessions_key, user_sessions, 3600)
         
         # Log activity
-        log_activity(g.current_user.id, 'session_revoked', f'Session {session_id} revoked')
+        log_activity(user.id, 'session_revoked', f'Session {session_id} revoked on {platform_name}')
         
         return jsonify({
             'success': True, 
-            'message': 'Session revoked successfully'
+            'message': f'Session revoked successfully on {platform_name}',
+            'platform': platform,
+            'platform_name': platform_name
         })
         
     except Exception as e:
-        print(f"Revoke session error: {e}")
+        print(f"[REVOKE SESSION ERROR] {e}")
+        import traceback
+        traceback.print_exc()
         db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
 
@@ -2710,10 +3191,23 @@ def revoke_session(session_id):
 @limiter.limit("5 per minute")
 @limiter.limit("10 per hour")
 def revoke_all_sessions():
-    """Revoke all user sessions except current"""
+    """Revoke all user sessions except current - Unified for both platforms"""
     try:
+        user = g.current_user
+        
+        # Get platform info
+        platform = getattr(g, 'platform', user.platform or 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        
+        print(f"\n{'='*60}")
+        print(f"[REVOKE ALL SESSIONS]")
+        print(f"  User: {user.email}")
+        print(f"  Platform: {platform} ({platform_name})")
+        print(f"{'='*60}")
+        
         # Delete all sessions except current
-        sessions = UserSession.query.filter_by(user_id=g.current_user.id).all()
+        sessions = UserSession.query.filter_by(user_id=user.id).all()
         
         deleted_count = 0
         for session in sessions:
@@ -2728,20 +3222,24 @@ def revoke_all_sessions():
         db.session.commit()
         
         # Clear user sessions from Redis
-        user_sessions_key = f"user_sessions:{g.current_user.id}"
+        user_sessions_key = f"user_sessions:{user.id}"
         delete_temp_data(user_sessions_key)
         
         # Log activity
-        log_activity(g.current_user.id, 'all_sessions_revoked', f'Revoked {deleted_count} sessions')
+        log_activity(user.id, 'all_sessions_revoked', f'Revoked {deleted_count} sessions on {platform_name}')
         
         return jsonify({
             'success': True,
-            'message': f'Revoked {deleted_count} sessions',
-            'deleted_count': deleted_count
+            'message': f'Revoked {deleted_count} sessions on {platform_name}',
+            'deleted_count': deleted_count,
+            'platform': platform,
+            'platform_name': platform_name
         })
         
     except Exception as e:
-        print(f"Revoke all sessions error: {e}")
+        print(f"[REVOKE ALL SESSIONS ERROR] {e}")
+        import traceback
+        traceback.print_exc()
         db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
 
@@ -2750,35 +3248,53 @@ def revoke_all_sessions():
 @token_required
 @limiter.limit("60 per minute")
 def log_activity_endpoint():
-    """Log user activity"""
+    """Log user activity - Unified for both platforms"""
     print("\n" + "="*60)
     print("[DEBUG] LOG ACTIVITY ENDPOINT CALLED")
     print("="*60)
     
     try:
         data = request.get_json() or {}
+        user = g.current_user
+        
+        # Get platform info
+        platform = getattr(g, 'platform', user.platform or 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        
+        print(f"[DEBUG] User: {user.username} (ID: {user.id})")
+        print(f"[DEBUG] Platform: {platform} ({platform_name})")
         print(f"[DEBUG] Request data: {data}")
-        print(f"[DEBUG] User: {g.current_user.username} (ID: {g.current_user.id})")
         
         action = data.get('action')
         details = data.get('details')
         
         if not action:
             print("[DEBUG] No action provided - returning success")
-            return jsonify({'success': True, 'message': 'No action provided'})
+            return jsonify({
+                'success': True, 
+                'message': 'No action provided',
+                'platform': platform,
+                'platform_name': platform_name
+            })
         
         print(f"[DEBUG] Action: {action}")
         print(f"[DEBUG] Details: {details}")
         
         # Rate limit per action type
         try:
-            action_key = f"activity:{g.current_user.id}:{action}"
+            action_key = f"activity:{user.id}:{action}"
             print(f"[DEBUG] Rate limit key: {action_key}")
             action_count = get_temp_data(action_key)
             
             if action_count:
                 print("[DEBUG] Rate limited - skipping")
-                return jsonify({'success': True, 'message': 'Activity logged (rate limited)'})
+                return jsonify({
+                    'success': True, 
+                    'message': 'Activity logged (rate limited)',
+                    'platform': platform,
+                    'platform_name': platform_name
+                })
             
             set_temp_data(action_key, 1, 1)
             print("[DEBUG] Rate limit set")
@@ -2788,7 +3304,7 @@ def log_activity_endpoint():
         # Log to database
         try:
             print("[DEBUG] Logging activity to database...")
-            log_activity(g.current_user.id, action, details)
+            log_activity(user.id, action, details, request.remote_addr, platform)
             print("[DEBUG] Database log successful")
         except Exception as e:
             print(f"[DEBUG] Database log error: {e}")
@@ -2796,12 +3312,14 @@ def log_activity_endpoint():
         # Store recent activities in Redis
         try:
             print("[DEBUG] Storing in Redis...")
-            recent_key = f"recent_activities:{g.current_user.id}"
+            recent_key = f"recent_activities:{user.id}"
             recent_activities = get_temp_data(recent_key) or []
             
             recent_activities.insert(0, {
                 'action': action,
                 'details': details,
+                'platform': platform,
+                'platform_name': platform_name,
                 'timestamp': datetime.utcnow().isoformat()
             })
             
@@ -2813,18 +3331,26 @@ def log_activity_endpoint():
         
         print("[DEBUG] LOG ACTIVITY SUCCESS")
         print("="*60 + "\n")
-        return jsonify({'success': True})
+        return jsonify({
+            'success': True,
+            'platform': platform,
+            'platform_name': platform_name
+        })
         
     except Exception as e:
         print(f"[DEBUG] EXCEPTION: {e}")
         import traceback
         traceback.print_exc()
         print("="*60 + "\n")
-        return jsonify({'success': True, 'message': 'Activity noted'})
-    
-def log_activity(user_id, action, details, ip_address=None):
-    """Log user activity to database"""
-    print(f"[DEBUG log_activity] Called for user {user_id}, action: {action}")
+        return jsonify({
+            'success': True, 
+            'message': 'Activity noted'
+        })
+
+
+def log_activity(user_id, action, details, ip_address=None, platform='platform_a'):
+    """Log user activity to database - Platform aware"""
+    print(f"[DEBUG log_activity] Called for user {user_id}, action: {action}, platform: {platform}")
     try:
         from models import UserSession
         activity = UserSession(
@@ -2832,6 +3358,7 @@ def log_activity(user_id, action, details, ip_address=None):
             action=action,
             details=details,
             ip_address=ip_address or request.remote_addr,
+            platform=platform,
             created_at=datetime.utcnow()
         )
         db.session.add(activity)
@@ -2839,22 +3366,41 @@ def log_activity(user_id, action, details, ip_address=None):
         print(f"[DEBUG log_activity] Successfully logged activity for user {user_id}")
     except Exception as e:
         print(f"[DEBUG log_activity] Error: {e}")
+        db.session.rollback()
         # Don't raise, just print
+
 
 @app.route('/api/auth/activities', methods=['GET'])
 @token_required
 @limiter.limit("30 per minute")
 def get_user_activities():
-    """Get user's recent activities"""
+    """Get user's recent activities - Unified for both platforms"""
     try:
+        user = g.current_user
+        
+        # Get platform info
+        platform = getattr(g, 'platform', user.platform or 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        
         page = request.args.get('page', 1, type=int)
         per_page = request.args.get('limit', 20, type=int)
         
+        print(f"\n{'='*60}")
+        print(f"[GET USER ACTIVITIES]")
+        print(f"  User: {user.email}")
+        print(f"  Platform: {platform} ({platform_name})")
+        print(f"{'='*60}")
+        
         # Try to get from Redis first
-        recent_key = f"recent_activities:{g.current_user.id}"
+        recent_key = f"recent_activities:{user.id}"
         activities = get_temp_data(recent_key)
         
         if activities:
+            # Filter by platform if needed
+            if platform:
+                activities = [a for a in activities if a.get('platform') == platform or not a.get('platform')]
+            
             # Paginate Redis data
             start = (page - 1) * per_page
             end = start + per_page
@@ -2865,7 +3411,9 @@ def get_user_activities():
                 'activities': paginated,
                 'total': len(activities),
                 'page': page,
-                'total_pages': (len(activities) + per_page - 1) // per_page
+                'total_pages': (len(activities) + per_page - 1) // per_page,
+                'platform': platform,
+                'platform_name': platform_name
             })
         
         # Fallback to database
@@ -2876,33 +3424,55 @@ def get_user_activities():
             'activities': [],
             'total': 0,
             'page': page,
-            'total_pages': 0
+            'total_pages': 0,
+            'platform': platform,
+            'platform_name': platform_name
         })
         
     except Exception as e:
-        print(f"Get activities error: {e}")
+        print(f"[GET ACTIVITIES ERROR] {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
+
 
 # ========== USER ROUTES ==========
 
 @app.route('/api/user/stats', methods=['GET'])
 @token_required
 def get_user_stats():
-    """Get user dashboard statistics"""
+    """Get user dashboard statistics - Unified for both platforms"""
     try:
         user = g.current_user
         
-        # Get completed orders count
-        completed_orders = Order.query.filter_by(
+        # Get platform info
+        platform = getattr(g, 'platform', user.platform or 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        
+        print(f"\n{'='*60}")
+        print(f"[GET USER STATS]")
+        print(f"  User: {user.email}")
+        print(f"  Platform: {platform} ({platform_name})")
+        print(f"{'='*60}")
+        
+        # Get completed orders count (filter by platform if needed)
+        completed_orders_query = Order.query.filter_by(
             user_id=user.id, 
             status='completed'
-        ).count()
+        )
+        if platform:
+            completed_orders_query = completed_orders_query.filter_by(platform=platform)
+        completed_orders = completed_orders_query.count()
         
-        # Get total spent
-        total_spent = db.session.query(db.func.sum(Order.amount)).filter(
+        # Get total spent (filter by platform if needed)
+        total_spent_query = db.session.query(db.func.sum(Order.amount)).filter(
             Order.user_id == user.id, 
             Order.status == 'completed'
-        ).scalar() or 0
+        )
+        if platform:
+            total_spent_query = total_spent_query.filter(Order.platform == platform)
+        total_spent = total_spent_query.scalar() or 0
         
         # Get referral stats
         referrals = Referral.query.filter_by(
@@ -2927,32 +3497,83 @@ def get_user_stats():
                 'username': user.username,
                 'phone': user.phone,
                 'email': user.email,
-                'avatar_url': getattr(user, 'avatar_url', None)
+                'avatar_url': getattr(user, 'avatar_url', None),
+                'platform': platform,
+                'platform_name': platform_name
+            },
+            'platform': platform,
+            'platform_name': platform_name,
+            'branding': {
+                'name': platform_config.get('brand_name', platform_name),
+                'tagline': platform_config.get('brand_tagline', ''),
+                'primary_color': platform_config.get('primary_color', '#1A2A6C'),
+                'secondary_color': platform_config.get('secondary_color', '#C9A84C'),
+                'support_email': platform_config.get('support_email', 'support@abigalisticstudious.com'),
+                'support_phone': platform_config.get('support_phone', '0548247241')
             }
         })
         
     except Exception as e:
-        print(f"User stats error: {e}")
+        print(f"[USER STATS ERROR] {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': 'Failed to fetch stats'}), 500
+
 
 @app.route('/api/user/profile', methods=['PUT'])
 @token_required
 def update_profile():
-    """Update user profile"""
-    data = request.get_json()
-    
-    if 'username' in data:
-        g.current_user.username = data['username']
-    if 'email' in data:
-        g.current_user.email = data['email']
-    if 'phone' in data:
-        g.current_user.phone = data['phone']
-    if 'full_name' in data:
-        g.current_user.full_name = data['full_name']
-    
-    db.session.commit()
-    
-    return jsonify({'success': True, 'user': g.current_user.to_dict()})
+    """Update user profile - Unified for both platforms"""
+    try:
+        data = request.get_json()
+        user = g.current_user
+        
+        # Get platform info
+        platform = getattr(g, 'platform', user.platform or 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        
+        print(f"\n{'='*60}")
+        print(f"[UPDATE PROFILE]")
+        print(f"  User: {user.email}")
+        print(f"  Platform: {platform} ({platform_name})")
+        print(f"  Data: {data}")
+        print(f"{'='*60}")
+        
+        # Update fields
+        if 'username' in data:
+            user.username = data['username']
+        if 'email' in data:
+            user.email = data['email']
+        if 'phone' in data:
+            user.phone = data['phone']
+        if 'full_name' in data:
+            user.full_name = data['full_name']
+        if 'avatar_url' in data:
+            user.avatar_url = data['avatar_url']
+        
+        user.updated_at = datetime.utcnow()
+        db.session.commit()
+        
+        # Log activity
+        log_activity(user.id, 'profile_updated', f'Profile updated on {platform_name}', request.remote_addr, platform)
+        
+        return jsonify({
+            'success': True, 
+            'user': user.to_dict(),
+            'message': f'Profile updated successfully on {platform_name}',
+            'platform': platform,
+            'platform_name': platform_name
+        })
+        
+    except Exception as e:
+        print(f"[UPDATE PROFILE ERROR] {e}")
+        import traceback
+        traceback.print_exc()
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 
 
 @app.route('/api/prices', methods=['GET'])
@@ -3148,11 +3769,23 @@ def check_price():
 @app.route('/api/auth/send-phone-verification', methods=['POST'])
 @token_required
 def send_phone_verification():
-    """Send verification code - ALWAYS SMS first, email only if SMS fails"""
+    """Send verification code - ALWAYS SMS first, email only if SMS fails - Unified for both platforms"""
     try:
         data = request.get_json()
         phone_number = data.get('phone')
         email = g.current_user.email if g.current_user else data.get('email')
+        
+        # Get platform info
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        
+        print(f"\n{'='*60}")
+        print(f"[SEND PHONE VERIFICATION]")
+        print(f"  Phone: {phone_number}")
+        print(f"  Email: {email}")
+        print(f"  Platform: {platform} ({platform_name})")
+        print(f"{'='*60}")
         
         if not phone_number:
             return jsonify({'success': False, 'error': 'Phone number required'}), 400
@@ -3171,22 +3804,43 @@ def send_phone_verification():
             'success': True,
             'method': result.get('method', 'sms'),
             'message': result['message'],
-            'expires_in': result.get('expires_in', 600)
+            'expires_in': result.get('expires_in', 600),
+            'platform': platform,
+            'platform_name': platform_name,
+            'branding': {
+                'name': platform_config.get('brand_name', platform_name),
+                'primary_color': platform_config.get('primary_color', '#1A2A6C'),
+                'support_phone': platform_config.get('support_phone', '0548247241')
+            }
         })
         
     except Exception as e:
-        print(f"Send phone verification error: {e}")
+        print(f"[SEND PHONE VERIFICATION ERROR] {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
 @app.route('/api/auth/resend-phone-verification', methods=['POST'])
 @token_required
 def resend_phone_verification():
-    """Resend verification code - ALWAYS try SMS first again"""
+    """Resend verification code - ALWAYS try SMS first again - Unified for both platforms"""
     try:
         data = request.get_json()
         phone_number = data.get('phone')
         email = g.current_user.email if g.current_user else data.get('email')
+        
+        # Get platform info
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        
+        print(f"\n{'='*60}")
+        print(f"[RESEND PHONE VERIFICATION]")
+        print(f"  Phone: {phone_number}")
+        print(f"  Email: {email}")
+        print(f"  Platform: {platform} ({platform_name})")
+        print(f"{'='*60}")
         
         if not phone_number:
             return jsonify({'success': False, 'error': 'Phone number required'}), 400
@@ -3200,21 +3854,42 @@ def resend_phone_verification():
             'success': True,
             'method': result.get('method', 'sms'),
             'message': result['message'],
-            'expires_in': result.get('expires_in', 600)
+            'expires_in': result.get('expires_in', 600),
+            'platform': platform,
+            'platform_name': platform_name,
+            'branding': {
+                'name': platform_config.get('brand_name', platform_name),
+                'primary_color': platform_config.get('primary_color', '#1A2A6C')
+            }
         })
         
     except Exception as e:
-        print(f"Resend phone verification error: {e}")
+        print(f"[RESEND PHONE VERIFICATION ERROR] {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
+
 
 @app.route('/api/auth/verify-phone-code', methods=['POST'])
 @token_required
 def verify_phone_code():
-    """Verify phone number with code"""
+    """Verify phone number with code - Unified for both platforms"""
     try:
         data = request.get_json()
         phone_number = data.get('phone')
         code = data.get('code')
+        
+        # Get platform info
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        
+        print(f"\n{'='*60}")
+        print(f"[VERIFY PHONE CODE]")
+        print(f"  Phone: {phone_number}")
+        print(f"  Code: {code}")
+        print(f"  Platform: {platform} ({platform_name})")
+        print(f"{'='*60}")
         
         if not phone_number or not code:
             return jsonify({'success': False, 'error': 'Phone number and code required'}), 400
@@ -3223,174 +3898,144 @@ def verify_phone_code():
         
         if result['success']:
             g.current_user.phone_verified = True
+            g.current_user.platform = platform
             db.session.commit()
             
-            log_activity(g.current_user.id, 'phone_verified', f'Phone {phone_number} verified via {result.get("method", "unknown")}')
+            log_activity(
+                g.current_user.id, 
+                'phone_verified', 
+                f'Phone {phone_number} verified via {result.get("method", "unknown")} on {platform_name}'
+            )
+            
+            print(f"[VERIFY PHONE SUCCESS] User {g.current_user.email} verified phone on {platform_name}")
             
             return jsonify({
                 'success': True,
-                'message': 'Phone number verified successfully',
-                'method': result.get('method', 'unknown')
+                'message': f'Phone number verified successfully on {platform_name}',
+                'method': result.get('method', 'unknown'),
+                'platform': platform,
+                'platform_name': platform_name,
+                'branding': {
+                    'name': platform_config.get('brand_name', platform_name),
+                    'primary_color': platform_config.get('primary_color', '#1A2A6C'),
+                    'secondary_color': platform_config.get('secondary_color', '#C9A84C')
+                }
             })
         else:
             return jsonify({'success': False, 'error': result['error']}), 400
         
     except Exception as e:
-        print(f"Verify phone code error: {e}")
+        print(f"[VERIFY PHONE CODE ERROR] {e}")
+        import traceback
+        traceback.print_exc()
+        db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
-def send_phone_verification_email(email, phone_number, code):
-    """Send verification code via email for phone verification resend"""
+def send_phone_verification_email(email, phone_number, code, platform_name="AFDALNOVA", primary_color="#1A2A6C"):
+    """Send verification code via email for phone verification - Platform aware"""
     html_content = f"""
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-        <div style="background: #8B0000; padding: 20px; text-align: center; border-radius: 10px 10px 0 0;">
+        <div style="background: {primary_color}; padding: 20px; text-align: center; border-radius: 10px 10px 0 0;">
             <h2 style="color: white;">📱 Phone Verification Code</h2>
-            <p style="color: white;">{COMPANY_NAME}</p>
+            <p style="color: white;">{platform_name}</p>
         </div>
         <div style="background: #f5f5f5; padding: 30px; border-radius: 0 0 10px 10px;">
             <p>Your verification code for <strong>{phone_number}</strong> is:</p>
-            <div style="background: white; font-size: 36px; font-weight: bold; text-align: center; padding: 20px; border-radius: 10px; margin: 20px 0; letter-spacing: 5px;">
+            <div style="background: white; font-size: 36px; font-weight: bold; text-align: center; padding: 20px; border-radius: 10px; margin: 20px 0; letter-spacing: 5px; color: {primary_color};">
                 {code}
             </div>
             <p style="color: #666;">This code expires in <strong>10 minutes</strong>.</p>
             <p style="color: #666; font-size: 12px;">If you didn't request this, please ignore this email.</p>
             <hr style="margin: 20px 0; border: none; border-top: 1px solid #ddd;">
             <p style="color: #999; font-size: 11px; text-align: center;">
-                {COMPANY_NAME} - Smart Data, Simpler Life<br>
-                Need help? Contact us: {COMPANY_PHONE}
+                {platform_name} - {PLATFORMS.get('platform_a', {}).get('brand_tagline', 'Innovation Meets Excellence')}<br>
+                Need help? Contact us: {PLATFORMS.get(platform, {}).get('support_phone', '0548247241')}
             </p>
         </div>
     </div>
     """
-    send_email(email, f"Phone Verification Code - {COMPANY_NAME}", html_content)
-
-@app.route('/api/auth/resend-verification', methods=['POST'])
-@limiter.limit("3 per minute")
-@limiter.limit("10 per hour")
-def resend_verification():
-    """Resend verification code for email verification"""
-    data = request.get_json()
-    email = data.get('email')
-    
-    print(f"[RESEND] Request for email: {email}")
-    
-    if not email:
-        return jsonify({'success': False, 'error': 'Email required'}), 400
-    
-    # Check for temp_user in session
-    temp_user = session.get('temp_user')
-    
-    if temp_user and temp_user.get('email') == email:
-        new_code = generate_verification_code()
-        temp_user['verification_code'] = new_code
-        temp_user['expires'] = (datetime.utcnow() + timedelta(minutes=10)).isoformat()
-        session['temp_user'] = temp_user
-        session[f'temp_user_{email}'] = temp_user
-        
-        print(f"[RESEND] New code for {email}: {new_code}")
-        
-        email_sent = send_verification_email(email, temp_user.get('username', 'User'), new_code)
-        
-        if email_sent:
-            return jsonify({
-                'success': True,
-                'message': 'Verification code resent successfully',
-                'data': {'email': email, 'expires_in': 10}
-            })
-        else:
-            return jsonify({
-                'success': False,
-                'error': 'Failed to send email. Please try again.'
-            }), 500
-    
-    # Check for existing unverified user in database
-    user = User.query.filter_by(email=email, email_verified=False).first()
-    
-    if user:
-        new_code = generate_verification_code()
-        
-        session['temp_user'] = {
-            'username': user.username,
-            'email': user.email,
-            'phone': user.phone,
-            'password': None,
-            'referral_code': None,
-            'verification_code': new_code,
-            'expires': (datetime.utcnow() + timedelta(minutes=10)).isoformat(),
-            'existing_user_id': user.id
-        }
-        
-        session[f'temp_user_{email}'] = session['temp_user']
-        
-        print(f"[RESEND] New session created for existing user: {email}")
-        print(f"[RESEND] New code: {new_code}")
-        
-        email_sent = send_verification_email(email, user.username, new_code)
-        
-        if email_sent:
-            return jsonify({
-                'success': True,
-                'message': 'Verification code resent successfully',
-                'data': {'email': email, 'expires_in': 10}
-            })
-    
-    email_temp = session.get(f'temp_user_{email}')
-    if email_temp:
-        new_code = generate_verification_code()
-        email_temp['verification_code'] = new_code
-        email_temp['expires'] = (datetime.utcnow() + timedelta(minutes=10)).isoformat()
-        session[f'temp_user_{email}'] = email_temp
-        session['temp_user'] = email_temp
-        
-        print(f"[RESEND] Found in email-specific session: {email}")
-        print(f"[RESEND] New code: {new_code}")
-        
-        email_sent = send_verification_email(email, email_temp.get('username', 'User'), new_code)
-        
-        if email_sent:
-            return jsonify({
-                'success': True,
-                'message': 'Verification code resent successfully',
-                'data': {'email': email, 'expires_in': 10}
-            })
-    
-    return jsonify({
-        'success': False,
-        'error': 'No pending registration found. Please register again.'
-    }), 400
-
+    send_email(email, f"Phone Verification Code - {platform_name}", html_content)
 
 @app.route('/api/auth/resend-registration-code', methods=['POST'])
+@limiter.limit("3 per minute")
 def resend_registration_code():
-    """Resend verification code for registration (alternative endpoint)"""
-    data = request.get_json()
-    email = data.get('email')
-    
-    print(f"Resend registration code request for email: {email}")
-    
-    if not email:
-        return jsonify({'success': False, 'error': 'Email required'}), 400
-    
-    temp_user = session.get('temp_user')
-    
-    if temp_user and temp_user.get('email') == email:
-        new_code = generate_verification_code()
+    """Resend verification code for registration - Unified for both platforms"""
+    try:
+        data = request.get_json()
+        email = data.get('email')
+        
+        print(f"\n{'='*60}")
+        print(f"[RESEND REGISTRATION CODE]")
+        print(f"  Email: {email}")
+        print(f"  Platform: {getattr(g, 'platform', 'platform_a')}")
+        print(f"{'='*60}")
+        
+        if not email:
+            return jsonify({'success': False, 'error': 'Email required'}), 400
+        
+        # Get temp data from Redis
+        temp_user = get_temp_data(f"register:{email}")
+        
+        if not temp_user:
+            return jsonify({
+                'success': False,
+                'error': 'No pending registration found. Please register again.'
+            }), 400
+        
+        # Generate new verification code
+        new_code = verification_service.generate_verification_code()
         temp_user['verification_code'] = new_code
         temp_user['expires'] = (datetime.utcnow() + timedelta(minutes=10)).isoformat()
-        session['temp_user'] = temp_user
         
-        send_verification_email(email, temp_user.get('username', 'User'), new_code)
+        # Store updated data in Redis
+        set_temp_data(
+            f"register:{email}",
+            temp_user,
+            expiry_seconds=600
+        )
         
-        return jsonify({
-            'success': True,
-            'message': 'Verification code resent successfully'
-        })
-    
-    return jsonify({
-        'success': False,
-        'error': 'No pending registration found. Please register again.'
-    }), 400
+        print(f"[RESEND] New code generated for {email}: {new_code}")
+        
+        # Get platform info
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        
+        # Try SMS first
+        sms_sent = verification_service.send_sms(temp_user['phone'], new_code)
+        
+        if sms_sent.get('success'):
+            return jsonify({
+                'success': True,
+                'message': f'New verification code sent to your phone on {platform_name}',
+                'method': 'sms',
+                'platform': platform,
+                'platform_name': platform_name
+            })
+        else:
+            # SMS failed - send email
+            email_sent = send_verification_email(email, temp_user['username'], new_code)
+            if email_sent:
+                return jsonify({
+                    'success': True,
+                    'message': f'New verification code sent to your email on {platform_name}',
+                    'method': 'email',
+                    'platform': platform,
+                    'platform_name': platform_name
+                })
+            else:
+                return jsonify({
+                    'success': False,
+                    'error': 'Failed to send verification. Please try again.'
+                }), 500
+        
+    except Exception as e:
+        print(f"[RESEND ERROR] {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 
 # ========== FORGOT PASSWORD ROUTES ==========
 
@@ -3398,11 +4043,17 @@ def resend_registration_code():
 @limiter.limit("3 per minute")
 @limiter.limit("10 per hour")
 def forgot_password():
-    """Send password reset email"""
+    """Send password reset email - Unified for both platforms"""
     import secrets
     try:
         data = request.get_json()
         email = data.get('email')
+        
+        print(f"\n{'='*60}")
+        print(f"[FORGOT PASSWORD]")
+        print(f"  Email: {email}")
+        print(f"  Platform: {getattr(g, 'platform', 'platform_a')}")
+        print(f"{'='*60}")
         
         if not email:
             return jsonify({'success': False, 'error': 'Email is required'}), 400
@@ -3413,9 +4064,16 @@ def forgot_password():
         if not user:
             print(f"[PASSWORD] Reset requested for non-existent email: {email}")
             return jsonify({
-                'success': True, 
+                'success': True,
                 'message': 'If an account exists with this email, you will receive a reset link.'
             })
+        
+        # Determine platform for branding
+        platform = getattr(g, 'platform', user.platform or 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        platform_domain = platform_config.get('domain', 'abigalisticstudious.com')
+        primary_color = platform_config.get('primary_color', '#1A2A6C')
         
         # Generate reset token
         reset_token = secrets.token_urlsafe(32)
@@ -3423,25 +4081,25 @@ def forgot_password():
         user.reset_token_expiry = datetime.utcnow() + timedelta(hours=24)
         db.session.commit()
         
-        # Use production frontend URL only
-        frontend_url = 'https://www.roamsmart.shop'
+        # Use platform-specific frontend URL
+        frontend_url = f"https://{platform_domain}"
         reset_link = f"{frontend_url}/reset-password?token={reset_token}"
         
-        print(f"[PASSWORD] Reset link generated: {reset_link}")
+        print(f"[PASSWORD] Reset link generated for {platform_name}: {reset_link}")
         
-        # Create HTML email body
+        # Create HTML email body with platform branding
         email_body = f"""
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-            <div style="background: #8B0000; color: white; padding: 20px; text-align: center;">
+            <div style="background: {primary_color}; color: white; padding: 20px; text-align: center;">
                 <h1>🔐 Reset Your Password</h1>
-                <p>Roamsmart Digital Service</p>
+                <p>{platform_name}</p>
             </div>
             <div style="background: #f9f9f9; padding: 30px;">
                 <h2>Hello {user.username}!</h2>
-                <p>We received a request to reset your password for your Roamsmart account.</p>
+                <p>We received a request to reset your password for your {platform_name} account.</p>
                 <p>Click the button below to create a new password:</p>
                 <div style="text-align: center; margin: 30px 0;">
-                    <a href="{reset_link}" style="background: #8B0000; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block;">
+                    <a href="{reset_link}" style="background: {primary_color}; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block;">
                         Reset Password
                     </a>
                 </div>
@@ -3451,16 +4109,16 @@ def forgot_password():
                 <p style="font-size: 12px; color: #666;">Or copy this link: {reset_link}</p>
             </div>
             <div style="text-align: center; padding: 20px; font-size: 12px; color: #666;">
-                <p>Roamsmart Digital Service - Your trusted digital service partner</p>
-                <p>© 2024 Roamsmart. All rights reserved.</p>
+                <p>{platform_name} - Your trusted digital service partner</p>
+                <p>© 2024 {platform_name}. All rights reserved.</p>
             </div>
         </div>
         """
         
-        # Send email using your existing send_email function
+        # Send email
         send_email(
             to=email,
-            subject="Reset Your Roamsmart Password",
+            subject=f"Reset Your {platform_name} Password",
             body=email_body
         )
         
@@ -3468,7 +4126,9 @@ def forgot_password():
         
         return jsonify({
             'success': True,
-            'message': 'Password reset link sent to your email'
+            'message': f'Password reset link sent to your email on {platform_name}',
+            'platform': platform,
+            'platform_name': platform_name
         })
         
     except Exception as e:
@@ -3483,13 +4143,19 @@ def forgot_password():
 @limiter.limit("3 per minute")
 @limiter.limit("10 per hour")
 def reset_password():
-    """Reset password using token"""
+    """Reset password using token - Unified for both platforms"""
     try:
-        import bcrypt  # Add this import
+        import bcrypt
         
         data = request.get_json()
         token = data.get('token')
         new_password = data.get('new_password')
+        
+        print(f"\n{'='*60}")
+        print(f"[RESET PASSWORD]")
+        print(f"  Token provided: {'Yes' if token else 'No'}")
+        print(f"  Platform: {getattr(g, 'platform', 'platform_a')}")
+        print(f"{'='*60}")
         
         if not token or not new_password:
             return jsonify({'success': False, 'error': 'Token and new password are required'}), 400
@@ -3507,7 +4173,13 @@ def reset_password():
         if user.reset_token_expiry and user.reset_token_expiry < datetime.utcnow():
             return jsonify({'success': False, 'error': 'Reset token has expired. Please request a new one.'}), 400
         
-        # ========== FIX: Use bcrypt (same as User model) ==========
+        # Determine platform for branding
+        platform = getattr(g, 'platform', user.platform or 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        platform_domain = platform_config.get('domain', 'abigalisticstudious.com')
+        primary_color = platform_config.get('primary_color', '#1A2A6C')
+        
         # Hash the new password with bcrypt
         salt = bcrypt.gensalt()
         hashed_password = bcrypt.hashpw(new_password.encode('utf-8'), salt).decode('utf-8')
@@ -3518,19 +4190,19 @@ def reset_password():
         user.reset_token_expiry = None
         db.session.commit()
         
-        # Use production frontend URL only
-        frontend_url = 'https://www.roamsmart.shop'
+        # Use platform-specific frontend URL
+        frontend_url = f"https://{platform_domain}"
         
         # Send confirmation email
         confirmation_body = f"""
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
             <div style="background: #28a745; color: white; padding: 20px; text-align: center;">
                 <h1>✅ Password Changed Successfully</h1>
-                <p>Roamsmart Digital Service</p>
+                <p>{platform_name}</p>
             </div>
             <div style="background: #f9f9f9; padding: 30px;">
                 <h2>Hello {user.username}!</h2>
-                <p>Your Roamsmart account password has been successfully changed.</p>
+                <p>Your {platform_name} account password has been successfully changed.</p>
                 <p>If you did not make this change, please contact our support team immediately.</p>
                 <div style="text-align: center; margin: 30px 0;">
                     <a href="{frontend_url}/login" style="background: #28a745; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block;">
@@ -3539,22 +4211,24 @@ def reset_password():
                 </div>
             </div>
             <div style="text-align: center; padding: 20px; font-size: 12px; color: #666;">
-                <p>Roamsmart Digital Service</p>
+                <p>{platform_name} - Your trusted digital service partner</p>
             </div>
         </div>
         """
         
         send_email(
             to=user.email,
-            subject="Your Roamsmart Password Has Been Changed",
+            subject=f"Your {platform_name} Password Has Been Changed",
             body=confirmation_body
         )
         
-        print(f"[PASSWORD] Password reset successfully for user: {user.username}")
+        print(f"[PASSWORD] Password reset successfully for user: {user.username} on {platform_name}")
         
         return jsonify({
             'success': True,
-            'message': 'Password reset successful. You can now login with your new password.'
+            'message': f'Password reset successful. You can now login to {platform_name} with your new password.',
+            'platform': platform,
+            'platform_name': platform_name
         })
         
     except Exception as e:
@@ -3569,10 +4243,16 @@ def reset_password():
 @limiter.limit("10 per minute")
 @limiter.limit("50 per hour")
 def verify_reset_token():
-    """Verify if reset token is valid"""
+    """Verify if reset token is valid - Unified for both platforms"""
     try:
         data = request.get_json()
         token = data.get('token')
+        
+        print(f"\n{'='*60}")
+        print(f"[VERIFY RESET TOKEN]")
+        print(f"  Token provided: {'Yes' if token else 'No'}")
+        print(f"  Platform: {getattr(g, 'platform', 'platform_a')}")
+        print(f"{'='*60}")
         
         if not token:
             return jsonify({'success': False, 'error': 'Token is required'}), 400
@@ -3585,10 +4265,16 @@ def verify_reset_token():
         if user.reset_token_expiry and user.reset_token_expiry < datetime.utcnow():
             return jsonify({'success': False, 'error': 'Token has expired'}), 400
         
+        # Get platform info
+        platform = getattr(g, 'platform', user.platform or 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        
         return jsonify({
             'success': True,
             'message': 'Token is valid',
-            'email': user.email
+            'email': user.email,
+            'platform': platform,
+            'platform_name': platform_config.get('brand_name', 'AFDALNOVA')
         })
         
     except Exception as e:
@@ -3596,12 +4282,10 @@ def verify_reset_token():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
-
-
 @app.route('/api/auth/register', methods=['POST'])
 @limiter.limit("5 per minute")
 def register():
-    """Register new user - Send SMS verification first, email fallback (USES REDIS)"""
+    """Register new user - Unified for both platforms"""
     try:
         data = request.get_json()
         
@@ -3610,6 +4294,14 @@ def register():
         phone = data.get('phone')
         password = data.get('password')
         referral_code = data.get('referral_code')
+        
+        print(f"\n{'='*60}")
+        print(f"[REGISTER ATTEMPT]")
+        print(f"  Username: {username}")
+        print(f"  Email: {email}")
+        print(f"  Phone: {phone}")
+        print(f"  Platform: {getattr(g, 'platform', 'platform_a')}")
+        print(f"{'='*60}")
         
         if not all([username, email, phone, password]):
             return jsonify({'success': False, 'error': 'All fields required'}), 400
@@ -3620,6 +4312,11 @@ def register():
         
         if User.query.filter_by(phone=phone).first():
             return jsonify({'success': False, 'error': 'Phone already registered'}), 400
+        
+        # Get platform info
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
         
         verification_code = verification_service.generate_verification_code()
         
@@ -3633,6 +4330,7 @@ def register():
                 'password': password,
                 'referral_code': referral_code,
                 'verification_code': verification_code,
+                'platform': platform,
                 'expires': (datetime.utcnow() + timedelta(minutes=10)).isoformat()
             },
             expiry_seconds=600
@@ -3647,28 +4345,32 @@ def register():
         if sms_sent.get('success'):
             return jsonify({
                 'success': True,
-                'message': 'Verification code sent to your phone via SMS',
+                'message': f'Verification code sent to your phone on {platform_name}',
                 'method': 'sms',
+                'platform': platform,
+                'platform_name': platform_name,
                 'data': {'phone': phone, 'email': email, 'expires_in': 10}
             })
         else:
             # SMS failed - send email
-            email_sent = send_verification_email(email, username, verification_code)
+            email_sent = send_verification_email(email, username, verification_code, platform_name)
             if email_sent:
                 return jsonify({
                     'success': True,
-                    'message': 'SMS delivery failed. Verification code sent to your email.',
+                    'message': f'SMS delivery failed. Verification code sent to your email on {platform_name}.',
                     'method': 'email',
+                    'platform': platform,
+                    'platform_name': platform_name,
                     'data': {'email': email, 'expires_in': 10}
                 })
             else:
                 return jsonify({
-                    'success': False, 
+                    'success': False,
                     'error': 'Failed to send verification. Please try again.'
                 }), 500
         
     except Exception as e:
-        print(f"Register error: {e}")
+        print(f"[REGISTER ERROR] {e}")
         import traceback
         traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -3678,14 +4380,18 @@ def register():
 @limiter.limit("10 per minute")
 @limiter.limit("10 per hour")
 def verify_registration_code():
-    """Verify registration code and complete registration (USES REDIS)"""
+    """Verify registration code and complete registration - Unified for both platforms"""
     try:
         data = request.get_json()
         user_code = data.get('code')
         email = data.get('email')
         
-        print(f"[VERIFY] Received code: {user_code}")
-        print(f"[VERIFY] Email: {email}")
+        print(f"\n{'='*60}")
+        print(f"[VERIFY REGISTRATION CODE]")
+        print(f"  Code: {user_code}")
+        print(f"  Email: {email}")
+        print(f"  Platform: {getattr(g, 'platform', 'platform_a')}")
+        print(f"{'='*60}")
         
         # Get temp data from Redis
         temp_user = get_temp_data(f"register:{email}")
@@ -3693,23 +4399,27 @@ def verify_registration_code():
         if not temp_user:
             print(f"[VERIFY] No pending registration found for {email}")
             return jsonify({
-                'success': False, 
+                'success': False,
                 'error': 'No pending registration found. Please register again.'
             }), 400
         
         # Check expiration
         expires_at = datetime.fromisoformat(temp_user['expires'])
         if datetime.utcnow() > expires_at:
-            # Clean up expired entry
             delete_temp_data(f"register:{email}")
             return jsonify({
-                'success': False, 
+                'success': False,
                 'error': 'Verification code expired. Please register again.'
             }), 400
         
         # Verify code
         if user_code != temp_user.get('verification_code'):
             return jsonify({'success': False, 'error': 'Invalid verification code'}), 400
+        
+        # Get platform
+        platform = temp_user.get('platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
         
         # Check if user already exists
         existing_user = User.query.filter_by(email=temp_user['email']).first()
@@ -3718,19 +4428,21 @@ def verify_registration_code():
             if not existing_user.email_verified:
                 existing_user.email_verified = True
                 existing_user.email_verified_at = datetime.utcnow()
+                existing_user.platform = platform
                 db.session.commit()
                 
-                # Clean up Redis
                 delete_temp_data(f"register:{email}")
                 
-                send_welcome_email(existing_user.email, existing_user.username, 'user')
+                send_welcome_email(existing_user.email, existing_user.username, platform_name)
                 token = existing_user.generate_token()
                 
                 return jsonify({
                     'success': True,
-                    'message': 'Email verified successfully!',
+                    'message': f'Email verified successfully on {platform_name}!',
                     'token': token,
-                    'user': existing_user.to_dict()
+                    'user': existing_user.to_dict(),
+                    'platform': platform,
+                    'platform_name': platform_name
                 })
             else:
                 return jsonify({
@@ -3749,7 +4461,9 @@ def verify_registration_code():
             wallet_balance=0.0,
             referral_code=user_ref_code,
             email_verified=True,
-            email_verified_at=datetime.utcnow()
+            email_verified_at=datetime.utcnow(),
+            platform=platform,
+            platform_created=platform
         )
         new_user.set_password(temp_user['password'])
         
@@ -3769,22 +4483,33 @@ def verify_registration_code():
         db.session.add(new_user)
         db.session.commit()
         
-        # Clean up Redis
         delete_temp_data(f"register:{email}")
         
-        send_welcome_email(new_user.email, new_user.username, 'user')
+        send_welcome_email(new_user.email, new_user.username, platform_name)
         
         token = new_user.generate_token()
         
+        print(f"[VERIFY SUCCESS] User created: {new_user.email} on {platform_name}")
+        
         return jsonify({
             'success': True,
-            'message': f'Registration successful on {COMPANY_NAME}!',
+            'message': f'Registration successful on {platform_name}!',
             'token': token,
-            'user': new_user.to_dict()
+            'user': new_user.to_dict(),
+            'platform': platform,
+            'platform_name': platform_name,
+            'branding': {
+                'name': platform_config.get('brand_name', platform_name),
+                'tagline': platform_config.get('brand_tagline', ''),
+                'primary_color': platform_config.get('primary_color', '#1A2A6C'),
+                'secondary_color': platform_config.get('secondary_color', '#C9A84C'),
+                'support_email': platform_config.get('support_email', 'support@abigalisticstudious.com'),
+                'support_phone': platform_config.get('support_phone', '0548247241')
+            }
         })
         
     except Exception as e:
-        print(f"Verify code error: {e}")
+        print(f"[VERIFY ERROR] {e}")
         import traceback
         traceback.print_exc()
         db.session.rollback()
@@ -3794,7 +4519,7 @@ def verify_registration_code():
 @app.route('/api/auth/login', methods=['POST'])
 @limiter.limit("10 per minute")
 def login():
-    """Login user - With account lockout protection (USES REDIS)"""
+    """Login user - Unified for both AFDALNOVA and Roamsmart"""
     try:
         data = request.get_json()
         email = data.get('email', '').lower().strip()
@@ -3805,23 +4530,22 @@ def login():
         print(f"[LOGIN ATTEMPT]")
         print(f"  Email: {email}")
         print(f"  Password provided: {'Yes' if password else 'No'}")
+        print(f"  Request Platform: {getattr(g, 'platform', 'platform_a')}")
         print(f"{'='*60}")
         
         if not email or not password:
             return jsonify({'success': False, 'error': 'Email and password required'}), 400
         
-        # First, check if admin email is being used
-        if email == COMPANY_ADMIN_EMAIL:
-            print(f"[LOGIN] Admin login attempt for {email}")
-        
+        # Find user by email (shared across all platforms)
         user = User.query.filter_by(email=email).first()
         
         if not user:
-            # Don't reveal if user exists for security
             print(f"[LOGIN FAILED] User not found: {email}")
             return jsonify({'success': False, 'error': 'Invalid credentials'}), 401
         
         print(f"[USER FOUND] ID: {user.id}, Role: {user.role}, Email: {user.email}")
+        print(f"  User Platform: {user.platform}")
+        print(f"  Platform Created: {user.platform_created if hasattr(user, 'platform_created') else 'N/A'}")
         
         # ========== ACCOUNT LOCKOUT CHECK ==========
         if user.is_locked():
@@ -3844,14 +4568,12 @@ def login():
         
         # ========== HANDLE FAILED ATTEMPT ==========
         if not password_valid:
-            # Increment failed attempts
             user.increment_failed_attempts(request.remote_addr)
             db.session.commit()
             
             remaining_attempts = 5 - user.failed_login_attempts
             print(f"[LOGIN FAILED] Invalid password for {email}. Attempts: {user.failed_login_attempts}/5")
             
-            # Log suspicious activity after 3 failures
             if user.failed_login_attempts >= 3:
                 log_suspicious_activity(
                     user.id, 
@@ -3860,7 +4582,6 @@ def login():
                     request.remote_addr
                 )
             
-            # Return error with remaining attempts
             if remaining_attempts > 0:
                 return jsonify({
                     'success': False, 
@@ -3878,6 +4599,27 @@ def login():
         user.reset_failed_attempts()
         user.last_login = datetime.utcnow()
         user.last_ip_address = request.remote_addr
+        
+        # ========== FIX: PRESERVE USER'S PLATFORM ==========
+        # DO NOT automatically update user's platform!
+        request_platform = getattr(g, 'platform', 'platform_a')
+        
+        # Only update platform if the user has NO platform set (new user)
+        if not user.platform:
+            print(f"[LOGIN] New user, setting platform: {request_platform}")
+            user.platform = request_platform
+            db.session.commit()
+        else:
+            # Use the user's existing platform
+            user_platform = user.platform
+            print(f"[LOGIN] User's existing platform: {user_platform} (request was {request_platform})")
+            
+            # Log if there's a mismatch (for debugging)
+            if user.platform != request_platform:
+                print(f"[LOGIN] ⚠️ Platform mismatch: User is on {user_platform} but requested {request_platform}")
+                print(f"[LOGIN] Using user's platform: {user_platform}")
+                # Do NOT update the user's platform!
+        
         db.session.commit()
         
         # If user is admin but email_verified is False, force set to True
@@ -3891,7 +4633,6 @@ def login():
             print(f"[LOGIN] Email not verified for {email}")
             verification_code = verification_service.generate_verification_code()
             
-            # Store in Redis with 10 minutes expiry
             set_temp_data(
                 f"verify_{user.id}",
                 {
@@ -3922,28 +4663,60 @@ def login():
                     'data': {'email': user.email, 'user_id': user.id}
                 }), 403
         
-        # Generate token with explicit expiry
+        # Generate token
         token = user.generate_token()
         
-        # Determine redirect URL based on role
-        if user.role == 'super_admin' or user.role == 'admin':
+        # ========== DETERMINE PLATFORM AND REDIRECT ==========
+        # Use the user's actual platform, not the request platform
+        user_platform = user.platform or 'platform_a'
+        platform_config = PLATFORMS.get(user_platform, PLATFORMS['platform_a'])
+        
+        # Determine platform display name
+        if user_platform == 'platform_a':
+            platform_display = 'AFDALNOVA'
+            platform_domain = 'abigalisticstudious.com'
+        elif user_platform == 'platform_b':
+            platform_display = 'Roamsmart'
+            platform_domain = 'roamsmart.shop'
+        else:
+            platform_display = 'AFDALNOVA'
+            platform_domain = 'abigalisticstudious.com'
+        
+        # Determine redirect URL based on role and platform
+        if user.role in ['super_admin', 'admin']:
             redirect_url = '/admin'
         elif user.is_agent and user.agent_approved:
             redirect_url = '/agent'
         else:
             redirect_url = '/dashboard'
         
-        print(f"[LOGIN SUCCESS] {email} -> {redirect_url}")
+        print(f"[LOGIN SUCCESS] {email} -> {redirect_url} ({platform_display})")
         
         # Prepare user data for frontend
         user_dict = user.to_dict()
-        user_dict['role'] = user.role  # Ensure role is explicitly set
+        user_dict['role'] = user.role
+        user_dict['platform'] = user_platform
+        user_dict['platform_name'] = platform_display
+        user_dict['platform_domain'] = platform_domain
         
         return jsonify({
             'success': True,
             'token': token,
             'user': user_dict,
-            'redirect': redirect_url
+            'redirect': redirect_url,
+            'platform': user_platform,
+            'platform_name': platform_display,
+            'platform_domain': platform_domain,
+            'is_roamsmart_legacy': user_platform == 'platform_b',
+            'branding': {
+                'name': platform_config.get('brand_name', platform_display),
+                'tagline': platform_config.get('brand_tagline', ''),
+                'primary_color': platform_config.get('primary_color', '#1A2A6C'),
+                'secondary_color': platform_config.get('secondary_color', '#C9A84C'),
+                'logo': platform_config.get('logo', '/logo192.png'),
+                'support_email': platform_config.get('support_email', 'support@abigalisticstudious.com'),
+                'support_phone': platform_config.get('support_phone', '0548247241')
+            }
         })
         
     except Exception as e:
@@ -4021,7 +4794,7 @@ def fix_admin():
         db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
 
-# In your init_db or user creation
+
 def create_admin():
     admin = User.query.filter_by(email=COMPANY_ADMIN_EMAIL).first()
     if not admin:
@@ -4048,11 +4821,18 @@ def create_admin():
 @app.route('/api/auth/verify-login-code', methods=['POST'])
 @limiter.limit("10 per minute")
 def verify_login_code():
-    """Verify code for unverified email login (USES REDIS)"""
+    """Verify code for unverified email login - Unified for both platforms"""
     try:
         data = request.get_json()
         user_code = data.get('code')
         user_id = data.get('user_id')
+        
+        print(f"\n{'='*60}")
+        print(f"[VERIFY LOGIN CODE]")
+        print(f"  User ID: {user_id}")
+        print(f"  Code provided: {user_code}")
+        print(f"  Platform: {getattr(g, 'platform', 'platform_a')}")
+        print(f"{'='*60}")
         
         if not user_id:
             return jsonify({'success': False, 'error': 'User ID required'}), 400
@@ -4061,28 +4841,36 @@ def verify_login_code():
         verify_data = get_temp_data(f"verify_{user_id}")
         
         if not verify_data:
+            print(f"[VERIFY] No verification data found for user {user_id}")
             return jsonify({
                 'success': False,
                 'error': 'No verification found. Please login again.'
             }), 400
         
+        # Check expiry
         expires_at = datetime.fromisoformat(verify_data['expires'])
         if datetime.utcnow() > expires_at:
             delete_temp_data(f"verify_{user_id}")
+            print(f"[VERIFY] Code expired for user {user_id}")
             return jsonify({
                 'success': False,
                 'error': 'Verification code expired. Please login again.'
             }), 400
         
+        # Check code
         if user_code != verify_data.get('code'):
+            print(f"[VERIFY] Invalid code for user {user_id}")
             return jsonify({'success': False, 'error': 'Invalid verification code'}), 400
         
+        # Get user
         user = User.query.get(user_id)
         
         if not user:
             delete_temp_data(f"verify_{user_id}")
+            print(f"[VERIFY] User not found: {user_id}")
             return jsonify({'success': False, 'error': 'User not found'}), 404
         
+        # Update user verification status
         user.email_verified = True
         user.email_verified_at = datetime.utcnow()
         db.session.commit()
@@ -4090,27 +4878,67 @@ def verify_login_code():
         # Clean up Redis
         delete_temp_data(f"verify_{user_id}")
         
+        print(f"[VERIFY SUCCESS] User {user.email} verified")
+        
+        # Generate token
         token = user.generate_token()
         
-        if user.role == 'super_admin':
-            redirect_url = '/admin'
-        elif user.role == 'admin':
+        # ========== DETERMINE PLATFORM AND REDIRECT ==========
+        # Get current platform from request
+        request_platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(request_platform, PLATFORMS['platform_a'])
+        
+        # Determine user's platform
+        user_platform = user.platform or 'platform_a'
+        
+        # Determine redirect based on role and platform
+        if user.role in ['super_admin', 'admin']:
             redirect_url = '/admin'
         elif user.is_agent and user.agent_approved:
             redirect_url = '/agent'
         else:
             redirect_url = '/dashboard'
         
+        # Determine platform display name
+        if user_platform == 'platform_a':
+            platform_name = 'AFDALNOVA'
+            platform_domain = 'abigalisticstudious.com'
+        elif user_platform == 'platform_b':
+            platform_name = 'Roamsmart'
+            platform_domain = 'roamsmart.shop'
+        else:
+            platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+            platform_domain = platform_config.get('domain', 'abigalisticstudious.com')
+        
+        print(f"[VERIFY] Redirect: {redirect_url} ({platform_name})")
+        
+        # Prepare user data
+        user_dict = user.to_dict()
+        user_dict['platform'] = user_platform
+        user_dict['platform_name'] = platform_name
+        
         return jsonify({
             'success': True,
             'message': 'Email verified successfully!',
             'token': token,
-            'user': user.to_dict(),
-            'redirect': redirect_url
+            'user': user_dict,
+            'redirect': redirect_url,
+            'platform': user_platform,
+            'platform_name': platform_name,
+            'platform_domain': platform_domain,
+            'branding': {
+                'name': platform_config.get('brand_name', platform_name),
+                'tagline': platform_config.get('brand_tagline', ''),
+                'primary_color': platform_config.get('primary_color', '#1A2A6C'),
+                'secondary_color': platform_config.get('secondary_color', '#C9A84C'),
+                'logo': platform_config.get('logo', '/logo192.png'),
+                'support_email': platform_config.get('support_email', 'support@abigalisticstudious.com'),
+                'support_phone': platform_config.get('support_phone', '0548247241')
+            }
         })
         
     except Exception as e:
-        print(f"Verify login code error: {e}")
+        print(f"[VERIFY ERROR] {e}")
         import traceback
         traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -4119,19 +4947,35 @@ def verify_login_code():
 @app.route('/api/auth/check-verification', methods=['GET'])
 @token_required
 def check_email_verification():
-    """Check if user's email is verified"""
+    """Check if user's email is verified - Unified for both platforms"""
     try:
+        user = g.current_user
+        
+        # Get platform info
+        user_platform = user.platform or 'platform_a'
+        platform_config = PLATFORMS.get(user_platform, PLATFORMS['platform_a'])
+        
+        print(f"[CHECK VERIFICATION] User: {user.email}, Platform: {user_platform}")
+        
         return jsonify({
             'success': True,
             'data': {
-                'email_verified': g.current_user.email_verified,
-                'email': g.current_user.email
+                'email_verified': user.email_verified,
+                'email': user.email,
+                'platform': user_platform,
+                'platform_name': platform_config.get('brand_name', 'AFDALNOVA'),
+                'branding': {
+                    'name': platform_config.get('brand_name', 'AFDALNOVA'),
+                    'tagline': platform_config.get('brand_tagline', ''),
+                    'primary_color': platform_config.get('primary_color', '#1A2A6C'),
+                    'secondary_color': platform_config.get('secondary_color', '#C9A84C')
+                }
             }
         })
+        
     except Exception as e:
-        print(f"Check verification error: {e}")
+        print(f"[CHECK VERIFICATION ERROR] {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
-
 
 
     
@@ -4209,168 +5053,1605 @@ def send_order_confirmation_email(user, order_id, network, size_gb, phone, amoun
     except Exception as e:
         print(f"Send order confirmation email error: {e}")
 
+# ========== CORRECTED HubtelService CLASS ==========
 
-# ========== HUBTEL BILL PAYMENT SERVICE ==========
 class HubtelService:
     def __init__(self):
         self.client_id = os.environ.get('HUBTEL_CLIENT_ID')
         self.client_secret = os.environ.get('HUBTEL_CLIENT_SECRET')
-        self.base_url = os.environ.get('HUBTEL_BASE_URL', 'https://api.hubtel.com/v1')
+        self.disbursement_account = os.environ.get('HUBTEL_DISBURSEMENT_ACCOUNT', '2025520')
+        self.collection_account = os.environ.get('HUBTEL_COLLECTION_ACCOUNT', '2039545')
+        self.bill_payment_url = "https://cs.hubtel.com"
+        self.balance_url = "https://trnf.hubtel.com"
+        self.refund_url = "https://refund-api.hubtel.com"
+        self.status_check_url = "https://api-txnstatus.hubtel.com"
         
         if not self.client_id or not self.client_secret:
             print("[Hubtel] Warning: API credentials not configured")
         
         # Generate Basic Auth token
-        auth_string = f"{self.client_id}:{self.client_secret}"
-        self.auth_token = base64.b64encode(auth_string.encode()).decode()
+        if self.client_id and self.client_secret:
+            auth_string = f"{self.client_id}:{self.client_secret}"
+            self.auth_token = base64.b64encode(auth_string.encode()).decode()
+            self.headers = {
+                'Authorization': f'Basic {self.auth_token}',
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+            }
+    
+    def is_configured(self):
+        return all([self.client_id, self.client_secret, self.disbursement_account, self.collection_account])
+    
+    def _format_phone(self, phone):
+        """Format phone number to Hubtel format (233XXXXXXXXX)"""
+        if not phone:
+            return None
+        phone = ''.join(filter(str.isdigit, str(phone)))
+        if phone.startswith('0'):
+            phone = '233' + phone[1:]
+        elif not phone.startswith('233'):
+            phone = '233' + phone
+        # Ensure exactly 12 digits
+        if len(phone) > 12:
+            phone = phone[:12]
+        return phone
+    
+    # ========== DSTV ==========
+    def query_dstv(self, smartcard_number):
+        """Query DSTV account details"""
+        if not self.is_configured():
+            return {'success': False, 'error': 'Hubtel not configured'}
         
-        self.headers = {
-            'Authorization': f'Basic {self.auth_token}',
-            'Content-Type': 'application/json',
-            'Accept': 'application/json'
-        }
-    
-    def validate_bill_account(self, biller_code, account_number):
-        """Validate customer account for bill payment"""
         try:
-            response = requests.post(
-                f"{self.base_url}/bill/validate",
-                json={
-                    'billerCode': biller_code,
-                    'accountNumber': account_number
-                },
-                headers=self.headers,
-                timeout=30
-            )
+            url = f"{self.bill_payment_url}/commissionservices/{self.disbursement_account}/297a96656b5846ad8b00d5d41b256ea7"
+            params = {'destination': smartcard_number}
+            
+            response = requests.get(url, headers=self.headers, params=params, timeout=30)
             
             if response.status_code == 200:
                 data = response.json()
-                return {
-                    'success': True,
-                    'customer_name': data.get('customerName'),
-                    'customer_phone': data.get('customerPhone'),
-                    'customer_email': data.get('customerEmail'),
-                    'biller_name': data.get('billerName'),
-                    'amount_due': data.get('amountDue', 0),
-                    'minimum_amount': data.get('minimumAmount', 0)
-                }
-            else:
-                return {
-                    'success': False,
-                    'error': f'Validation failed: {response.text}'
-                }
-        except requests.exceptions.Timeout:
-            return {'success': False, 'error': 'Hubtel API timeout'}
+                if data.get('ResponseCode') == '0000':
+                    result = {}
+                    for item in data.get('Data', []):
+                        result[item.get('Display')] = item.get('Value')
+                    return {'success': True, 'data': result, 'raw': data}
+            return {'success': False, 'error': 'DSTV account not found', 'status_code': response.status_code}
         except Exception as e:
             return {'success': False, 'error': str(e)}
     
-    def get_bill_amount(self, biller_code, account_number):
-        """Get bill amount due"""
+    def pay_dstv(self, smartcard_number, amount, client_reference, callback_url):
+        """Pay DSTV bill"""
+        if not self.is_configured():
+            return {'success': False, 'error': 'Hubtel not configured'}
+        
         try:
-            response = requests.post(
-                f"{self.base_url}/bill/inquiry",
-                json={
-                    'billerCode': biller_code,
-                    'accountNumber': account_number
-                },
-                headers=self.headers,
-                timeout=30
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                return {
-                    'success': True,
-                    'amount': data.get('amount', 0),
-                    'due_date': data.get('dueDate'),
-                    'reference': data.get('reference')
-                }
-            else:
-                return {
-                    'success': False,
-                    'error': f'Inquiry failed: {response.text}'
-                }
-        except Exception as e:
-            return {'success': False, 'error': str(e)}
-    
-    def pay_bill(self, biller_code, account_number, amount, customer_name, customer_phone, customer_email=None, reference=None):
-        """Process bill payment"""
-        try:
-            import uuid
-            if not reference:
-                reference = f"HUBTEL-{uuid.uuid4().hex[:12].upper()}"
+            url = f"{self.bill_payment_url}/commissionservices/{self.disbursement_account}/297a96656b5846ad8b00d5d41b256ea7"
             
             payload = {
-                'billerCode': biller_code,
-                'accountNumber': account_number,
-                'amount': amount,
-                'customerName': customer_name,
-                'customerPhone': customer_phone,
-                'reference': reference,
-                'callbackUrl': f"{os.environ.get('BASE_URL', 'https://roamsmart-backend-production.up.railway.app')}/api/webhooks/hubtel"
+                'Destination': smartcard_number,
+                'Amount': float(amount),
+                'CallbackUrl': callback_url,
+                'ClientReference': client_reference
             }
             
-            if customer_email:
-                payload['customerEmail'] = customer_email
+            response = requests.post(url, json=payload, headers=self.headers, timeout=60)
             
-            response = requests.post(
-                f"{self.base_url}/bill/pay",
-                json=payload,
-                headers=self.headers,
-                timeout=30
-            )
-            
-            if response.status_code in [200, 201]:
+            if response.status_code == 200:
                 data = response.json()
-                return {
-                    'success': True,
-                    'transaction_id': data.get('transactionId'),
-                    'reference': reference,
-                    'status': data.get('status', 'completed')
-                }
-            else:
-                return {
-                    'success': False,
-                    'error': f'Payment failed: {response.text}'
-                }
+                response_code = data.get('ResponseCode')
+                if response_code in ['0000', '0001']:
+                    return {
+                        'success': True,
+                        'response_code': response_code,
+                        'message': data.get('Message'),
+                        'client_reference': data.get('Data', {}).get('ClientReference'),
+                        'amount': data.get('Data', {}).get('Amount'),
+                        'transaction_id': data.get('Data', {}).get('TransactionId'),
+                        'commission': data.get('Data', {}).get('Meta', {}).get('Commission')
+                    }
+                else:
+                    return {
+                        'success': False,
+                        'error': data.get('Message', 'Payment failed'),
+                        'response_code': response_code
+                    }
+            return {'success': False, 'error': f'Payment failed: {response.text}', 'status_code': response.status_code}
         except Exception as e:
             return {'success': False, 'error': str(e)}
     
-    def check_transaction_status(self, transaction_id):
-        """Check transaction status"""
+    # ========== GoTV ==========
+    def query_gotv(self, iuc_number):
+        """Query GoTV account details"""
+        if not self.is_configured():
+            return {'success': False, 'error': 'Hubtel not configured'}
+        
         try:
-            response = requests.get(
-                f"{self.base_url}/bill/status/{transaction_id}",
-                headers=self.headers,
-                timeout=30
-            )
+            url = f"{self.bill_payment_url}/commissionservices/{self.disbursement_account}/e6ceac7f3880435cb30b048e9617eb41"
+            params = {'destination': iuc_number}
+            
+            response = requests.get(url, headers=self.headers, params=params, timeout=30)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('ResponseCode') == '0000':
+                    result = {}
+                    for item in data.get('Data', []):
+                        result[item.get('Display')] = item.get('Value')
+                    return {'success': True, 'data': result}
+            return {'success': False, 'error': 'GoTV account not found'}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    def pay_gotv(self, iuc_number, amount, client_reference, callback_url):
+        """Pay GoTV bill"""
+        if not self.is_configured():
+            return {'success': False, 'error': 'Hubtel not configured'}
+        
+        try:
+            url = f"{self.bill_payment_url}/commissionservices/{self.disbursement_account}/e6ceac7f3880435cb30b048e9617eb41"
+            
+            payload = {
+                'Destination': iuc_number,
+                'Amount': float(amount),
+                'CallbackUrl': callback_url,
+                'ClientReference': client_reference
+            }
+            
+            response = requests.post(url, json=payload, headers=self.headers, timeout=60)
+            
+            if response.status_code == 200:
+                data = response.json()
+                response_code = data.get('ResponseCode')
+                if response_code in ['0000', '0001']:
+                    return {
+                        'success': True,
+                        'response_code': response_code,
+                        'message': data.get('Message'),
+                        'client_reference': data.get('Data', {}).get('ClientReference'),
+                        'amount': data.get('Data', {}).get('Amount'),
+                        'transaction_id': data.get('Data', {}).get('TransactionId'),
+                        'commission': data.get('Data', {}).get('Meta', {}).get('Commission')
+                    }
+                else:
+                    return {
+                        'success': False,
+                        'error': data.get('Message', 'Payment failed'),
+                        'response_code': response_code
+                    }
+            return {'success': False, 'error': f'Payment failed: {response.text}'}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    # ========== StarTimes ==========
+    def query_startimes(self, smartcard_number):
+        """Query StarTimes account details"""
+        if not self.is_configured():
+            return {'success': False, 'error': 'Hubtel not configured'}
+        
+        try:
+            url = f"{self.bill_payment_url}/commissionservices/{self.disbursement_account}/6598652d34ea4112949c93c079c501ce"
+            params = {'destination': smartcard_number}
+            
+            response = requests.get(url, headers=self.headers, params=params, timeout=30)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('ResponseCode') == '0000':
+                    result = {}
+                    for item in data.get('Data', []):
+                        result[item.get('Display')] = item.get('Value')
+                    return {'success': True, 'data': result}
+            return {'success': False, 'error': 'StarTimes account not found'}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    def pay_startimes(self, smartcard_number, amount, client_reference, callback_url):
+        """Pay StarTimes bill"""
+        if not self.is_configured():
+            return {'success': False, 'error': 'Hubtel not configured'}
+        
+        try:
+            url = f"{self.bill_payment_url}/commissionservices/{self.disbursement_account}/6598652d34ea4112949c93c079c501ce"
+            
+            payload = {
+                'Destination': smartcard_number,
+                'Amount': float(amount),
+                'CallbackUrl': callback_url,
+                'ClientReference': client_reference
+            }
+            
+            response = requests.post(url, json=payload, headers=self.headers, timeout=60)
+            
+            if response.status_code == 200:
+                data = response.json()
+                response_code = data.get('ResponseCode')
+                if response_code in ['0000', '0001']:
+                    return {
+                        'success': True,
+                        'response_code': response_code,
+                        'message': data.get('Message'),
+                        'client_reference': data.get('Data', {}).get('ClientReference'),
+                        'amount': data.get('Data', {}).get('Amount'),
+                        'transaction_id': data.get('Data', {}).get('TransactionId'),
+                        'commission': data.get('Data', {}).get('Meta', {}).get('Commission')
+                    }
+                else:
+                    return {
+                        'success': False,
+                        'error': data.get('Message', 'Payment failed'),
+                        'response_code': response_code
+                    }
+            return {'success': False, 'error': f'Payment failed: {response.text}'}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    # ========== ECG ==========
+    def query_ecg_meters(self, phone_number):
+        """Query ECG meters by phone number"""
+        if not self.is_configured():
+            return {'success': False, 'error': 'Hubtel not configured'}
+        
+        try:
+            # Format phone number for ECG (must be 233XXXXXXXXX format)
+            formatted_phone = self._format_phone(phone_number)
+            if not formatted_phone:
+                return {'success': False, 'error': 'Invalid phone number format'}
+            
+            print(f"[Hubtel] Querying ECG meters for phone: {formatted_phone}")
+            
+            url = f"{self.bill_payment_url}/commissionservices/{self.disbursement_account}/e6d6bac062b5499cb1ece1ac3d742a84"
+            params = {'destination': formatted_phone}
+            
+            response = requests.get(url, headers=self.headers, params=params, timeout=30)
+            
+            if response.status_code == 200:
+                data = response.json()
+                print(f"[Hubtel] ECG Response: {data}")
+                
+                if data.get('ResponseCode') == '0000':
+                    meters = []
+                    for item in data.get('Data', []):
+                        # Parse amount (could be negative for credits)
+                        amount = float(item.get('Amount', 0))
+                        if amount < 0:
+                            amount = 0  # Credit balance, no payment due
+                        
+                        meters.append({
+                            'customer_name': item.get('Display', '').strip(),
+                            'meter_number': item.get('Value', '').strip(),
+                            'amount_due': amount
+                        })
+                    
+                    if not meters:
+                        return {'success': False, 'error': 'No ECG meters found for this phone number'}
+                    
+                    return {'success': True, 'meters': meters, 'raw': data}
+                else:
+                    return {'success': False, 'error': data.get('Message', 'Failed to fetch ECG meters')}
+            else:
+                return {'success': False, 'error': f'HTTP {response.status_code}: {response.text[:100]}'}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    def query_ecg_by_meter(self, meter_number):
+        """Query ECG by meter number directly"""
+        if not self.is_configured():
+            return {'success': False, 'error': 'Hubtel not configured'}
+    
+        try:
+        # Clean meter number
+            meter = ''.join(filter(str.isdigit, str(meter_number))).strip()
+            if not meter:
+                return {'success': False, 'error': 'Invalid meter number'}
+        
+            print(f"[Hubtel] Querying ECG meter directly: {meter}")
+        
+        # For ECG, we need to use a phone number in the destination
+        # If we have a default phone, use it, otherwise use a generic one
+        # The ECG API requires a phone number even when querying by meter
+        # We'll use a default phone number (the disbursement account owner's phone)
+            default_phone = os.environ.get('HUBTEL_DEFAULT_PHONE', '233557013982')
+        
+            url = f"{self.bill_payment_url}/commissionservices/{self.disbursement_account}/e6d6bac062b5499cb1ece1ac3d742a84"
+            params = {'destination': default_phone}
+        
+            response = requests.get(url, headers=self.headers, params=params, timeout=30)
+        
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('ResponseCode') == '0000':
+                    meters = []
+                    for item in data.get('Data', []):
+                    # Check if the meter number matches the one we're looking for
+                        item_value = item.get('Value', '').strip()
+                        if meter in item_value or item_value in meter:
+                            amount = float(item.get('Amount', 0))
+                            if amount < 0:
+                                amount = 0
+                            meters.append({
+                                'customer_name': item.get('Display', '').strip(),
+                                'meter_number': item_value,
+                                'amount_due': amount
+                            })
+                
+                    if meters:
+                        return {'success': True, 'meters': meters, 'raw': data}
+                
+                # If no specific meter found, return all meters with a note
+                    all_meters = []
+                    for item in data.get('Data', []):
+                        amount = float(item.get('Amount', 0))
+                        if amount < 0:
+                            amount = 0
+                        all_meters.append({
+                            'customer_name': item.get('Display', '').strip(),
+                            'meter_number': item.get('Value', '').strip(),
+                            'amount_due': amount
+                        })
+                
+                    if all_meters:
+                    # Return all meters and let the user select
+                        return {
+                            'success': True, 
+                            'meters': all_meters, 
+                            'raw': data,
+                            'message': f'Found {len(all_meters)} meters. Please select your meter.'
+                        }
+            
+                return {'success': False, 'error': 'Meter not found. Please verify the meter number.'}
+            
+            return {'success': False, 'error': f'HTTP {response.status_code}: {response.text[:100]}'}
+        
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    def pay_ecg(self, phone_number, meter_number, amount, client_reference, callback_url):
+        """Pay ECG bill"""
+        if not self.is_configured():
+            return {'success': False, 'error': 'Hubtel not configured'}
+        
+        try:
+            # Format phone number
+            formatted_phone = self._format_phone(phone_number)
+            if not formatted_phone:
+                return {'success': False, 'error': 'Invalid phone number format'}
+            
+            # Clean meter number
+            meter = ''.join(filter(str.isdigit, str(meter_number))).strip()
+            if not meter:
+                return {'success': False, 'error': 'Invalid meter number'}
+            
+            print(f"[Hubtel] Paying ECG bill - Phone: {formatted_phone}, Meter: {meter}, Amount: {amount}")
+            
+            url = f"{self.bill_payment_url}/commissionservices/{self.disbursement_account}/e6d6bac062b5499cb1ece1ac3d742a84"
+            
+            payload = {
+                'Destination': formatted_phone,
+                'Amount': float(amount),
+                'CallbackUrl': callback_url,
+                'ClientReference': client_reference,
+                'Extradata': {
+                    'bundle': meter
+                }
+            }
+            
+            response = requests.post(url, json=payload, headers=self.headers, timeout=60)
+            
+            if response.status_code == 200:
+                data = response.json()
+                response_code = data.get('ResponseCode')
+                if response_code in ['0000', '0001']:
+                    return {
+                        'success': True,
+                        'response_code': response_code,
+                        'message': data.get('Message'),
+                        'client_reference': data.get('Data', {}).get('ClientReference'),
+                        'amount': data.get('Data', {}).get('Amount'),
+                        'transaction_id': data.get('Data', {}).get('TransactionId'),
+                        'commission': data.get('Data', {}).get('Meta', {}).get('Commission')
+                    }
+                else:
+                    return {
+                        'success': False,
+                        'error': data.get('Message', 'Payment failed'),
+                        'response_code': response_code
+                    }
+            return {'success': False, 'error': f'Payment failed: {response.text}'}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    # ========== Ghana Water (GWCL) ==========
+    def query_water(self, meter_number, phone_number):
+        """Query Ghana Water account details"""
+        if not self.is_configured():
+            return {'success': False, 'error': 'Hubtel not configured'}
+        
+        try:
+            # Format phone number
+            formatted_phone = self._format_phone(phone_number)
+            if not formatted_phone:
+                return {'success': False, 'error': 'Invalid phone number format'}
+            
+            # Clean meter number
+            meter = ''.join(filter(str.isdigit, str(meter_number))).strip()
+            if not meter:
+                return {'success': False, 'error': 'Invalid meter number'}
+            
+            print(f"[Hubtel] Querying Water - Meter: {meter}, Phone: {formatted_phone}")
+            
+            url = f"{self.bill_payment_url}/commissionservices/{self.disbursement_account}/6c1e8a82d2e84feeb8bfd6be2790d71d"
+            params = {
+                'destination': meter,
+                'mobile': formatted_phone
+            }
+            
+            response = requests.get(url, headers=self.headers, params=params, timeout=30)
+            
+            if response.status_code == 200:
+                data = response.json()
+                print(f"[Hubtel] Water Response: {data}")
+                
+                if data.get('ResponseCode') == '0000':
+                    result = {}
+                    for item in data.get('Data', []):
+                        result[item.get('Display')] = item.get('Value')
+                    
+                    return {
+                        'success': True,
+                        'customer_name': result.get('name', ''),
+                        'amount_due': float(result.get('amountDue', 0)),
+                        'session_id': result.get('sessionId', ''),
+                        'raw': data
+                    }
+                else:
+                    return {'success': False, 'error': data.get('Message', 'Water account not found')}
+            else:
+                return {'success': False, 'error': f'HTTP {response.status_code}: {response.text[:100]}'}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    def pay_water(self, meter_number, phone_number, email, session_id, amount, client_reference, callback_url):
+        """Pay Ghana Water bill"""
+        if not self.is_configured():
+            return {'success': False, 'error': 'Hubtel not configured'}
+        
+        try:
+            # Format phone number
+            formatted_phone = self._format_phone(phone_number)
+            if not formatted_phone:
+                return {'success': False, 'error': 'Invalid phone number format'}
+            
+            # Clean meter number
+            meter = ''.join(filter(str.isdigit, str(meter_number))).strip()
+            if not meter:
+                return {'success': False, 'error': 'Invalid meter number'}
+            
+            if not session_id:
+                return {'success': False, 'error': 'Session ID is required for water payment'}
+            
+            print(f"[Hubtel] Paying Water - Meter: {meter}, Phone: {formatted_phone}, Amount: {amount}")
+            
+            url = f"{self.bill_payment_url}/commissionservices/{self.disbursement_account}/6c1e8a82d2e84feeb8bfd6be2790d71d"
+            
+            payload = {
+                'Destination': formatted_phone,
+                'Amount': float(amount),
+                'CallbackUrl': callback_url,
+                'ClientReference': client_reference,
+                'Extradata': {
+                    'bundle': meter,
+                    'Email': email or '',
+                    'SessionId': session_id
+                }
+            }
+            
+            response = requests.post(url, json=payload, headers=self.headers, timeout=60)
+            
+            if response.status_code == 200:
+                data = response.json()
+                response_code = data.get('ResponseCode')
+                if response_code in ['0000', '0001']:
+                    return {
+                        'success': True,
+                        'response_code': response_code,
+                        'message': data.get('Message'),
+                        'client_reference': data.get('Data', {}).get('ClientReference'),
+                        'amount': data.get('Data', {}).get('Amount'),
+                        'transaction_id': data.get('Data', {}).get('TransactionId'),
+                        'commission': data.get('Data', {}).get('Meta', {}).get('Commission')
+                    }
+                else:
+                    return {
+                        'success': False,
+                        'error': data.get('Message', 'Payment failed'),
+                        'response_code': response_code
+                    }
+            return {'success': False, 'error': f'Payment failed: {response.text}'}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    # ========== Balance Methods ==========
+    def get_collection_balance(self):
+        """Get collection account balance"""
+        if not self.is_configured():
+            return {'success': False, 'error': 'Hubtel not configured'}
+        
+        try:
+            url = f"{self.balance_url}/api/inter-transfers/{self.collection_account}"
+            response = requests.get(url, headers=self.headers, timeout=30)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('responseCode') == '0000':
+                    return {
+                        'success': True,
+                        'balance': data.get('data', {}).get('amount', 0),
+                        'account': self.collection_account,
+                        'type': 'collection'
+                    }
+            return {'success': False, 'error': 'Failed to fetch collection balance'}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    def get_disbursement_balance(self):
+        """Get disbursement account balance"""
+        if not self.is_configured():
+            return {'success': False, 'error': 'Hubtel not configured'}
+        
+        try:
+            url = f"{self.balance_url}/api/inter-transfers/prepaid/{self.disbursement_account}"
+            response = requests.get(url, headers=self.headers, timeout=30)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('responseCode') == '0000':
+                    return {
+                        'success': True,
+                        'balance': data.get('data', {}).get('amount', 0),
+                        'account': self.disbursement_account,
+                        'type': 'disbursement'
+                    }
+            return {'success': False, 'error': 'Failed to fetch disbursement balance'}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    # ========== Transaction Status Check ==========
+    def check_transaction_status(self, client_reference=None, transaction_id=None, network_transaction_id=None):
+        """
+        Check transaction status using one of the identifiers
+        Prefer client_reference
+        """
+        if not self.is_configured():
+            return {'success': False, 'error': 'Hubtel not configured'}
+        
+        try:
+            params = {}
+            if client_reference:
+                params['clientReference'] = client_reference
+            elif transaction_id:
+                params['hubtelTransactionId'] = transaction_id
+            elif network_transaction_id:
+                params['networkTransactionId'] = network_transaction_id
+            else:
+                return {'success': False, 'error': 'At least one identifier is required'}
+            
+            url = f"{self.status_check_url}/transactions/{self.collection_account}/status"
+            response = requests.get(url, headers=self.headers, params=params, timeout=30)
             
             if response.status_code == 200:
                 data = response.json()
                 return {
                     'success': True,
-                    'status': data.get('status'),
-                    'amount': data.get('amount'),
-                    'reference': data.get('reference')
+                    'data': data
                 }
-            else:
-                return {'success': False, 'error': f'Status check failed: {response.text}'}
+            return {'success': False, 'error': f'HTTP {response.status_code}'}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    # ========== Refund Method ==========
+    def process_refund(self, order_id, callback_url):
+        """Process refund for a transaction"""
+        if not self.is_configured():
+            return {'success': False, 'error': 'Hubtel not configured'}
+        
+        try:
+            url = f"{self.refund_url}/refund/{self.collection_account}/order/{order_id}"
+            payload = {'callbackUrl': callback_url}
+            
+            response = requests.post(url, json=payload, headers=self.headers, timeout=60)
+            
+            if response.status_code == 200:
+                data = response.json()
+                response_code = data.get('responseCode')
+                
+                if response_code in ['0000', '0001']:
+                    return {
+                        'success': True,
+                        'status': 'pending' if response_code == '0001' else 'completed',
+                        'message': data.get('message'),
+                        'order_id': data.get('data', {}).get('orderId'),
+                        'response_code': response_code
+                    }
+                else:
+                    return {
+                        'success': False,
+                        'error': data.get('message', 'Refund failed'),
+                        'response_code': response_code
+                    }
+            return {'success': False, 'error': f'HTTP {response.status_code}: {response.text}'}
         except Exception as e:
             return {'success': False, 'error': str(e)}
 
-# ========== HUBTEL BILL PAYMENT ENDPOINTS ==========
+# commission_service.py - Updated version
+
+class CommissionService:
+    """Handle commission calculations and distributions for bill payments"""
+    
+    # Commission rates for different services
+    COMMISSION_RATES = {
+        'DSTV': 1.00,
+        'GOTV': 1.00,
+        'STARTIMES': 0.95,
+        'ECG_PREPAID': 1.90,
+        'ECG_POSTPAID': 1.90,
+        'GWCL': 1.95,
+        'WAEC': 8.00
+    }
+    
+    # Split percentages (30% admin, 70% initiator)
+    ADMIN_SHARE = 30.00
+    INITIATOR_SHARE = 70.00
+    
+    def get_commission_rate(self, service_type):
+        """Get Hubtel's commission rate for a service"""
+        return self.COMMISSION_RATES.get(service_type, 1.00)
+    
+    def calculate_commission(self, amount, service_type):
+        """
+        Calculate total commission and split
+        Returns: dict with commission details
+        """
+        hubtel_rate = self.get_commission_rate(service_type)
+        
+        # Total commission from Hubtel
+        total_commission = amount * (hubtel_rate / 100)
+        
+        # Split the commission
+        admin_commission = total_commission * (self.ADMIN_SHARE / 100)
+        initiator_commission = total_commission * (self.INITIATOR_SHARE / 100)
+        
+        return {
+            'service_type': service_type,
+            'amount': amount,
+            'hubtel_rate': hubtel_rate,
+            'total_commission': total_commission,
+            'admin_commission': admin_commission,
+            'initiator_commission': initiator_commission,
+            'admin_percentage': self.ADMIN_SHARE,
+            'initiator_percentage': self.INITIATOR_SHARE
+        }
+    
+    def get_service_type(self, biller_code, is_prepaid=True):
+        """Map biller code to service type"""
+        mapping = {
+            'DSTV': 'DSTV',
+            'GOTV': 'GOTV',
+            'STARTIMES': 'STARTIMES',
+            'ECG': 'ECG_PREPAID' if is_prepaid else 'ECG_POSTPAID',
+            'GWCL': 'GWCL',
+            'WAEC': 'WAEC'
+        }
+        return mapping.get(biller_code, 'DSTV')
+    
+    def get_admin_user(self):
+        """Find the admin user using multiple methods"""
+        from models import User
+        
+        # Try different methods to find admin
+        admin = None
+        
+        # Method 1: Check for is_admin attribute
+        if hasattr(User, 'is_admin'):
+            try:
+                admin = User.query.filter_by(is_admin=True).first()
+                if admin:
+                    return admin
+            except:
+                pass
+        
+        # Method 2: Check for role = 'admin'
+        if hasattr(User, 'role'):
+            try:
+                admin = User.query.filter_by(role='admin').first()
+                if admin:
+                    return admin
+            except:
+                pass
+        
+        # Method 3: Check for user_type = 'admin'
+        if hasattr(User, 'user_type'):
+            try:
+                admin = User.query.filter_by(user_type='admin').first()
+                if admin:
+                    return admin
+            except:
+                pass
+        
+        # Method 4: Get user with ID 1 (first user)
+        admin = User.query.get(1)
+        if admin:
+            return admin
+        
+        # Method 5: Get any user with admin in username
+        admin = User.query.filter(User.username.ilike('%admin%')).first()
+        if admin:
+            return admin
+        
+        # Method 6: Get the first user (assume they're admin)
+        admin = User.query.first()
+        
+        return admin
+    
+    def distribute_commission(self, order_id, commission_data, initiator_id, initiator_type='user'):
+        """
+        Distribute commission to admin and initiator
+        Returns: dict with distribution details
+        """
+        from models import User, db, CommissionTransaction
+        from datetime import datetime
+        
+        # Find admin user
+        admin = self.get_admin_user()
+        
+        # Record commission transaction
+        commission_record = CommissionTransaction(
+            order_id=order_id,
+            transaction_type='bill_payment',
+            amount=commission_data['amount'],
+            hubtel_commission_rate=commission_data['hubtel_rate'],
+            total_commission=commission_data['total_commission'],
+            admin_commission=commission_data['admin_commission'],
+            initiator_commission=commission_data['initiator_commission'],
+            initiator_type=initiator_type,
+            initiator_id=initiator_id,
+            admin_id=admin.id if admin else None,
+            status='completed',
+            created_at=datetime.utcnow()
+        )
+        db.session.add(commission_record)
+        
+        # Credit admin commission
+        if admin and commission_data['admin_commission'] > 0:
+            admin.wallet_balance = (admin.wallet_balance or 0) + commission_data['admin_commission']
+            if hasattr(admin, 'total_commission_earned'):
+                admin.total_commission_earned = (admin.total_commission_earned or 0) + commission_data['admin_commission']
+            print(f"[Commission] Credited Admin ({admin.username}): GHS {commission_data['admin_commission']:.4f}")
+        else:
+            print(f"[Commission] WARNING: Admin commission GHS {commission_data['admin_commission']:.4f} - Admin not found or amount is 0")
+        
+        # Credit initiator commission
+        initiator = User.query.get(initiator_id)
+        if initiator and commission_data['initiator_commission'] > 0:
+            initiator.wallet_balance = (initiator.wallet_balance or 0) + commission_data['initiator_commission']
+            if hasattr(initiator, 'total_commission_earned'):
+                initiator.total_commission_earned = (initiator.total_commission_earned or 0) + commission_data['initiator_commission']
+            print(f"[Commission] Credited {initiator_type} ({initiator.username}): GHS {commission_data['initiator_commission']:.4f}")
+        
+        db.session.commit()
+        
+        return {
+            'admin_credited': float(commission_data['admin_commission']),
+            'initiator_credited': float(commission_data['initiator_commission']),
+            'admin_name': admin.username if admin else 'Admin (Not Found)',
+            'initiator_name': initiator.username if initiator else 'Unknown',
+            'admin_found': admin is not None
+        }
+
+# ========== REFUND ENDPOINT ==========
+
+@app.route('/api/refund/request', methods=['POST'])
+@token_required
+@admin_required
+def request_refund():
+    """Request a refund for a previous transaction"""
+    try:
+        data = request.get_json()
+        order_id = data.get('order_id')  # Hubtel Order ID from original payment
+        reason = data.get('reason', 'Customer request')
+        
+        if not order_id:
+            return jsonify({'success': False, 'error': 'Order ID required'}), 400
+        
+        hubtel = HubtelService()
+        
+        if not hubtel.is_configured():
+            return jsonify({'success': False, 'error': 'Hubtel not configured'}), 503
+        
+        callback_url = f"{os.environ.get('BASE_URL', 'https://roamsmart-backend-production.up.railway.app')}/api/webhooks/refund"
+        
+        result = hubtel.process_refund(order_id, callback_url)
+        
+        if result.get('success'):
+            # Store refund request in database
+            refund = RefundRequest(
+                user_id=g.current_user.id,
+                order_id=result.get('order_id', order_id),
+                reason=reason,
+                status=result.get('status', 'pending'),
+                response_code=result.get('response_code'),
+                created_at=datetime.utcnow()
+            )
+            db.session.add(refund)
+            db.session.commit()
+            
+            return jsonify({
+                'success': True,
+                'message': result.get('message'),
+                'data': {
+                    'order_id': result.get('order_id'),
+                    'status': result.get('status'),
+                    'response_code': result.get('response_code')
+                }
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'error': result.get('error', 'Refund failed')
+            }), 400
+        
+    except Exception as e:
+        print(f"Refund request error: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/refund/status/<order_id>', methods=['GET'])
+@token_required
+@admin_required
+def get_refund_status(order_id):
+    """Get status of a refund request"""
+    try:
+        refund = RefundRequest.query.filter_by(order_id=order_id).first()
+        
+        if not refund:
+            return jsonify({'success': False, 'error': 'Refund request not found'}), 404
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'order_id': refund.order_id,
+                'amount': refund.amount,
+                'charges': refund.charges,
+                'status': refund.status,
+                'reason': refund.reason,
+                'created_at': refund.created_at.isoformat(),
+                'completed_at': refund.completed_at.isoformat() if refund.completed_at else None,
+                'error_message': refund.error_message
+            }
+        })
+        
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+
+# ========== HUBTEL BALANCE ENDPOINT ==========
+@app.route('/api/admin/hubtel-balance', methods=['GET'])
+@token_required
+@admin_required
+def get_hubtel_balance():
+    """
+    GET /api/admin/hubtel-balance
+    Get Hubtel wallet balance (collection + disbursement)
+    """
+    try:
+        hubtel = HubtelService()
+        
+        # Get both balances
+        collection_result = hubtel.get_collection_balance()
+        disbursement_result = hubtel.get_disbursement_balance()
+        
+        # Calculate total balance
+        total_balance = 0
+        collection_balance = 0
+        disbursement_balance = 0
+        
+        if collection_result.get('success'):
+            collection_balance = collection_result.get('balance', 0)
+            total_balance += collection_balance
+        
+        if disbursement_result.get('success'):
+            disbursement_balance = disbursement_result.get('balance', 0)
+            total_balance += disbursement_balance
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'total_balance': total_balance,
+                'collection_balance': collection_balance,
+                'disbursement_balance': disbursement_balance,
+                'collection_account': hubtel.collection_account,
+                'disbursement_account': hubtel.disbursement_account,
+                'currency': 'GHS',
+                'wallet_balance': total_balance,
+                'account_balance': total_balance
+            }
+        })
+        
+    except Exception as e:
+        print(f"Hubtel balance error: {e}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+# ========== BILL COMMISSION STATS ENDPOINT ==========
+@app.route('/api/admin/bill-commission-stats', methods=['GET'])
+@token_required
+@admin_required
+def get_bill_commission_stats():
+    """
+    GET /api/admin/bill-commission-stats
+    Get bill commission statistics
+    """
+    try:
+        from sqlalchemy import func
+        
+        # Get all bill payment transactions with commission
+        # Try CommissionTransaction table first
+        total_commission = 0
+        total_volume = 0
+        total_bills = 0
+        
+        # Check if CommissionTransaction table exists
+        try:
+            commission_query = CommissionTransaction.query.filter_by(
+                transaction_type='bill_payment',
+                status='completed'
+            )
+            
+            total_commission = commission_query.with_entities(
+                func.sum(CommissionTransaction.initiator_commission)
+            ).scalar() or 0
+            
+            total_volume = commission_query.with_entities(
+                func.sum(CommissionTransaction.amount)
+            ).scalar() or 0
+            
+            total_bills = commission_query.count()
+        except:
+            # Fallback to Order table
+            bill_orders = Order.query.filter(
+                Order.type == 'bill_payment',
+                Order.status == 'completed'
+            )
+            
+            total_commission = bill_orders.with_entities(
+                func.sum(Order.initiator_commission)
+            ).scalar() or 0
+            
+            total_volume = bill_orders.with_entities(
+                func.sum(Order.amount)
+            ).scalar() or 0
+            
+            total_bills = bill_orders.count()
+        
+        # Monthly commission
+        month_start = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        
+        try:
+            monthly_commission = CommissionTransaction.query.filter(
+                CommissionTransaction.transaction_type == 'bill_payment',
+                CommissionTransaction.status == 'completed',
+                CommissionTransaction.created_at >= month_start
+            ).with_entities(
+                func.sum(CommissionTransaction.initiator_commission)
+            ).scalar() or 0
+        except:
+            monthly_commission = Order.query.filter(
+                Order.type == 'bill_payment',
+                Order.status == 'completed',
+                Order.created_at >= month_start
+            ).with_entities(
+                func.sum(Order.initiator_commission)
+            ).scalar() or 0
+        
+        # Pending commission (from Order table where status is pending)
+        pending_commission = Order.query.filter(
+            Order.type == 'bill_payment',
+            Order.status == 'pending'
+        ).with_entities(
+            func.sum(Order.initiator_commission)
+        ).scalar() or 0
+        
+        # Commission by biller
+        biller_commissions = {}
+        biller_data = db.session.query(
+            Order.biller_name,
+            func.count(Order.id).label('count'),
+            func.sum(Order.initiator_commission).label('commission')
+        ).filter(
+            Order.type == 'bill_payment',
+            Order.status == 'completed',
+            Order.initiator_commission > 0
+        ).group_by(Order.biller_name).all()
+        
+        for row in biller_data:
+            if row.biller_name:
+                biller_commissions[row.biller_name] = {
+                    'count': row.count or 0,
+                    'commission': float(row.commission or 0)
+                }
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'total_bill_commission': float(total_commission),
+                'total_bill_volume': float(total_volume),
+                'total_bills_paid': total_bills,
+                'commission_by_biller': biller_commissions,
+                'monthly_commission': float(monthly_commission),
+                'pending_commission': float(pending_commission)
+            }
+        })
+        
+    except Exception as e:
+        print(f"Bill commission stats error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@app.route('/api/admin/failed-bill-payments', methods=['GET'])
+@token_required
+@admin_required
+def get_failed_bill_payments():
+    """
+    GET /api/admin/failed-bill-payments
+    Get list of failed bill payments with pagination
+    """
+    try:
+        page = request.args.get('page', 1, type=int)
+        limit = request.args.get('limit', 20, type=int)
+        
+        # Get failed bill payments from Order table
+        query = Order.query.filter(
+            Order.type == 'bill_payment',
+            Order.status == 'failed'
+        ).order_by(Order.created_at.desc())
+        
+        # Get total count for summary
+        total_failed = query.count()
+        
+        # Get total amount of failed payments
+        total_amount = db.session.query(db.func.sum(Order.amount)).filter(
+            Order.type == 'bill_payment',
+            Order.status == 'failed'
+        ).scalar() or 0
+        
+        # Paginate
+        paginated = query.paginate(page=page, per_page=limit, error_out=False)
+        
+        # Build response data
+        failed_bills = []
+        for order in paginated.items:
+            user = User.query.get(order.user_id) if order.user_id else None
+            
+            # Get error message
+            error_msg = order.last_delivery_error or 'Unknown error'
+            
+            failed_bills.append({
+                'id': order.id,
+                'order_id': order.order_id,
+                'biller_code': order.biller_code,
+                'biller_name': order.biller_name or 'Unknown',
+                'account_number': order.account_number,
+                'amount': float(order.amount or 0),
+                'customer_name': order.customer_name or (user.username if user else 'Unknown'),
+                'customer_phone': order.phone_number or (user.phone if user else 'N/A'),
+                'error_message': error_msg,
+                'status': order.status,
+                'delivery_status': order.delivery_status,
+                'created_at': order.created_at.isoformat() if order.created_at else None,
+                'initiator_commission': float(order.initiator_commission or 0),
+                'user_id': order.user_id,
+                'username': user.username if user else 'Unknown',
+                'provider_reference': order.provider_reference,
+                'provider_order_id': order.provider_order_id,
+                'resolved_at': order.resolved_at.isoformat() if order.resolved_at else None,
+                'resolution_note': order.resolution_note
+            })
+        
+        # Count pending resolution (not resolved)
+        pending_resolution = Order.query.filter(
+            Order.type == 'bill_payment',
+            Order.status == 'failed',
+            Order.resolved_at.is_(None)
+        ).count()
+        
+        return jsonify({
+            'success': True,
+            'data': failed_bills,
+            'summary': {
+                'total_failed': total_failed,
+                'total_amount': float(total_amount),
+                'pending_resolution': pending_resolution
+            },
+            'pagination': {
+                'page': page,
+                'total': paginated.total,
+                'pages': paginated.pages,
+                'has_prev': paginated.has_prev,
+                'has_next': paginated.has_next
+            }
+        })
+        
+    except Exception as e:
+        print(f"Failed bill payments error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+# ========== RESOLVE FAILED BILL PAYMENT ENDPOINT ==========
+@app.route('/api/admin/resolve-failed-bill/<int:bill_id>', methods=['POST'])
+@token_required
+@admin_required
+def resolve_failed_bill(bill_id):
+    """
+    POST /api/admin/resolve-failed-bill/:id
+    Retry or refund a failed bill payment
+    Body: { "action": "retry" | "refund" }
+    """
+    try:
+        data = request.get_json()
+        action = data.get('action')
+        
+        if action not in ['retry', 'refund']:
+            return jsonify({
+                'success': False,
+                'error': 'Invalid action. Use "retry" or "refund"'
+            }), 400
+        
+        # Get the failed bill
+        order = Order.query.get(bill_id)
+        if not order:
+            return jsonify({'success': False, 'error': 'Bill payment not found'}), 404
+        
+        if order.type != 'bill_payment':
+            return jsonify({'success': False, 'error': 'Not a bill payment'}), 400
+        
+        if order.status != 'failed':
+            return jsonify({'success': False, 'error': 'Bill payment is not failed'}), 400
+        
+        if action == 'retry':
+            return retry_bill_payment(order)
+        else:
+            return refund_bill_payment(order)
+            
+    except Exception as e:
+        print(f"Resolve failed bill error: {e}")
+        import traceback
+        traceback.print_exc()
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+def retry_bill_payment(order):
+    """
+    Retry a failed bill payment
+    """
+    try:
+        # Re-initialize Hubtel service
+        hubtel = HubtelService()
+        commission_service = CommissionService()
+        
+        # Get the biller code and details
+        biller_code = order.biller_code
+        account_number = order.account_number
+        amount = order.amount
+        
+        # Generate new client reference
+        import uuid
+        client_reference = f"RETRY-{uuid.uuid4().hex[:12].upper()}"
+        callback_url = f"{os.environ.get('BASE_URL', 'https://roamsmart-backend-production.up.railway.app')}/api/webhooks/hubtel"
+        
+        # Process payment based on biller type
+        payment_result = None
+        
+        try:
+            if biller_code == 'DSTV':
+                payment_result = hubtel.pay_dstv(account_number, amount, client_reference, callback_url)
+            elif biller_code == 'GOTV':
+                payment_result = hubtel.pay_gotv(account_number, amount, client_reference, callback_url)
+            elif biller_code == 'STARTIMES':
+                payment_result = hubtel.pay_startimes(account_number, amount, client_reference, callback_url)
+            elif biller_code == 'ECG':
+                meter_number = getattr(order, 'meter_number', account_number)
+                phone = order.customer_phone or '0557388622'
+                payment_result = hubtel.pay_ecg(phone, meter_number, amount, client_reference, callback_url)
+            elif biller_code == 'GWCL':
+                meter_number = getattr(order, 'meter_number', account_number)
+                phone = order.customer_phone or '0557388622'
+                session_id = getattr(order, 'session_id', '')
+                email = getattr(order, 'customer_email', '')
+                payment_result = hubtel.pay_water(meter_number, phone, email, session_id, amount, client_reference, callback_url)
+            else:
+                return jsonify({
+                    'success': False,
+                    'error': f'Unsupported biller: {biller_code}'
+                }), 400
+                
+        except Exception as hubtel_error:
+            print(f"Hubtel retry error: {hubtel_error}")
+            return jsonify({
+                'success': False,
+                'error': f'Hubtel payment failed: {str(hubtel_error)}'
+            }), 400
+        
+        if not payment_result or not payment_result.get('success'):
+            error_msg = payment_result.get('error', 'Payment failed') if payment_result else 'Unknown error'
+            
+            # Update order with new error
+            order.error_message = error_msg
+            order.retry_count = (getattr(order, 'retry_count', 0) or 0) + 1
+            order.last_retry_at = datetime.utcnow()
+            db.session.commit()
+            
+            return jsonify({
+                'success': False,
+                'error': error_msg
+            }), 400
+        
+        # Payment successful - update order
+        order.status = 'completed'
+        order.payment_reference = client_reference
+        order.provider_reference = payment_result.get('client_reference')
+        order.provider_order_id = payment_result.get('transaction_id')
+        order.completed_at = datetime.utcnow()
+        order.retry_count = (getattr(order, 'retry_count', 0) or 0) + 1
+        order.last_retry_at = datetime.utcnow()
+        order.error_message = None
+        
+        # Calculate and distribute commission
+        service_type = commission_service.get_service_type(biller_code)
+        commission = commission_service.calculate_commission(amount, service_type)
+        
+        order.hubtel_commission_rate = commission['hubtel_rate']
+        order.total_commission = commission['total_commission']
+        order.admin_commission = commission['admin_commission']
+        order.initiator_commission = commission['initiator_commission']
+        
+        db.session.commit()
+        
+        # Distribute commission
+        commission_service.distribute_commission(
+            order_id=order.order_id,
+            commission_data=commission,
+            initiator_id=order.user_id,
+            initiator_type='user'
+        )
+        
+        return jsonify({
+            'success': True,
+            'message': 'Bill payment retried successfully!',
+            'data': {
+                'order_id': order.order_id,
+                'status': order.status,
+                'reference': client_reference,
+                'amount': amount,
+                'biller_name': order.biller_name
+            }
+        })
+        
+    except Exception as e:
+        print(f"Retry bill error: {e}")
+        import traceback
+        traceback.print_exc()
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+def refund_bill_payment(order):
+    """
+    Refund a failed bill payment (credit user's wallet)
+    """
+    try:
+        # Get user
+        user = User.query.get(order.user_id)
+        if not user:
+            return jsonify({'success': False, 'error': 'User not found'}), 404
+        
+        # Calculate refund amount (full amount)
+        refund_amount = order.amount
+        
+        # Check if already refunded
+        if hasattr(order, 'refunded_at') and order.refunded_at:
+            return jsonify({
+                'success': False,
+                'error': 'Bill payment already refunded'
+            }), 400
+        
+        # Credit user's wallet
+        balance_before = user.wallet_balance or 0
+        user.wallet_balance = balance_before + refund_amount
+        
+        # Update order
+        order.status = 'refunded'
+        order.refunded_at = datetime.utcnow()
+        order.refund_amount = refund_amount
+        order.error_message = f"Refunded by admin: {refund_amount} GHS credited to wallet"
+        
+        # Create transaction record
+        transaction = Transaction(
+            user_id=user.id,
+            type='refund',
+            amount=refund_amount,
+            balance_before=balance_before,
+            balance_after=user.wallet_balance,
+            description=f'Refund for failed bill payment: {order.order_id}',
+            reference=f'REFUND-{order.order_id}',
+            status='completed',
+            created_at=datetime.utcnow()
+        )
+        db.session.add(transaction)
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': f'Refund of ₵{refund_amount:.2f} processed successfully!',
+            'data': {
+                'order_id': order.order_id,
+                'amount': refund_amount,
+                'new_balance': user.wallet_balance,
+                'status': order.status
+            }
+        })
+        
+    except Exception as e:
+        print(f"Refund bill error: {e}")
+        import traceback
+        traceback.print_exc()
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ========== HUBTEL COLLECTION BALANCE ENDPOINT ==========
+@app.route('/api/hubtel/collection-balance', methods=['GET'])
+@token_required
+@admin_required
+def get_hubtel_collection_balance():
+    """Get Hubtel collection account balance"""
+    try:
+        hubtel = HubtelService()
+        result = hubtel.get_collection_balance()
+        
+        if result.get('success'):
+            return jsonify({
+                'success': True,
+                'data': {
+                    'balance': result.get('balance'),
+                    'account': result.get('account'),
+                    'type': result.get('type')
+                }
+            })
+        else:
+            return jsonify({'success': False, 'error': result.get('error')}), 500
+    except Exception as e:
+        print(f"Hubtel collection balance error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ========== REFUND WEBHOOK ENDPOINT ==========
+@app.route('/api/webhooks/refund', methods=['POST'])
+def refund_webhook():
+    """Handle Hubtel refund webhook notifications"""
+    try:
+        data = request.get_json()
+        print(f"[Refund Webhook] Received: {data}")
+        
+        response_code = data.get('responseCode')
+        message = data.get('message')
+        refund_data = data.get('data', {})
+        order_id = refund_data.get('orderId')
+        amount = refund_data.get('amount', 0)
+        charges = refund_data.get('charges', 0)
+        external_transaction_id = refund_data.get('externalTransactionId')
+        
+        if order_id:
+            refund = RefundRequest.query.filter_by(order_id=order_id).first()
+            if refund:
+                if response_code == '0000':
+                    refund.status = 'completed'
+                    refund.completed_at = datetime.utcnow()
+                    refund.amount = amount
+                    refund.charges = charges
+                    refund.external_transaction_id = external_transaction_id
+                elif response_code == '3000':
+                    refund.status = 'not_found'
+                    refund.error_message = message
+                elif response_code == '4000':
+                    refund.status = 'failed'
+                    refund.error_message = 'Amount less than 1 cedi'
+                elif response_code == '4509':
+                    refund.status = 'not_eligible'
+                    refund.error_message = 'Order not eligible for refund'
+                elif response_code == '4515':
+                    refund.status = 'processing'
+                    refund.error_message = 'Refund already being processed'
+                else:
+                    refund.status = 'failed'
+                    refund.error_message = message
+                
+                db.session.commit()
+        
+        return jsonify({'success': True}), 200
+        
+    except Exception as e:
+        print(f"[Refund Webhook Error] {e}")
+        return jsonify({'success': False, 'error': str(e)}), 200
+
+@app.route('/api/hubtel/disbursement-balance', methods=['GET'])
+@token_required
+@admin_required
+def get_hubtel_disbursement_balance():
+    """Get Hubtel disbursement account balance"""
+    try:
+        hubtel = HubtelService()
+        result = hubtel.get_disbursement_balance()
+        
+        if result.get('success'):
+            return jsonify({
+                'success': True,
+                'data': {
+                    'balance': result.get('balance'),
+                    'account': result.get('account'),
+                    'type': result.get('type')
+                }
+            })
+        else:
+            return jsonify({'success': False, 'error': result.get('error')}), 500
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+# ========== HUBTEL BILL PAYMENT ENDPOINTS (UPDATED) ==========
+
+# app.py - Bill Validation Endpoint
+
+@app.route('/api/bills/validate', methods=['POST'])
+@token_required
+def validate_bill():
+    """Validate bill account with Hubtel API"""
+    try:
+        data = request.get_json()
+        biller_code = data.get('biller_code')
+        account_number = data.get('account_number')
+        phone_number = data.get('phone_number')
+        meter_number = data.get('meter_number')
+        
+        if not biller_code or not account_number:
+            return jsonify({'success': False, 'error': 'Biller code and account number required'}), 400
+        
+        hubtel = HubtelService()
+        result = None
+        
+        if biller_code == 'DSTV':
+            result = hubtel.query_dstv(account_number)
+            if result and result.get('success'):
+                return jsonify({
+                    'success': True,
+                    'data': {
+                        'customer_name': result.get('data', {}).get('name'),
+                        'account_number': account_number,
+                        'biller_name': 'DSTV',
+                        'amount_due': abs(float(result.get('data', {}).get('amountDue', 0)))
+                    }
+                })
+        
+        elif biller_code == 'GOTV':
+            result = hubtel.query_gotv(account_number)
+            if result and result.get('success'):
+                return jsonify({
+                    'success': True,
+                    'data': {
+                        'customer_name': result.get('data', {}).get('name'),
+                        'account_number': account_number,
+                        'biller_name': 'GoTV',
+                        'amount_due': abs(float(result.get('data', {}).get('amountDue', 0)))
+                    }
+                })
+        
+        elif biller_code == 'STARTIMES':
+            result = hubtel.query_startimes(account_number)
+            if result and result.get('success'):
+                return jsonify({
+                    'success': True,
+                    'data': {
+                        'customer_name': result.get('data', {}).get('Name'),
+                        'account_number': account_number,
+                        'bouquet': result.get('data', {}).get('Bouquet'),
+                        'biller_name': 'StarTimes',
+                        'amount_due': 0
+                    }
+                })
+        
+        elif biller_code == 'ECG':
+            if not phone_number:
+                return jsonify({'success': False, 'error': 'Phone number required for ECG'}), 400
+            result = hubtel.query_ecg_meters(phone_number)
+            if result and result.get('success'):
+                meters = result.get('meters', [])
+                return jsonify({
+                    'success': True,
+                    'data': {
+                        'meters': meters,
+                        'biller_name': 'ECG Electricity',
+                        'message': f'Found {len(meters)} meter(s) linked to this phone number'
+                    }
+                })
+        
+        elif biller_code == 'GWCL':
+            if not phone_number or not meter_number:
+                return jsonify({'success': False, 'error': 'Meter number and phone number required for Ghana Water'}), 400
+            result = hubtel.query_water(meter_number, phone_number)
+            if result and result.get('success'):
+                amount_due = abs(float(result.get('amount_due', 0)))
+                return jsonify({
+                    'success': True,
+                    'data': {
+                        'customer_name': result.get('customer_name'),
+                        'amount_due': amount_due,
+                        'session_id': result.get('session_id'),
+                        'account_number': meter_number,
+                        'biller_name': 'Ghana Water'
+                    }
+                })
+        
+        else:
+            return jsonify({'success': False, 'error': f'Unsupported biller: {biller_code}'}), 400
+        
+        error_msg = result.get('error', 'Account validation failed') if result else 'Unknown error'
+        return jsonify({'success': False, 'error': error_msg}), 400
+        
+    except Exception as e:
+        print(f"Bill validation error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+
+# ========== RECURRING BILLS ENDPOINTS ==========
+
+# ============================================================
+# BILL PAYMENT ENDPOINTS - AFDALNOVA with Platform Support
+# ============================================================
 
 @app.route('/api/user/bills/history', methods=['GET'])
 @token_required
 def get_user_bill_history():
-    """Get user's bill payment history"""
+    """Get user's bill payment history - AFDALNOVA"""
     try:
+        # Get platform info
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        primary_color = platform_config.get('primary_color', '#1A2A6C')
+        
         page = request.args.get('page', 1, type=int)
         per_page = request.args.get('limit', 20, type=int)
         
         bills = Order.query.filter_by(
             user_id=g.current_user.id,
-            type='bill_payment'
+            type='bill_payment',
+            platform=platform
         ).order_by(Order.created_at.desc()).paginate(
             page=page, per_page=per_page, error_out=False
         )
@@ -4386,32 +6667,62 @@ def get_user_bill_history():
                 'amount': float(b.amount),
                 'status': b.status,
                 'reference': b.provider_reference,
-                'created_at': b.created_at.isoformat()
+                'created_at': b.created_at.isoformat(),
+                'platform': platform_name
             } for b in bills.items],
             'total': bills.total,
             'page': page,
-            'total_pages': bills.pages
+            'total_pages': bills.pages,
+            'platform': platform,
+            'platform_name': platform_name,
+            'branding': {
+                'name': platform_config.get('brand_name', platform_name),
+                'primary_color': primary_color,
+                'secondary_color': platform_config.get('secondary_color', '#C9A84C')
+            }
         })
         
     except Exception as e:
-        print(f"Error fetching bill history: {e}")
+        print(f"[BILL HISTORY ERROR] {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
 @app.route('/api/bills/validate', methods=['POST'])
 @token_required
 def validate_bill_account():
-    """Validate bill account with Hubtel API"""
+    """Validate bill account with Hubtel API - AFDALNOVA"""
     try:
+        # Get platform info
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        primary_color = platform_config.get('primary_color', '#1A2A6C')
+        
         data = request.get_json()
         biller_code = data.get('biller_code')
         account_number = data.get('account_number')
         
+        print(f"[BILL VALIDATE] User: {g.current_user.username}")
+        print(f"[BILL VALIDATE] Biller: {biller_code}")
+        print(f"[BILL VALIDATE] Account: {account_number}")
+        print(f"[BILL VALIDATE] Platform: {platform_name}")
+        
         if not biller_code or not account_number:
             return jsonify({'success': False, 'error': 'Biller code and account number required'}), 400
         
+        # Map biller codes to Hubtel codes if needed
+        biller_mapping = {
+            'ECG': 'ECG',
+            'GWCL': 'GWCL',
+            'DSTV': 'DSTV',
+            'GOTV': 'GOTV',
+            'STARTIMES': 'STARTIMES'
+        }
+        
+        hubtel_biller_code = biller_mapping.get(biller_code, biller_code)
+        
         hubtel = HubtelService()
-        result = hubtel.validate_bill_account(biller_code, account_number)
+        result = hubtel.validate_bill_account(hubtel_biller_code, account_number)
         
         if result.get('success'):
             return jsonify({
@@ -4421,107 +6732,327 @@ def validate_bill_account():
                     'customer_phone': result.get('customer_phone'),
                     'customer_email': result.get('customer_email'),
                     'biller_name': result.get('biller_name'),
+                    'biller_code': biller_code,
                     'amount_due': result.get('amount_due'),
-                    'minimum_amount': result.get('minimum_amount')
+                    'minimum_amount': result.get('minimum_amount'),
+                    'platform': platform,
+                    'platform_name': platform_name
                 }
             })
         else:
             return jsonify({
                 'success': False,
-                'error': result.get('error', 'Account validation failed')
+                'error': result.get('error', 'Account validation failed'),
+                'platform': platform,
+                'platform_name': platform_name
             }), 400
         
     except Exception as e:
-        print(f"Bill validation error: {e}")
+        print(f"[BILL VALIDATE ERROR] {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
+
+
+# ============================================================
+# BILL INQUIRY - COMBINED VERSION
+# ============================================================
 @app.route('/api/bills/inquiry', methods=['POST'])
 @token_required
 def bill_inquiry():
-    """Get bill amount due from Hubtel"""
+    """Get bill amount due from Hubtel - Supports all billers"""
     try:
+        # Get platform info
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        
         data = request.get_json()
         biller_code = data.get('biller_code')
         account_number = data.get('account_number')
+        phone_number = data.get('phone_number')
+        meter_number = data.get('meter_number')
+        
+        print(f"[BILL INQUIRY] User: {g.current_user.username}")
+        print(f"[BILL INQUIRY] Biller: {biller_code}")
+        print(f"[BILL INQUIRY] Account: {account_number}")
+        print(f"[BILL INQUIRY] Platform: {platform_name}")
         
         if not biller_code or not account_number:
-            return jsonify({'success': False, 'error': 'Biller code and account number required'}), 400
+            return jsonify({
+                'success': False, 
+                'error': 'Biller code and account number required',
+                'platform': platform,
+                'platform_name': platform_name
+            }), 400
         
         hubtel = HubtelService()
-        result = hubtel.get_bill_amount(biller_code, account_number)
+        result = None
+        amount_due = 0
+        customer_name = None
         
-        if result.get('success'):
+        # Route to appropriate inquiry based on biller
+        if biller_code == 'DSTV':
+            result = hubtel.query_dstv(account_number)
+            if result.get('success'):
+                amount_due = float(result.get('data', {}).get('amountDue', 0))
+                customer_name = result.get('data', {}).get('name')
+        
+        elif biller_code == 'GOTV':
+            result = hubtel.query_gotv(account_number)
+            if result.get('success'):
+                amount_due = float(result.get('data', {}).get('amountDue', 0))
+                customer_name = result.get('data', {}).get('name')
+        
+        elif biller_code == 'ECG':
+            if not phone_number:
+                return jsonify({
+                    'success': False, 
+                    'error': 'Phone number required for ECG',
+                    'platform': platform,
+                    'platform_name': platform_name
+                }), 400
+            result = hubtel.query_ecg_meters(phone_number)
+            if result.get('success'):
+                meters = result.get('meters', [])
+                if meters:
+                    amount_due = float(meters[0].get('amount_due', 0))
+                    customer_name = meters[0].get('customer_name')
+        
+        elif biller_code == 'GWCL':
+            if not meter_number or not phone_number:
+                return jsonify({
+                    'success': False, 
+                    'error': 'Meter number and phone required for Water',
+                    'platform': platform,
+                    'platform_name': platform_name
+                }), 400
+            result = hubtel.query_water(meter_number, phone_number)
+            if result.get('success'):
+                amount_due = float(result.get('amount_due', 0))
+                customer_name = result.get('data', {}).get('name')
+        
+        else:
+            # Fallback to generic inquiry
+            result = hubtel.get_bill_amount(biller_code, account_number)
+            if result.get('success'):
+                amount_due = result.get('amount', 0)
+                customer_name = result.get('customer_name')
+        
+        if result and result.get('success'):
             return jsonify({
                 'success': True,
                 'data': {
-                    'amount': result.get('amount'),
-                    'due_date': result.get('due_date'),
-                    'reference': result.get('reference')
+                    'amount': amount_due,
+                    'customer_name': customer_name,
+                    'account_number': account_number,
+                    'biller_code': biller_code,
+                    'platform': platform,
+                    'platform_name': platform_name
                 }
             })
         else:
+            error_msg = result.get('error', 'Could not fetch bill amount') if result else 'Unknown error'
             return jsonify({
-                'success': False,
-                'error': result.get('error', 'Could not fetch bill amount')
+                'success': False, 
+                'error': error_msg,
+                'platform': platform,
+                'platform_name': platform_name
             }), 400
         
     except Exception as e:
-        print(f"Bill inquiry error: {e}")
+        print(f"[BILL INQUIRY ERROR] {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
+# ============================================================
+# BILL PAYMENT - COMBINED VERSION (WITH COMMISSION)
+# ============================================================
 @app.route('/api/bills/pay', methods=['POST'])
 @token_required
 def pay_bill():
-    """Process bill payment via Hubtel"""
+    """Process bill payment via Hubtel - With commission distribution"""
     try:
         import uuid
+        from datetime import datetime
+        
+        # Get platform info
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        primary_color = platform_config.get('primary_color', '#1A2A6C')
+        support_phone = platform_config.get('support_phone', '0548247241')
+        support_email = platform_config.get('support_email', 'support@abigalisticstudious.com')
+        website_url = platform_config.get('base_url', 'https://abigalisticstudious.com')
+        
         data = request.get_json()
         biller_code = data.get('biller_code')
         account_number = data.get('account_number')
         amount = data.get('amount')
-        customer_name = data.get('customer_name')
+        customer_name = data.get('customer_name', g.current_user.username)
         customer_phone = data.get('customer_phone')
-        customer_email = data.get('customer_email')
+        customer_email = data.get('customer_email', g.current_user.email)
+        meter_number = data.get('meter_number')
+        session_id = data.get('session_id')
         
-        if not all([biller_code, account_number, amount, customer_name, customer_phone]):
-            return jsonify({'success': False, 'error': 'Missing required fields'}), 400
+        print(f"[BILL PAY] User: {g.current_user.username}")
+        print(f"[BILL PAY] Biller: {biller_code}")
+        print(f"[BILL PAY] Account: {account_number}")
+        print(f"[BILL PAY] Amount: {amount}")
+        print(f"[BILL PAY] Platform: {platform_name}")
+        
+        # Validate required fields
+        missing_fields = []
+        if not biller_code:
+            missing_fields.append('biller_code')
+        if not account_number:
+            missing_fields.append('account_number')
+        if not amount:
+            missing_fields.append('amount')
+        
+        if missing_fields:
+            return jsonify({
+                'success': False, 
+                'error': f'Missing required fields: {", ".join(missing_fields)}',
+                'platform': platform,
+                'platform_name': platform_name
+            }), 400
         
         amount = float(amount)
         
+        # Use user's phone as fallback
+        if not customer_phone:
+            customer_phone = g.current_user.phone or '0557388622'
+            print(f"⚠️ customer_phone not provided, using user's phone: {customer_phone}")
+        
+        # For ECG, require meter_number
+        if biller_code == 'ECG' and not meter_number:
+            meter_number = account_number
+            if not meter_number:
+                return jsonify({
+                    'success': False, 
+                    'error': 'Meter number required for ECG. Please select a meter.',
+                    'platform': platform,
+                    'platform_name': platform_name
+                }), 400
+        
+        # For GWCL, require meter_number and session_id
+        if biller_code == 'GWCL':
+            if not meter_number:
+                meter_number = account_number
+            if not session_id:
+                return jsonify({
+                    'success': False, 
+                    'error': 'Session ID required for Water bill. Please validate first.',
+                    'platform': platform,
+                    'platform_name': platform_name
+                }), 400
+        
         # Check wallet balance
-        if g.current_user.wallet_balance < amount:
-            return jsonify({
-                'success': False,
-                'error': f'Insufficient balance. Need GHS {amount:.2f}. Your balance: GHS {g.current_user.wallet_balance:.2f}'
-            }), 400
-        
-        # Call Hubtel to process payment
-        hubtel = HubtelService()
-        payment_result = hubtel.pay_bill(
-            biller_code=biller_code,
-            account_number=account_number,
-            amount=amount,
-            customer_name=customer_name,
-            customer_phone=customer_phone,
-            customer_email=customer_email
-        )
-        
-        if not payment_result.get('success'):
-            return jsonify({
-                'success': False,
-                'error': payment_result.get('error', 'Payment failed')
-            }), 400
-        
-        # Deduct from wallet
         balance_before = g.current_user.wallet_balance
+        if balance_before < amount:
+            return jsonify({
+                'success': False,
+                'error': f'Insufficient balance on {platform_name}. Need GHS {amount:.2f}. Your balance: GHS {balance_before:.2f}',
+                'platform': platform,
+                'platform_name': platform_name
+            }), 400
+        
+        # Calculate commission
+        commission_service = CommissionService()
+        service_type = commission_service.get_service_type(biller_code)
+        commission = commission_service.calculate_commission(amount, service_type)
+        
+        print(f"\n{'='*50}")
+        print(f"💰 BILL PAYMENT WITH COMMISSION")
+        print(f"{'='*50}")
+        print(f"User: {g.current_user.username} (ID: {g.current_user.id})")
+        print(f"Customer: {customer_name} ({customer_phone})")
+        print(f"Service: {service_type}")
+        print(f"Amount: GHS {amount}")
+        print(f"Hubtel Commission Rate: {commission['hubtel_rate']}%")
+        print(f"Total Commission: GHS {commission['total_commission']:.4f}")
+        print(f"Admin gets: GHS {commission['admin_commission']:.4f} (30%)")
+        print(f"User gets: GHS {commission['initiator_commission']:.4f} (70%)")
+        print(f"Platform: {platform_name}")
+        
+        # Process payment via Hubtel
+        hubtel = HubtelService()
+        callback_url = f"{os.environ.get('BASE_URL', 'https://abigalisticstudious.com')}/api/webhooks/hubtel"
+        client_reference = f"USER-{uuid.uuid4().hex[:12].upper()}"
+        
+        payment_result = None
+        
+        try:
+            if biller_code == 'DSTV':
+                payment_result = hubtel.pay_dstv(account_number, amount, client_reference, callback_url)
+            elif biller_code == 'GOTV':
+                payment_result = hubtel.pay_gotv(account_number, amount, client_reference, callback_url)
+            elif biller_code == 'STARTIMES':
+                payment_result = hubtel.pay_startimes(account_number, amount, client_reference, callback_url)
+            elif biller_code == 'ECG':
+                if not meter_number:
+                    return jsonify({
+                        'success': False, 
+                        'error': 'Meter number required for ECG',
+                        'platform': platform,
+                        'platform_name': platform_name
+                    }), 400
+                payment_result = hubtel.pay_ecg(customer_phone, meter_number, amount, client_reference, callback_url)
+            elif biller_code == 'GWCL':
+                if not meter_number or not session_id:
+                    return jsonify({
+                        'success': False, 
+                        'error': 'Meter number and session ID required for Water',
+                        'platform': platform,
+                        'platform_name': platform_name
+                    }), 400
+                payment_result = hubtel.pay_water(meter_number, customer_phone, customer_email, session_id, amount, client_reference, callback_url)
+            else:
+                return jsonify({
+                    'success': False, 
+                    'error': f'Unsupported biller: {biller_code}',
+                    'platform': platform,
+                    'platform_name': platform_name
+                }), 400
+        except Exception as hubtel_error:
+            print(f"❌ Hubtel payment error: {hubtel_error}")
+            return jsonify({
+                'success': False, 
+                'error': f'Hubtel payment failed: {str(hubtel_error)}',
+                'platform': platform,
+                'platform_name': platform_name
+            }), 400
+        
+        if not payment_result or not payment_result.get('success'):
+            error_msg = payment_result.get('error', 'Payment failed') if payment_result else 'Unknown error'
+            return jsonify({
+                'success': False, 
+                'error': error_msg,
+                'platform': platform,
+                'platform_name': platform_name
+            }), 400
+        
+        # Determine status based on response code
+        response_code = payment_result.get('response_code')
+        if response_code == '0000':
+            status = 'completed'
+        elif response_code == '0001':
+            status = 'pending'
+        else:
+            status = 'failed'
+        
+        # Deduct from user wallet
         g.current_user.wallet_balance -= amount
+        balance_after = g.current_user.wallet_balance
         
         # Generate order ID
         order_id = f"BILL-{uuid.uuid4().hex[:8].upper()}"
         
-        # Map biller codes to names
         biller_names = {
             'ECG': 'ECG Electricity',
             'GWCL': 'Ghana Water',
@@ -4541,12 +7072,20 @@ def pay_bill():
             customer_name=customer_name,
             phone_number=customer_phone,
             amount=amount,
-            status='completed',
+            status=status,
             payment_method='wallet',
             provider='hubtel',
-            provider_reference=payment_result.get('reference'),
+            provider_reference=payment_result.get('client_reference'),
             provider_order_id=payment_result.get('transaction_id'),
-            completed_at=datetime.utcnow(),
+            hubtel_commission_rate=commission['hubtel_rate'],
+            total_commission=commission['total_commission'],
+            admin_commission=commission['admin_commission'],
+            initiator_commission=commission['initiator_commission'],
+            initiator_type='user',
+            initiator_id=g.current_user.id,
+            platform=platform,
+            platform_created=platform,
+            completed_at=datetime.utcnow() if status == 'completed' else None,
             created_at=datetime.utcnow()
         )
         db.session.add(order)
@@ -4557,68 +7096,430 @@ def pay_bill():
             type='bill_payment',
             amount=amount,
             balance_before=balance_before,
-            balance_after=g.current_user.wallet_balance,
-            description=f'Bill payment: {biller_names.get(biller_code, biller_code)} - {account_number}',
+            balance_after=balance_after,
+            description=f'Bill payment: {biller_names.get(biller_code, biller_code)} - {account_number} on {platform_name}',
             reference=order_id,
-            status='completed'
+            status=status,
+            platform=platform,
+            meta_data={
+                'biller_code': biller_code,
+                'biller_name': biller_names.get(biller_code, biller_code),
+                'account_number': account_number,
+                'meter_number': meter_number,
+                'customer_name': customer_name,
+                'customer_phone': customer_phone,
+                'response_code': response_code,
+                'commission': {
+                    'hubtel_rate': commission['hubtel_rate'],
+                    'total': commission['total_commission'],
+                    'admin': commission['admin_commission'],
+                    'user_earned': commission['initiator_commission'],
+                    'admin_percentage': commission['admin_percentage'],
+                    'user_percentage': commission['initiator_percentage']
+                },
+                'hubtel_reference': payment_result.get('client_reference'),
+                'hubtel_order_id': payment_result.get('transaction_id')
+            }
         )
         db.session.add(transaction)
         
         db.session.commit()
         
-        return jsonify({
+        # ========== CHECK REFERRAL COMPLETION ==========
+        if status == 'completed':
+            previous_orders = Order.query.filter(
+                Order.user_id == g.current_user.id,
+                Order.status == 'completed'
+            ).count()
+            
+            print(f"\n[REFERRAL CHECK]")
+            print(f"  User: {g.current_user.username} (ID: {g.current_user.id})")
+            print(f"  Previous completed orders: {previous_orders}")
+            print(f"  Referred by: {g.current_user.referred_by}")
+            
+            if previous_orders == 1 and g.current_user.referred_by:
+                referrer = User.query.get(g.current_user.referred_by)
+                if referrer:
+                    referral = Referral.query.filter_by(
+                        referrer_id=referrer.id,
+                        referred_user_id=g.current_user.id,
+                        status='pending'
+                    ).first()
+                    
+                    if referral:
+                        referral.status = 'completed'
+                        referral.completed_at = datetime.utcnow()
+                        
+                        points_awarded = POINTS_CONFIG.get('REFERRAL_POINTS', 100)
+                        referrer.points_balance = (referrer.points_balance or 0) + points_awarded
+                        referrer.total_points_earned = (referrer.total_points_earned or 0) + points_awarded
+                        
+                        points_trans = PointsTransaction(
+                            user_id=referrer.id,
+                            points=points_awarded,
+                            type='referral_bonus',
+                            description=f'Referral bonus for {g.current_user.username}\'s first bill payment',
+                            reference=referral.referral_code,
+                            balance_after=referrer.points_balance,
+                            platform=platform
+                        )
+                        db.session.add(points_trans)
+                        db.session.commit()
+                        print(f"✅ Referral completed! {referrer.username} earned {points_awarded} point(s)")
+        
+        # Distribute commission (only if completed)
+        distribution = None
+        if status == 'completed':
+            distribution = commission_service.distribute_commission(
+                order_id=order_id,
+                commission_data=commission,
+                initiator_id=g.current_user.id,
+                initiator_type='user'
+            )
+            db.session.refresh(g.current_user)
+            balance_after_with_commission = g.current_user.wallet_balance
+        else:
+            print(f"ℹ️ Commission will be distributed when payment is completed")
+            balance_after_with_commission = balance_after
+        
+        # Send confirmation email
+        if status == 'completed':
+            email_html = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <style>
+                    body {{ font-family: 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: 0 auto; background-color: #f5f7fa; }}
+                    .header {{ background: {primary_color}; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }}
+                    .header h1 {{ color: white; margin: 0; font-size: 24px; }}
+                    .header p {{ color: white; margin: 10px 0 0; opacity: 0.9; }}
+                    .content {{ background: white; padding: 30px; border-radius: 0 0 10px 10px; }}
+                    .info-box {{ background: #f8f9fa; padding: 15px; border-radius: 8px; margin: 15px 0; border-left: 4px solid {primary_color}; }}
+                    .footer {{ text-align: center; padding: 20px; background: #f8f9fa; color: #666; font-size: 12px; border-radius: 0 0 10px 10px; }}
+                    .commission-box {{ background: #e8f5e9; padding: 15px; border-radius: 8px; margin: 15px 0; border-left: 4px solid #4CAF50; }}
+                </style>
+            </head>
+            <body>
+                <div class="header">
+                    <h1>✅ Bill Payment Successful</h1>
+                    <p>{platform_name}</p>
+                </div>
+                <div class="content">
+                    <p>Dear <strong>{g.current_user.username}</strong>,</p>
+                    <p>Your bill payment has been processed successfully on {platform_name}.</p>
+                    <div class="info-box">
+                        <h3 style="color: {primary_color};">📋 Payment Details:</h3>
+                        <ul>
+                            <li><strong>Order ID:</strong> {order_id}</li>
+                            <li><strong>Biller:</strong> {biller_names.get(biller_code, biller_code)}</li>
+                            <li><strong>Account:</strong> {account_number}</li>
+                            <li><strong>Amount:</strong> GHS {amount:.2f}</li>
+                            <li><strong>Reference:</strong> {payment_result.get('client_reference', 'N/A')}</li>
+                            <li><strong>New Balance:</strong> GHS {g.current_user.wallet_balance:.2f}</li>
+                        </ul>
+                    </div>
+                    <div class="commission-box">
+                        <h3 style="color: #4CAF50;">💰 Commission Earned:</h3>
+                        <ul>
+                            <li><strong>You Earned:</strong> GHS {commission['initiator_commission']:.4f}</li>
+                            <li><strong>Commission Rate:</strong> {commission['hubtel_rate']}%</li>
+                            <li><strong>Your Share:</strong> {commission['initiator_percentage']}%</li>
+                        </ul>
+                    </div>
+                    <p>Thank you for using {platform_name}!</p>
+                    <p style="font-size: 14px; color: #666;">Need help? Contact support: {support_phone} or {support_email}</p>
+                </div>
+                <div class="footer">
+                    <p>© 2025 {platform_name}. All rights reserved.</p>
+                    <p style="color: #C9A84C; font-weight: 600;">{platform_config.get('tagline', 'Innovation Meets Excellence')}</p>
+                </div>
+            </body>
+            </html>
+            """
+            send_email(g.current_user.email, f"Bill Payment Confirmation - {platform_name}", email_html)
+        
+        # Prepare response
+        response_data = {
             'success': True,
-            'message': f'✅ Bill payment of GHS {amount:.2f} successful!',
+            'message': f'✅ Bill payment successful! You earned GHS {commission["initiator_commission"]:.4f} commission!' if status == 'completed' else f'⏳ Bill payment pending. You will earn commission when completed.',
             'data': {
                 'order_id': order_id,
-                'reference': payment_result.get('reference'),
+                'reference': payment_result.get('client_reference'),
                 'transaction_id': payment_result.get('transaction_id'),
-                'new_balance': g.current_user.wallet_balance
+                'amount': amount,
+                'biller_name': biller_names.get(biller_code, biller_code),
+                'account_number': account_number,
+                'meter_number': meter_number,
+                'customer_name': customer_name,
+                'customer_phone': customer_phone,
+                'status': status,
+                'response_code': response_code,
+                'commission': {
+                    'hubtel_rate': commission['hubtel_rate'],
+                    'total': commission['total_commission'],
+                    'admin': commission['admin_commission'],
+                    'you_earned': commission['initiator_commission'],
+                    'admin_percentage': commission['admin_percentage'],
+                    'your_percentage': commission['initiator_percentage']
+                },
+                'balance_before': float(balance_before),
+                'amount_paid': float(amount),
+                'commission_credited': float(commission['initiator_commission']) if status == 'completed' else 0,
+                'new_balance': float(balance_after_with_commission),
+                'platform': platform,
+                'platform_name': platform_name,
+                'branding': {
+                    'name': platform_config.get('brand_name', platform_name),
+                    'primary_color': primary_color,
+                    'secondary_color': platform_config.get('secondary_color', '#C9A84C')
+                }
             }
-        })
+        }
+        
+        if distribution:
+            response_data['data']['distribution'] = distribution
+        
+        return jsonify(response_data), 200
         
     except Exception as e:
-        print(f"Bill payment error: {e}")
+        print(f"[BILL PAY ERROR] {e}")
+        import traceback
+        traceback.print_exc()
         db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
+# ============================================================
+# HUBTEL WEBHOOK
+# ============================================================
 @app.route('/api/webhooks/hubtel', methods=['POST'])
 def hubtel_webhook():
-    """Handle Hubtel webhook notifications"""
+    """Handle Hubtel webhook notifications for final transaction status"""
     try:
         data = request.get_json()
         print(f"[Hubtel Webhook] Received: {data}")
         
-        transaction_id = data.get('transactionId')
-        status = data.get('status')
-        reference = data.get('reference')
+        # ========== SAFELY EXTRACT DATA WITH NULL CHECKS ==========
+        response_code = data.get('ResponseCode') if data else None
         
-        if reference:
-            order = Order.query.filter_by(provider_reference=reference).first()
-            if order:
-                order.status = 'completed' if status == 'success' else 'failed'
-                if status == 'success':
-                    order.completed_at = datetime.utcnow()
+        # Handle case where Data is None or missing
+        transaction_data = data.get('Data') if data else None
+        
+        # If Data is None but we have data at root level, use root
+        if transaction_data is None and data:
+            # Check if we have transaction data at root level
+            if data.get('TransactionId') or data.get('ClientReference'):
+                transaction_data = data
+            else:
+                # No transaction data found
+                print(f"[Hubtel Webhook] No transaction data found in webhook")
+                return jsonify({'success': True, 'message': 'No transaction data'}), 200
+        
+        # If transaction_data is still None, create empty dict
+        if transaction_data is None:
+            transaction_data = {}
+        
+        # ========== SAFELY EXTRACT VALUES ==========
+        client_reference = transaction_data.get('ClientReference') if transaction_data else None
+        transaction_id = transaction_data.get('TransactionId') if transaction_data else None
+        amount = transaction_data.get('Amount') if transaction_data else 0
+        description = transaction_data.get('Description') if transaction_data else None
+        external_transaction_id = transaction_data.get('ExternalTransactionId') if transaction_data else None
+        
+        # ========== SAFELY EXTRACT COMMISSION ==========
+        commission = None
+        
+        # Try to get commission from Meta
+        if transaction_data:
+            meta = transaction_data.get('Meta')
+            if meta and isinstance(meta, dict):
+                commission = meta.get('Commission')
+            # If not in Meta, try root level
+            if commission is None:
+                commission = transaction_data.get('commission')
+            if commission is None:
+                commission = transaction_data.get('Commission')
+        
+        # If still None, try from data root
+        if commission is None and data:
+            commission = data.get('commission')
+            if commission is None:
+                commission = data.get('Commission')
+        
+        # Default if still None
+        if commission is None:
+            commission = 0
+        
+        # ========== CONVERT TO FLOAT SAFELY ==========
+        try:
+            commission = float(commission)
+        except (ValueError, TypeError):
+            commission = 0
+        
+        try:
+            amount = float(amount) if amount else 0
+        except (ValueError, TypeError):
+            amount = 0
+        
+        print(f"[Hubtel] Processing callback for reference: {client_reference}")
+        print(f"[Hubtel] Transaction ID: {transaction_id}")
+        print(f"[Hubtel] Status: {'SUCCESS' if response_code == '0000' else 'PENDING/FAILED'}")
+        print(f"[Hubtel] Amount: GHS {amount}, Commission: GHS {commission}")
+        
+        # ========== FIND ORDER ==========
+        order = None
+        
+        if client_reference:
+            # Try by provider_reference first
+            order = Order.query.filter_by(provider_reference=client_reference).first()
+            
+            if not order and client_reference.startswith('USER-'):
+                # Try by order_id (remove USER- prefix)
+                order_id = client_reference.replace('USER-', '')
+                order = Order.query.filter_by(order_id=order_id).first()
+            
+            if not order:
+                # Try by provider_order_id
+                order = Order.query.filter_by(provider_order_id=client_reference).first()
+        
+        if not order and transaction_id:
+            order = Order.query.filter_by(provider_order_id=transaction_id).first()
+            if not order:
+                order = Order.query.filter_by(provider_reference=transaction_id).first()
+        
+        if order:
+            old_status = order.status
+            print(f"[Hubtel] Found order: {order.order_id}, Current status: {old_status}")
+            
+            # ========== UPDATE ORDER STATUS ==========
+            if response_code == '0000':  # Success
+                order.status = 'completed'
+                order.completed_at = datetime.utcnow()
+                order.delivery_status = 'delivered'
+                order.delivery_status_updated_at = datetime.utcnow()
+                
+                if transaction_id:
+                    order.provider_order_id = transaction_id
+                if external_transaction_id:
+                    order.provider_reference = external_transaction_id
+                
+                # Update commission
+                if commission > 0:
+                    order.total_commission = commission
+                    order.initiator_commission = commission * 0.7  # 70% to initiator
+                    order.admin_commission = commission * 0.3      # 30% to admin
+                
+                # Update the transaction record
+                transaction = Transaction.query.filter_by(reference=order.order_id).first()
+                if transaction:
+                    transaction.status = 'completed'
+                    if transaction.meta_data is None:
+                        transaction.meta_data = {}
+                    transaction.meta_data['hubtel_transaction_id'] = transaction_id
+                    transaction.meta_data['external_transaction_id'] = external_transaction_id
+                    transaction.meta_data['commission'] = commission
+                
+                print(f"[Hubtel] ✅ Order {order.order_id} marked as completed")
+                
+            elif response_code == '0001':  # Pending
+                order.status = 'processing'
+                order.delivery_status = 'pending'
+                order.delivery_status_updated_at = datetime.utcnow()
+                print(f"[Hubtel] ⏳ Order {order.order_id} is pending")
+                
+            else:  # Failed or other status
+                order.status = 'failed'
+                order.delivery_status = 'failed'
+                order.delivery_status_updated_at = datetime.utcnow()
+                order.last_delivery_error = description or f'Payment failed with code {response_code}'
+                print(f"[Hubtel] ❌ Order {order.order_id} failed: {description}")
+            
+            db.session.commit()
+            print(f"[Hubtel] Database updated successfully")
+            
+            return jsonify({
+                'success': True,
+                'message': 'Order updated',
+                'data': {
+                    'order_id': order.order_id,
+                    'old_status': old_status,
+                    'new_status': order.status,
+                    'commission': commission
+                }
+            }), 200
+            
+        else:
+            print(f"[Hubtel] ⚠️ Order not found for reference: {client_reference}")
+            
+            # Create a pending transaction record for the webhook
+            try:
+                # Log the webhook data for manual review
+                from models import WebhookLog
+                webhook_log = WebhookLog(
+                    provider='hubtel',
+                    reference=client_reference,
+                    transaction_id=transaction_id,
+                    payload=data,
+                    status='pending',
+                    platform=getattr(g, 'platform', 'platform_a'),
+                    created_at=datetime.utcnow()
+                )
+                db.session.add(webhook_log)
                 db.session.commit()
-                print(f"[Hubtel] Updated order {order.id} status to {status}")
+                print(f"[Hubtel] Webhook logged for reference: {client_reference}")
+            except Exception as log_error:
+                print(f"[Hubtel] Failed to log webhook: {log_error}")
+            
+            return jsonify({
+                'success': True,
+                'message': 'Webhook received but order not found',
+                'data': {
+                    'client_reference': client_reference,
+                    'transaction_id': transaction_id,
+                    'status': 'order_not_found'
+                }
+            }), 200
         
-        return jsonify({'success': True}), 200
     except Exception as e:
         print(f"[Hubtel Webhook Error] {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
+        import traceback
+        traceback.print_exc()
+        db.session.rollback()
+        # Always return 200 to prevent Hubtel from retrying
+        return jsonify({'success': False, 'error': str(e)}), 200
+
+
+# ============================================================
+# HELPER FUNCTION - GET SERVICE TYPE
+# ============================================================
+def get_service_type(biller_code):
+    """Get service type from biller code"""
+    service_map = {
+        'ECG': 'ecg',
+        'GWCL': 'water',
+        'DSTV': 'dstv',
+        'GOTV': 'gotv',
+        'STARTIMES': 'startimes'
+    }
+    return service_map.get(biller_code, 'other')
+
 
 # ========== RECURRING BILLS ENDPOINTS ==========
 
 @app.route('/api/user/bills/recurring', methods=['GET'])
 @token_required
 def get_user_recurring_bills():
-    """Get user's recurring bills"""
+    """Get user's recurring bills - AFDALNOVA"""
     try:
+        # Get platform info
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
         
         recurring_bills = RecurringBill.query.filter_by(
             user_id=g.current_user.id,
-            enabled=True  
+            enabled=True,
+            platform=platform
         ).order_by(RecurringBill.created_at.desc()).all()
         
         return jsonify({
@@ -4634,20 +7535,28 @@ def get_user_recurring_bills():
                 'auto_pay': r.auto_pay,
                 'enabled': r.enabled,
                 'next_due_date': r.next_due_date.isoformat() if r.next_due_date else None,
-                'created_at': r.created_at.isoformat()
-            } for r in recurring_bills]
+                'created_at': r.created_at.isoformat(),
+                'platform': platform_name
+            } for r in recurring_bills],
+            'platform': platform,
+            'platform_name': platform_name
         })
         
     except Exception as e:
-        print(f"Error fetching recurring bills: {e}")
+        print(f"[RECURRING BILLS ERROR] {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
 @app.route('/api/user/bills/recurring/add', methods=['POST'])
 @token_required
 def add_recurring_bill():
-    """Add a recurring bill"""
+    """Add a recurring bill - AFDALNOVA"""
     try:
+        # Get platform info
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        
         data = request.get_json()
         
         biller_code = data.get('biller_code')
@@ -4658,8 +7567,18 @@ def add_recurring_bill():
         auto_pay = data.get('auto_pay', True)
         max_amount = data.get('max_amount', 0)
         
+        print(f"[ADD RECURRING BILL] User: {g.current_user.username}")
+        print(f"[ADD RECURRING BILL] Biller: {biller_code}")
+        print(f"[ADD RECURRING BILL] Account: {account_number}")
+        print(f"[ADD RECURRING BILL] Platform: {platform_name}")
+        
         if not biller_code or not account_number:
-            return jsonify({'success': False, 'error': 'Biller code and account number required'}), 400
+            return jsonify({
+                'success': False, 
+                'error': 'Biller code and account number required',
+                'platform': platform,
+                'platform_name': platform_name
+            }), 400
         
         # Calculate next due date based on frequency
         from datetime import datetime, timedelta
@@ -4682,6 +7601,7 @@ def add_recurring_bill():
             auto_pay=auto_pay,
             max_amount=max_amount,
             enabled=True,
+            platform=platform,
             next_due_date=next_due_date,
             created_at=datetime.utcnow()
         )
@@ -4690,15 +7610,17 @@ def add_recurring_bill():
         
         return jsonify({
             'success': True,
-            'message': 'Recurring bill added successfully',
+            'message': f'Recurring bill added successfully on {platform_name}',
             'data': {
                 'id': recurring_bill.id,
-                'next_due_date': next_due_date.isoformat()
+                'next_due_date': next_due_date.isoformat(),
+                'platform': platform,
+                'platform_name': platform_name
             }
         })
         
     except Exception as e:
-        print(f"Error adding recurring bill: {e}")
+        print(f"[ADD RECURRING BILL ERROR] {e}")
         db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
 
@@ -4706,23 +7628,39 @@ def add_recurring_bill():
 @app.route('/api/user/bills/recurring/remove/<int:bill_id>', methods=['DELETE'])
 @token_required
 def remove_recurring_bill(bill_id):
-    """Remove a recurring bill"""
+    """Remove a recurring bill - AFDALNOVA"""
     try:
+        # Get platform info
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        
         recurring_bill = RecurringBill.query.filter_by(
             id=bill_id,
-            user_id=g.current_user.id
+            user_id=g.current_user.id,
+            platform=platform
         ).first()
         
         if not recurring_bill:
-            return jsonify({'success': False, 'error': 'Recurring bill not found'}), 404
+            return jsonify({
+                'success': False, 
+                'error': 'Recurring bill not found',
+                'platform': platform,
+                'platform_name': platform_name
+            }), 404
         
         db.session.delete(recurring_bill)
         db.session.commit()
         
-        return jsonify({'success': True, 'message': 'Recurring bill removed'})
+        return jsonify({
+            'success': True, 
+            'message': f'Recurring bill removed from {platform_name}',
+            'platform': platform,
+            'platform_name': platform_name
+        })
         
     except Exception as e:
-        print(f"Error removing recurring bill: {e}")
+        print(f"[REMOVE RECURRING BILL ERROR] {e}")
         db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
 
@@ -4730,29 +7668,45 @@ def remove_recurring_bill(bill_id):
 @app.route('/api/user/bills/recurring/toggle/<int:bill_id>', methods=['PUT'])
 @token_required
 def toggle_recurring_bill(bill_id):
-    """Enable/disable a recurring bill"""
+    """Enable/disable a recurring bill - AFDALNOVA"""
     try:
+        # Get platform info
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        
         data = request.get_json()
         enabled = data.get('enabled', False)
         
         recurring_bill = RecurringBill.query.filter_by(
             id=bill_id,
-            user_id=g.current_user.id
+            user_id=g.current_user.id,
+            platform=platform
         ).first()
         
         if not recurring_bill:
-            return jsonify({'success': False, 'error': 'Recurring bill not found'}), 404
+            return jsonify({
+                'success': False, 
+                'error': 'Recurring bill not found',
+                'platform': platform,
+                'platform_name': platform_name
+            }), 404
         
         recurring_bill.enabled = enabled
         db.session.commit()
         
         return jsonify({
             'success': True,
-            'message': f'Recurring bill {"enabled" if enabled else "disabled"}'
+            'message': f'Recurring bill {"enabled" if enabled else "disabled"} on {platform_name}',
+            'data': {
+                'enabled': enabled,
+                'platform': platform,
+                'platform_name': platform_name
+            }
         })
         
     except Exception as e:
-        print(f"Error toggling recurring bill: {e}")
+        print(f"[TOGGLE RECURRING BILL ERROR] {e}")
         db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
 
@@ -4760,43 +7714,13 @@ class DigimallService:
     def __init__(self):
         self.api_key = os.environ.get('DIGIMALL_API_KEY')
         self.base_url = os.environ.get('DIGIMALL_BASE_URL', 'https://www.digi-mall.app/api/v1')
-        self.webhook_url = os.environ.get('DIGIMALL_WEBHOOK_URL', 'https://roamsmart-backend-production.up.railway.app/api/webhooks/digimall')
+        self.webhook_url = os.environ.get('DIGIMALL_WEBHOOK_URL', f"{os.environ.get('BASE_URL', 'https://roamsmart-backend-production.up.railway.app')}/api/webhooks/digimall")
         
-    def get_offer_slug(self, network, volume):
-        """Get the correct offer slug for network and volume"""
-        offers = self.get_offers()
-        
-        if not offers.get('success'):
-            return None
-        
-        isp_map = {
-            'mtn': 'MTN',
-            'airteltigo': 'AirtelTigo',
-            'telecel': 'Telecel'
-        }
-        
-        isp_name = isp_map.get(network.lower(), network.capitalize())
-        
-        for offer in offers.get('offers', []):
-            if offer.get('isp') == isp_name and offer.get('type') == 'Data':
-                if volume in offer.get('volumes', []):
-                    return offer.get('offerSlug')
-        
-        for offer in offers.get('offers', []):
-            if offer.get('isp') == isp_name and offer.get('type') == 'Data':
-                return offer.get('offerSlug')
-        
-        # Fallback slugs
-        if network.lower() == 'mtn':
-            return 'mtn_master_bundle'
-        elif network.lower() == 'airteltigo':
-            return 'airteltigo_ishare'
-        elif network.lower() == 'telecel':
-            return 'telecel'
-        return None
+        if not self.api_key:
+            print("[Digimall] Warning: API key not configured")
     
     def get_offers(self):
-        """Get all available offers"""
+        """Get all available offers from Digimall"""
         try:
             response = requests.get(
                 f"{self.base_url}/offers",
@@ -4804,20 +7728,69 @@ class DigimallService:
                 timeout=10
             )
             if response.status_code == 200:
-                return response.json()
+                result = response.json()
+                return {
+                    'success': True,
+                    'offers': result.get('offers', [])
+                }
             return {'success': False, 'error': f'HTTP {response.status_code}'}
         except Exception as e:
             print(f"[Digimall] Error fetching offers: {e}")
             return {'success': False, 'error': str(e)}
     
-    def deliver_data(self, network, phone_number, volume):
-        """
-        Deliver data bundle to customer (delivery only, no pricing)
-        """
+    def get_offer_slug(self, network, volume):
+        """Get the correct offer slug for network and volume - CRITICAL METHOD"""
+        offers_result = self.get_offers()
+        
+        if not offers_result.get('success'):
+            # Fallback to hardcoded slugs if API fails
+            return self.get_fallback_offer_slug(network, volume)
+        
+        offers = offers_result.get('offers', [])
+        
+        # Map network names to Digimall ISP names
+        isp_map = {
+            'mtn': 'MTN',
+            'airteltigo': 'AirtelTigo',
+            'telecel': 'Telecel',
+            'vodafone': 'Vodafone'
+        }
+        
+        isp_name = isp_map.get(network.lower(), network.capitalize())
+        
+        # Try to find matching offer
+        for offer in offers:
+            if offer.get('isp') == isp_name and offer.get('type') == 'Data':
+                volumes = offer.get('volumes', [])
+                if volume in volumes:
+                    return offer.get('offerSlug')
+        
+        # If no exact match, return first data offer for the network
+        for offer in offers:
+            if offer.get('isp') == isp_name and offer.get('type') == 'Data':
+                return offer.get('offerSlug')
+        
+        # Fallback to hardcoded slugs
+        return self.get_fallback_offer_slug(network, volume)
+    
+    def get_fallback_offer_slug(self, network, volume):
+        """Fallback offer slugs when API is unavailable"""
+        fallback_slugs = {
+            'mtn': 'mtn_master_bundle',
+            'airteltigo': 'airteltigo_ishare',
+            'telecel': 'telecel'
+        }
+        return fallback_slugs.get(network.lower(), 'mtn_master_bundle')
+    
+    def deliver_data(self, network, phone_number, volume, offer_slug=None):
+        """Deliver data bundle to customer"""
         try:
             phone = self._format_phone(phone_number)
             
-            offer_slug = self.get_offer_slug(network, volume)
+            # Get offer slug if not provided
+            if not offer_slug:
+                offer_slug = self.get_offer_slug(network, volume)
+            
             if not offer_slug:
                 return {'success': False, 'error': f'No offer found for {network} {volume}GB'}
             
@@ -4851,7 +7824,7 @@ class DigimallService:
             
             if response.status_code in [200, 201]:
                 result = response.json()
-                print(f"[Digimall] Delivery initiated: {result.get('orderId')} - Status: {result.get('status')}")
+                print(f"[Digimall] Delivery initiated: {result.get('orderId')}")
                 return result
             else:
                 print(f"[Digimall] Delivery error: {response.status_code} - {response.text}")
@@ -4861,7 +7834,94 @@ class DigimallService:
             print(f"[Digimall] Error: {e}")
             return {'success': False, 'error': str(e)}
     
-    def check_delivery_status(self, order_id):
+    def get_bundle_options(self, network, size_gb):
+        """Get all available bundle options with delivery estimates"""
+        offers_result = self.get_offers()
+        
+        # Default options structure
+        options = []
+        
+        # Define bundle types with their characteristics
+        bundle_types = [
+            {
+                'type': 'express',
+                'name': f'{network.upper()} Express Bundle',
+                'offer_slug': f'{network}_express_bundle',
+                'icon': '⚡',
+                'color': '#ffc107',
+                'description': 'Fastest delivery - Priority processing',
+                'delivery_time': {'min': 1, 'max': 3, 'avg': 2},
+                'priority': 1,
+                'volumes': [1, 2, 5, 10]
+            },
+            {
+                'type': 'standard',
+                'name': f'{network.upper()} Master Bundle',
+                'offer_slug': f'{network}_master_bundle',
+                'icon': '📱',
+                'color': '#3498db',
+                'description': 'Standard delivery - Best value',
+                'delivery_time': {'min': 3, 'max': 10, 'avg': 6},
+                'priority': 2,
+                'volumes': [1, 2, 5, 10, 20]
+            },
+            {
+                'type': 'mashup',
+                'name': f'{network.upper()} Mashup Bundle',
+                'offer_slug': f'{network}_mashup_bundle',
+                'icon': '🎵',
+                'color': '#9b59b6',
+                'description': 'Voice + Data combo',
+                'delivery_time': {'min': 5, 'max': 20, 'avg': 12},
+                'priority': 3,
+                'volumes': [5, 10, 20]
+            }
+        ]
+        
+        # Try to get real offer slugs from Digimall if possible
+        if offers_result.get('success'):
+            offers = offers_result.get('offers', [])
+            isp_map = {
+                'mtn': 'MTN',
+                'airteltigo': 'AirtelTigo',
+                'telecel': 'Telecel'
+            }
+            isp_name = isp_map.get(network.lower(), network.capitalize())
+            
+            for offer in offers:
+                if offer.get('isp') == isp_name:
+                    offer_name = offer.get('name', '').lower()
+                    offer_slug = offer.get('offerSlug')
+                    
+                    if 'express' in offer_name:
+                        bundle_types[0]['offer_slug'] = offer_slug
+                        bundle_types[0]['volumes'] = offer.get('volumes', [1, 2, 5])
+                    elif 'master' in offer_name or 'data' in offer_name:
+                        bundle_types[1]['offer_slug'] = offer_slug
+                        bundle_types[1]['volumes'] = offer.get('volumes', [1, 2, 5, 10, 20])
+        
+        # Build options list
+        for bundle in bundle_types:
+            if size_gb in bundle['volumes']:
+                options.append({
+                    'type': bundle['type'],
+                    'name': bundle['name'],
+                    'offer_slug': bundle['offer_slug'],
+                    'available_volumes': bundle['volumes'],
+                    'delivery_time': bundle['delivery_time'],
+                    'priority': bundle['priority'],
+                    'recommended': bundle['type'] == 'express',
+                    'icon': bundle['icon'],
+                    'color': bundle['color'],
+                    'description': bundle['description']
+                })
+        
+        # Sort by delivery time
+        options.sort(key=lambda x: x['delivery_time']['avg'])
+        
+        return options
+    
+    def check_order_status(self, order_id):
         """Check delivery status of an order"""
         try:
             response = requests.get(
@@ -4871,9 +7931,188 @@ class DigimallService:
             )
             
             if response.status_code == 200:
+                result = response.json()
+                return result
+            return {'success': False, 'error': f'HTTP {response.status_code}'}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    def bulk_check_order_status(self, identifiers):
+        """Check status of multiple orders from Digimall"""
+        try:
+            if not identifiers:
+                return {'success': True, 'orders': [], 'total': 0}
+            
+            # Limit to 100 identifiers per request (Digimall limit)
+            if len(identifiers) > 100:
+                identifiers = identifiers[:100]
+            
+            response = requests.post(
+                f"{self.base_url}/order/status/bulk",
+                json={'identifiers': identifiers},
+                headers={
+                    'x-api-key': self.api_key,
+                    'Content-Type': 'application/json'
+                },
+                timeout=15
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                print(f"[Digimall] Bulk status check: {result.get('found')} found, {result.get('notFound')} not found")
+                return {
+                    'success': True,
+                    'total': result.get('total', 0),
+                    'found': result.get('found', 0),
+                    'notFound': result.get('notFound', 0),
+                    'orders': result.get('orders', [])
+                }
+            else:
+                print(f"[Digimall] Bulk status error: {response.status_code}")
+                return {'success': False, 'error': f'HTTP {response.status_code}'}
+                
+        except Exception as e:
+            print(f"[Digimall] Bulk status error: {e}")
+            return {'success': False, 'error': str(e)}
+    
+    def get_queue_status(self, network='mtn'):
+        """Get real-time queue status from Digimall by checking pending orders"""
+        try:
+            # Get pending orders from database that have Digimall references
+            from models import Order
+            from datetime import datetime, timedelta
+            
+            # Get recent pending orders (last 2 hours)
+            pending_orders_db = Order.query.filter(
+                Order.network == network,
+                Order.delivery_status.in_(['pending', 'queued', 'processing']),
+                Order.created_at >= datetime.now() - timedelta(hours=2),
+                Order.provider_order_id.isnot(None)
+            ).all()
+            
+            if not pending_orders_db:
+                return self._get_local_queue_status(network)
+            
+            # Collect identifiers for bulk check
+            identifiers = []
+            for order in pending_orders_db:
+                if order.provider_order_id:
+                    identifiers.append(order.provider_order_id)
+                elif order.provider_reference:
+                    identifiers.append(order.provider_reference)
+            
+            if not identifiers:
+                return self._get_local_queue_status(network)
+            
+            # Call bulk status to check which are still pending at Digimall
+            bulk_result = self.bulk_check_order_status(identifiers)
+            
+            if bulk_result.get('success'):
+                # Count orders still pending/processing at Digimall
+                still_pending = 0
+                for order_status in bulk_result.get('orders', []):
+                    if order_status.get('found') and order_status.get('status') in ['pending', 'processing']:
+                        still_pending += 1
+                
+                # Get average processing time from recent delivered orders
+                recent_delivered = Order.query.filter(
+                    Order.network == network,
+                    Order.delivery_status == 'delivered',
+                    Order.completed_at >= datetime.now() - timedelta(hours=1)
+                ).all()
+                
+                avg_time = 2
+                if recent_delivered:
+                    total_time = sum((o.completed_at - o.created_at).total_seconds() / 60 for o in recent_delivered)
+                    avg_time = total_time / len(recent_delivered)
+                
+                # Determine congestion
+                if still_pending > 20:
+                    congestion = 'high'
+                elif still_pending > 10:
+                    congestion = 'medium'
+                else:
+                    congestion = 'low'
+                
+                return {
+                    'success': True,
+                    'data': {
+                        'pending_orders': still_pending,
+                        'processing_orders': 0,
+                        'avg_processing_time': round(avg_time, 1),
+                        'estimated_wait': round(still_pending * avg_time, 1),
+                        'congestion': congestion,
+                        'last_updated': datetime.now().isoformat(),
+                        'source': 'digimall_bulk_check'
+                    }
+                }
+            else:
+                return self._get_local_queue_status(network)
+                
+        except Exception as e:
+            print(f"[Digimall] Error fetching queue status: {e}")
+            return self._get_local_queue_status(network)
+    
+    def _get_local_queue_status(self, network='mtn'):
+        """Fallback: Calculate queue status from local database"""
+        from models import Order
+        from datetime import datetime, timedelta
+        
+        # Get pending orders
+        pending_orders = Order.query.filter(
+            Order.network == network,
+            Order.delivery_status.in_(['pending', 'queued', 'processing']),
+            Order.created_at >= datetime.now() - timedelta(hours=2)
+        ).count()
+        
+        # Get average processing time from recent orders
+        recent_orders = Order.query.filter(
+            Order.network == network,
+            Order.delivery_status == 'delivered',
+            Order.completed_at >= datetime.now() - timedelta(hours=1)
+        ).all()
+        
+        avg_time = 2  # default 2 minutes
+        if recent_orders:
+            total_time = sum((o.completed_at - o.created_at).total_seconds() / 60 for o in recent_orders)
+            avg_time = total_time / len(recent_orders)
+        
+        # Determine congestion
+        if pending_orders > 20:
+            congestion = 'high'
+        elif pending_orders > 10:
+            congestion = 'medium'
+        else:
+            congestion = 'low'
+        
+        return {
+            'success': True,
+            'data': {
+                'pending_orders': pending_orders,
+                'processing_orders': 0,
+                'avg_processing_time': round(avg_time, 1),
+                'estimated_wait': round(pending_orders * avg_time, 1),
+                'congestion': congestion,
+                'last_updated': datetime.now().isoformat(),
+                'source': 'local'
+            }
+        }
+    
+    def get_recent_order_statuses(self, limit=50):
+        """Get recent order statuses from Digimall for queue calculation"""
+        try:
+            response = requests.get(
+                f"{self.base_url}/orders/recent",
+                headers={'x-api-key': self.api_key},
+                params={'limit': limit},
+                timeout=10
+            )
+            
+            if response.status_code == 200:
                 return response.json()
             return {'success': False, 'error': f'HTTP {response.status_code}'}
         except Exception as e:
+            print(f"[Digimall] Error fetching recent orders: {e}")
             return {'success': False, 'error': str(e)}
     
     def _format_phone(self, phone):
@@ -4886,181 +8125,1267 @@ class DigimallService:
             phone = '233' + phone
         return phone
 
+class QueueService:
+    @staticmethod
+    def get_queue_status(network='mtn'):
+        """Get current queue status for a network"""
+        
+        # Get orders pending in last 2 hours
+        pending_orders = Order.query.filter(
+            Order.network == network,
+            Order.delivery_status.in_(['pending', 'queued', 'processing']),
+            Order.created_at >= datetime.now() - timedelta(hours=2)
+        ).count()
+        
+        # Get average processing time
+        recent_orders = Order.query.filter(
+            Order.network == network,
+            Order.delivery_status == 'delivered',
+            Order.completed_at >= datetime.now() - timedelta(hours=1)
+        ).all()
+        
+        avg_time = 0
+        if recent_orders:
+            total_time = sum((o.completed_at - o.created_at).total_seconds() / 60 for o in recent_orders)
+            avg_time = total_time / len(recent_orders)
+        
+        # Estimate wait time
+        estimated_wait = pending_orders * max(2, avg_time)
+        
+        return {
+            'pending_count': pending_orders,
+            'avg_processing_time': round(avg_time, 1),
+            'estimated_wait': round(estimated_wait, 1),
+            'congestion': 'high' if pending_orders > 20 else 'medium' if pending_orders > 10 else 'low'
+        }
+
+# ========== DELIVERY ANALYTICS CLASS ==========
+
+class DeliveryAnalytics:
+    """
+    Analyze delivery performance from Digimall orders
+    to provide accurate time estimates
+    """
+    
+    @staticmethod
+    def analyze_delivery_performance(network='mtn', lookback_hours=24):
+        """
+        Analyze delivery performance from recent Digimall orders
+        Returns:
+            - Average delivery time by delivery type
+            - Current pending count
+            - Estimated wait time
+            - Congestion level
+        """
+        try:
+            # STEP 1: Get recent orders from database
+            recent_orders = Order.query.filter(
+                Order.network == network,
+                Order.delivery_status.in_(['delivered', 'failed', 'pending', 'processing']),
+                Order.created_at >= datetime.now() - timedelta(hours=lookback_hours),
+                Order.provider_order_id.isnot(None)
+            ).all()
+            
+            if not recent_orders:
+                return DeliveryAnalytics._get_default_estimates()
+            
+            # STEP 2: Get real-time status from Digimall for pending orders
+            pending_identifiers = []
+            for order in recent_orders:
+                if order.delivery_status in ['pending', 'processing'] and order.provider_order_id:
+                    pending_identifiers.append(order.provider_order_id)
+            
+            # Check which orders are still pending at Digimall
+            digimall = DigimallService()
+            realtime_status = {}
+            
+            if pending_identifiers:
+                bulk_result = digimall.bulk_check_order_status(pending_identifiers)
+                if bulk_result.get('success'):
+                    for status_info in bulk_result.get('orders', []):
+                        if status_info.get('found'):
+                            identifier = status_info.get('identifier') or status_info.get('orderId')
+                            realtime_status[identifier] = status_info.get('status')
+            
+            # STEP 3: Calculate delivery times by delivery type
+            delivery_times_by_type = {}
+            total_orders = 0
+            total_time = 0
+            
+            for order in recent_orders:
+                if order.delivery_status == 'delivered' and order.completed_at and order.created_at:
+                    delivery_type = order.delivery_type or 'standard'
+                    delivery_time = (order.completed_at - order.created_at).total_seconds() / 60
+                    
+                    if delivery_type not in delivery_times_by_type:
+                        delivery_times_by_type[delivery_type] = {
+                            'times': [],
+                            'count': 0,
+                            'total': 0
+                        }
+                    
+                    delivery_times_by_type[delivery_type]['times'].append(delivery_time)
+                    delivery_times_by_type[delivery_type]['count'] += 1
+                    delivery_times_by_type[delivery_type]['total'] += delivery_time
+                    
+                    total_orders += 1
+                    total_time += delivery_time
+            
+            # STEP 4: Calculate averages
+            averages_by_type = {}
+            for delivery_type, data in delivery_times_by_type.items():
+                if data['count'] > 0:
+                    avg_time = data['total'] / data['count']
+                    sorted_times = sorted(data['times'])
+                    median_time = sorted_times[len(sorted_times)//2] if sorted_times else avg_time
+                    
+                    averages_by_type[delivery_type] = {
+                        'avg': round(avg_time, 1),
+                        'median': round(median_time, 1),
+                        'min': round(min(data['times']), 1) if data['times'] else 0,
+                        'max': round(max(data['times']), 1) if data['times'] else 0,
+                        'count': data['count'],
+                        'total_delivered': data['count']
+                    }
+            
+            # STEP 5: Count pending orders (using Digimall real-time status)
+            pending_count = 0
+            processing_count = 0
+            
+            for order in recent_orders:
+                if order.provider_order_id and order.provider_order_id in realtime_status:
+                    status = realtime_status[order.provider_order_id]
+                    if status in ['pending', 'queued']:
+                        pending_count += 1
+                    elif status == 'processing':
+                        processing_count += 1
+                elif order.delivery_status in ['pending', 'queued']:
+                    pending_count += 1
+                elif order.delivery_status == 'processing':
+                    processing_count += 1
+            
+            # STEP 6: Calculate estimated wait time for each delivery type
+            estimated_wait_by_type = {}
+            
+            for delivery_type in ['express', 'master', 'standard', 'mashup']:
+                avg_data = averages_by_type.get(delivery_type, {})
+                avg_time = avg_data.get('avg', 5)
+                
+                if delivery_type == 'express':
+                    queue_factor = 0.2
+                elif delivery_type == 'master':
+                    queue_factor = 0.3
+                else:
+                    queue_factor = 0.5
+                
+                estimated_wait = avg_time + (pending_count * queue_factor)
+                
+                estimated_wait_by_type[delivery_type] = {
+                    'base_time': avg_time,
+                    'pending_count': pending_count,
+                    'queue_factor': queue_factor,
+                    'estimated_minutes': round(estimated_wait, 1),
+                    'estimated_display': f"{round(estimated_wait)} min"
+                }
+            
+            # STEP 7: Determine congestion level
+            if pending_count > 20:
+                congestion = 'high'
+                congestion_color = '#dc3545'
+                congestion_message = '⚠️ Heavy traffic - Expect longer delivery times'
+            elif pending_count > 10:
+                congestion = 'medium'
+                congestion_color = '#ffc107'
+                congestion_message = '🟡 Moderate traffic - Normal delays expected'
+            else:
+                congestion = 'low'
+                congestion_color = '#28a745'
+                congestion_message = '✅ Light traffic - Fast delivery expected'
+            
+            return {
+                'success': True,
+                'data': {
+                    'averages_by_type': averages_by_type,
+                    'estimated_wait_by_type': estimated_wait_by_type,
+                    'pending_count': pending_count,
+                    'processing_count': processing_count,
+                    'congestion': congestion,
+                    'congestion_color': congestion_color,
+                    'congestion_message': congestion_message,
+                    'total_analyzed': len(recent_orders),
+                    'lookback_hours': lookback_hours,
+                    'last_updated': datetime.now().isoformat(),
+                    'delivery_summary': {
+                        delivery_type: {
+                            'avg_time': data.get('avg', 0),
+                            'median_time': data.get('median', 0),
+                            'min_time': data.get('min', 0),
+                            'max_time': data.get('max', 0),
+                            'orders_delivered': data.get('total_delivered', 0)
+                        }
+                        for delivery_type, data in averages_by_type.items()
+                    }
+                }
+            }
+            
+        except Exception as e:
+            print(f"Delivery analytics error: {e}")
+            return DeliveryAnalytics._get_default_estimates()
+    
+    @staticmethod
+    def _get_default_estimates():
+        """Fallback default estimates"""
+        return {
+            'success': True,
+            'data': {
+                'averages_by_type': {},
+                'estimated_wait_by_type': {
+                    'express': {'estimated_minutes': 3, 'estimated_display': '3 min'},
+                    'master': {'estimated_minutes': 5, 'estimated_display': '5 min'},
+                    'standard': {'estimated_minutes': 8, 'estimated_display': '8 min'},
+                    'mashup': {'estimated_minutes': 15, 'estimated_display': '15 min'}
+                },
+                'pending_count': 0,
+                'processing_count': 0,
+                'congestion': 'low',
+                'congestion_color': '#28a745',
+                'congestion_message': '✅ Normal delivery times',
+                'total_analyzed': 0,
+                'lookback_hours': 24,
+                'last_updated': datetime.now().isoformat(),
+                'delivery_summary': {}
+            }
+        }
 
 
-@app.route('/api/referral/balance', methods=['GET'])
+# ========== DELIVERY OPTIONS ENDPOINT ==========
+
+class DeliveryOptionsCache:
+    """Simple in-memory cache for delivery options"""
+    
+    def __init__(self, ttl_seconds=60):
+        self.cache = {}
+        self.ttl = ttl_seconds
+        self.hits = 0
+        self.misses = 0
+    
+    def get_key(self, network, size_gb, category):
+        """Generate cache key"""
+        return f"{network}_{size_gb}_{category}"
+    
+    def get(self, network, size_gb, category):
+        """Get cached data if valid"""
+        key = self.get_key(network, size_gb, category)
+        
+        if key in self.cache:
+            entry = self.cache[key]
+            cache_age = (datetime.now() - entry['timestamp']).total_seconds()
+            
+            if cache_age < self.ttl:
+                self.hits += 1
+                print(f"✅ CACHE HIT: {key} (age: {int(cache_age)}s)")
+                return entry['data']
+            else:
+                # Expired
+                del self.cache[key]
+                print(f"⏰ CACHE EXPIRED: {key}")
+        
+        self.misses += 1
+        return None
+    
+    def set(self, network, size_gb, category, data):
+        """Store data in cache"""
+        key = self.get_key(network, size_gb, category)
+        self.cache[key] = {
+            'data': data,
+            'timestamp': datetime.now()
+        }
+        print(f"💾 CACHE SET: {key}")
+    
+    def clear(self):
+        """Clear all cache"""
+        self.cache.clear()
+        self.hits = 0
+        self.misses = 0
+        print("🗑️ CACHE CLEARED")
+    
+    def get_stats(self):
+        """Get cache statistics"""
+        total = self.hits + self.misses
+        hit_rate = (self.hits / total * 100) if total > 0 else 0
+        return {
+            'hits': self.hits,
+            'misses': self.misses,
+            'total': total,
+            'hit_rate': f"{hit_rate:.1f}%",
+            'cache_size': len(self.cache),
+            'ttl_seconds': self.ttl
+        }
+    
+    def get_all_keys(self):
+        """Get all cache keys"""
+        return list(self.cache.keys())
+
+# Initialize cache
+delivery_cache = DeliveryOptionsCache(ttl_seconds=60)  # 60 second TTL
+
+
+# ========== UPDATED DELIVERY OPTIONS ENDPOINT WITH CACHE ==========
+
+@app.route('/api/delivery/options', methods=['GET'])
 @token_required
-def get_referral_balance():
-    """Get user's referral data balance"""
+@limiter.limit("100 per hour")
+def get_delivery_network_options():
+    """Get all delivery options with caching"""
     try:
-        user = g.current_user
+        network = request.args.get('network', 'mtn')
+        size_gb = request.args.get('size_gb', 1, type=int)
         
-        # Get completed referrals count
-        completed_count = Referral.query.filter_by(
-            referrer_id=user.id,
-            status='completed'
-        ).count()
+        print("\n" + "="*60)
+        print("📡 DELIVERY OPTIONS API CALLED")
+        print("="*60)
+        print(f"Network: {network}")
+        print(f"Size: {size_gb}GB")
         
-        # Get pending referrals
-        pending_count = Referral.query.filter_by(
-            referrer_id=user.id,
-            status='pending'
-        ).count()
+        from models import PriceSetting, DeliverySetting
         
-        # Calculate how many more referrals needed for next reward
-        next_reward_at = 10 - (completed_count % 10)
-        if completed_count % 10 == 0 and completed_count > 0:
-            next_reward_at = 10
+        is_agent = g.current_user.is_agent and getattr(g.current_user, 'agent_approved', False)
+        price_category = 'agent_price' if is_agent else 'user_price'
+        
+        print(f"👤 User type: {'Agent' if is_agent else 'User'}")
+        print(f"💰 Price category: {price_category}")
+        
+        # STEP 1: Try to get from cache FIRST
+        cache_key = f"{network}_{size_gb}_{price_category}"
+        cached_data = delivery_cache.get(network, size_gb, price_category)
+        
+        if cached_data:
+            print(f"📦 Returning cached data (age: {int((datetime.now() - delivery_cache.cache[cache_key]['timestamp']).total_seconds())}s)")
+            return jsonify({
+                'success': True,
+                'data': cached_data,
+                'cached': True,
+                'cache_stats': delivery_cache.get_stats()
+            })
+        
+        print("📦 Cache miss - fetching fresh data...")
+        
+        # STEP 2: Get prices from database (only on cache miss)
+        all_prices = PriceSetting.query.filter_by(
+            category=price_category,
+            network=network,
+            is_available=True
+        ).filter(
+            PriceSetting.delivery_type.isnot(None)
+        ).all()
+        
+        if not all_prices:
+            return jsonify({
+                'success': False, 
+                'error': f'No delivery prices found for {network}'
+            }), 404
+        
+        print(f"\n📦 Found {len(all_prices)} delivery price records in database")
+        
+        # Get delivery settings
+        delivery_settings = DeliverySetting.query.filter_by(
+            network=network,
+            is_active=True
+        ).all()
+        
+        # Group prices by delivery_type
+        prices_by_type = {}
+        for price_record in all_prices:
+            delivery_type = price_record.delivery_type
+            size = price_record.size_gb
+            price = float(price_record.price)
+            
+            if delivery_type not in prices_by_type:
+                prices_by_type[delivery_type] = {}
+            prices_by_type[delivery_type][size] = price
+        
+        # STEP 3: Get REAL-TIME delivery analytics from Digimall (only on cache miss)
+        analytics = DeliveryAnalytics.analyze_delivery_performance(network, lookback_hours=24)
+        analytics_data = analytics.get('data', {})
+        
+        print(f"\n📊 Delivery Analytics from Digimall:")
+        print(f"  Analyzed: {analytics_data.get('total_analyzed', 0)} orders")
+        print(f"  Pending: {analytics_data.get('pending_count', 0)}")
+        print(f"  Processing: {analytics_data.get('processing_count', 0)}")
+        print(f"  Congestion: {analytics_data.get('congestion', 'low')}")
+        
+        for delivery_type, summary in analytics_data.get('delivery_summary', {}).items():
+            print(f"  {delivery_type}: avg {summary.get('avg_time', 0)}min, {summary.get('orders_delivered', 0)} orders")
+        
+        # STEP 4: Build options with prices + real-time estimates
+        options = []
+        
+        name_map = {
+            'express': 'MTN EXPRESS BUNDLE',
+            'master': 'MTN Master Bundle',
+            'standard': 'Standard Delivery',
+            'mashup_voice': 'MTN MASHUP (VOICE + DATA)',
+            'mashup_data': 'MTN MASHUP (DATA ONLY)'
+        }
+        
+        icon_map = {
+            'express': '⚡',
+            'master': '👑',
+            'standard': '📱',
+            'mashup_voice': '🎵',
+            'mashup_data': '📦'
+        }
+        
+        color_map = {
+            'express': '#f39c12',
+            'master': '#8B0000',
+            'standard': '#3498db',
+            'mashup_voice': '#9b59b6',
+            'mashup_data': '#dc3545'
+        }
+        
+        for delivery_type, size_prices in prices_by_type.items():
+            delivery_setting = next(
+                (ds for ds in delivery_settings if ds.delivery_type == delivery_type), 
+                None
+            )
+            
+            # Get REAL-TIME delivery time from analytics
+            estimated_wait = analytics_data.get('estimated_wait_by_type', {}).get(delivery_type, {})
+            
+            if estimated_wait and estimated_wait.get('estimated_minutes'):
+                avg_time = estimated_wait.get('estimated_minutes', 5)
+                delivery_summary = analytics_data.get('delivery_summary', {}).get(delivery_type, {})
+                min_time = delivery_summary.get('min_time', max(1, avg_time - 2))
+                max_time = delivery_summary.get('max_time', avg_time + 3)
+                
+                if min_time <= 0:
+                    min_time = max(1, avg_time - 2)
+                if max_time <= min_time:
+                    max_time = avg_time + 3
+                
+                print(f"  ✅ Using real data for {delivery_type}: avg={avg_time}min, min={min_time}min, max={max_time}min")
+            else:
+                avg_time = 5
+                min_time = 2
+                max_time = 8
+                print(f"  ⚠️ Using defaults for {delivery_type}: avg={avg_time}min")
+            
+            price_for_size = size_prices.get(size_gb, 0)
+            base_price = size_prices.get(1, list(size_prices.values())[0] if size_prices else 0)
+            
+            now = datetime.now()
+            delivery_window = {
+                'start': (now + timedelta(minutes=min_time)).strftime('%I:%M %p'),
+                'end': (now + timedelta(minutes=max_time)).strftime('%I:%M %p')
+            }
+            
+            option = {
+                'type': delivery_type,
+                'name': name_map.get(delivery_type, delivery_type.upper()),
+                'icon': icon_map.get(delivery_type, '📱'),
+                'color': color_map.get(delivery_type, '#3498db'),
+                'description': f'{delivery_type.upper()} delivery option',
+                'offer_slug': getattr(delivery_setting, 'offer_slug', None) or f'{network}_{delivery_type}_bundle',
+                'prices': size_prices,
+                'base_price': round(base_price, 2),
+                'price': round(price_for_size, 2) if price_for_size > 0 else round(base_price, 2),
+                'final_price': round(price_for_size, 2) if price_for_size > 0 else round(base_price, 2),
+                'delivery_time': {
+                    'min': int(min_time),
+                    'max': int(max_time),
+                    'avg': int(avg_time),
+                    'unit': 'minutes'
+                },
+                'delivery_window': delivery_window,
+                'queue_length': analytics_data.get('pending_count', 0),
+                'processing_count': analytics_data.get('processing_count', 0),
+                'congestion': analytics_data.get('congestion', 'low'),
+                'congestion_message': analytics_data.get('congestion_message', ''),
+                'status': 'active' if avg_time < 15 else 'delayed' if avg_time < 30 else 'very_delayed',
+                'recommended': delivery_type == 'master',
+                'analytics': {
+                    'orders_delivered': analytics_data.get('delivery_summary', {}).get(delivery_type, {}).get('orders_delivered', 0),
+                    'avg_time_historical': analytics_data.get('delivery_summary', {}).get(delivery_type, {}).get('avg_time', 0)
+                }
+            }
+            options.append(option)
+        
+        options.sort(key=lambda x: x['delivery_time']['avg'])
+        
+        # Build response data
+        response_data = {
+            'network': network,
+            'size_gb': size_gb,
+            'timestamp': datetime.now().isoformat(),
+            'analytics': analytics_data,
+            'fastest_network': 'mtn',
+            'fastest_estimate': options[0]['delivery_time']['avg'] if options else 5,
+            'options': options
+        }
+        
+        # STEP 5: Store in cache
+        delivery_cache.set(network, size_gb, price_category, response_data)
+        
+        print(f"\n📤 FINAL RESPONSE:")
+        for opt in options:
+            price_count = len(opt['prices'])
+            price_range = f"₵{min(opt['prices'].values()):.2f} - ₵{max(opt['prices'].values()):.2f}"
+            print(f"  {opt['name']}: {price_count} sizes, {price_range}, avg {opt['delivery_time']['avg']}min")
+        print("="*60 + "\n")
+        
+        return jsonify({
+            'success': True,
+            'data': response_data,
+            'cached': False,
+            'cache_stats': delivery_cache.get_stats()
+        })
+        
+    except Exception as e:
+        print(f"\n❌ Error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ========== CACHE MANAGEMENT ENDPOINTS ==========
+
+@app.route('/api/admin/cache/stats', methods=['GET'])
+@token_required
+@admin_required
+def get_cache_stats():
+    """Get cache statistics"""
+    try:
+        return jsonify({
+            'success': True,
+            'data': delivery_cache.get_stats()
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/admin/cache/clear', methods=['POST'])
+@token_required
+@admin_required
+def clear_cache():
+    """Clear all cache"""
+    try:
+        delivery_cache.clear()
+        return jsonify({
+            'success': True,
+            'message': 'Cache cleared successfully'
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/admin/cache/keys', methods=['GET'])
+@token_required
+@admin_required
+def get_cache_keys():
+    """Get all cache keys"""
+    try:
+        return jsonify({
+            'success': True,
+            'data': {
+                'keys': delivery_cache.get_all_keys(),
+                'total': len(delivery_cache.get_all_keys())
+            }
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ========== DELIVERY STATUS ENDPOINT ==========
+
+@app.route('/api/delivery/status', methods=['GET'])
+@token_required
+def get_delivery_status():
+    """Get real-time delivery status using Digimall analytics"""
+    try:
+        network = request.args.get('network', 'mtn')
+        
+        if network != 'mtn':
+            return jsonify({
+                'success': True,
+                'data': {
+                    'network': network,
+                    'message': 'Delivery status only available for MTN'
+                }
+            })
+        
+        # Get REAL-TIME analytics from Digimall
+        analytics = DeliveryAnalytics.analyze_delivery_performance(network, lookback_hours=24)
+        analytics_data = analytics.get('data', {})
+        
+        pending_orders = analytics_data.get('pending_count', 0)
+        processing_count = analytics_data.get('processing_count', 0)
+        congestion = analytics_data.get('congestion', 'low')
+        congestion_message = analytics_data.get('congestion_message', '')
+        
+        current_hour = datetime.now().hour
+        is_peak_hour = (8 <= current_hour <= 11) or (17 <= current_hour <= 20)
+        
+        from models import DeliverySetting
+        delivery_settings = DeliverySetting.query.filter_by(
+            network=network,
+            is_active=True
+        ).all()
+        
+        if not delivery_settings:
+            default_options = [
+                {
+                    'type': 'express',
+                    'name': 'MTN EXPRESS BUNDLE',
+                    'icon': '⚡',
+                    'color': '#f39c12',
+                    'delivery_time': {'min': 3, 'max': 8, 'avg': 5},
+                    'price_multiplier': 1.15,
+                    'fixed_premium': 0.50,
+                    'queue_length': pending_orders,
+                    'queue_wait': f'{int(pending_orders * 0.2)} min',
+                    'delivery_window': get_delivery_window(5),
+                    'congestion': congestion,
+                    'congestion_message': congestion_message,
+                    'status': 'active'
+                },
+                {
+                    'type': 'master',
+                    'name': 'MTN Master Bundle',
+                    'icon': '👑',
+                    'color': '#8B0000',
+                    'delivery_time': {'min': 2, 'max': 6, 'avg': 4},
+                    'price_multiplier': 1.05,
+                    'fixed_premium': 0,
+                    'queue_length': pending_orders,
+                    'queue_wait': f'{int(pending_orders * 0.3)} min',
+                    'delivery_window': get_delivery_window(4),
+                    'congestion': congestion,
+                    'congestion_message': congestion_message,
+                    'status': 'active',
+                    'recommended': True
+                },
+                {
+                    'type': 'mashup',
+                    'name': 'MTN MASHUP (BUNDLE ONLY)',
+                    'icon': '📦',
+                    'color': '#dc3545',
+                    'delivery_time': {'min': 10, 'max': 60, 'avg': 30},
+                    'price_multiplier': 0.95,
+                    'fixed_premium': 0,
+                    'queue_length': pending_orders,
+                    'queue_wait': f'{int(pending_orders * 0.5)} min',
+                    'delivery_window': get_delivery_window(30),
+                    'congestion': congestion,
+                    'congestion_message': congestion_message,
+                    'status': 'delayed'
+                }
+            ]
+            
+            return jsonify({
+                'success': True,
+                'data': {
+                    'network': network,
+                    'timestamp': datetime.now().isoformat(),
+                    'pending_orders': pending_orders,
+                    'processing_orders': processing_count,
+                    'avg_delivery_time': analytics_data.get('averages_by_type', {}).get('master', {}).get('avg', 5),
+                    'congestion': congestion,
+                    'congestion_message': congestion_message,
+                    'is_peak_hour': is_peak_hour,
+                    'fastest_network': 'mtn',
+                    'fastest_estimate': analytics_data.get('estimated_wait_by_type', {}).get('express', {}).get('estimated_minutes', 4),
+                    'analytics': analytics_data,
+                    'options': default_options
+                }
+            })
+        
+        options = []
+        for setting in delivery_settings:
+            delivery_type = getattr(setting, 'delivery_type', 'standard')
+            
+            estimated_wait = analytics_data.get('estimated_wait_by_type', {}).get(delivery_type, {})
+            
+            if estimated_wait and estimated_wait.get('estimated_minutes'):
+                avg_time = estimated_wait.get('estimated_minutes', 5)
+                delivery_summary = analytics_data.get('delivery_summary', {}).get(delivery_type, {})
+                min_time = delivery_summary.get('min_time', max(1, avg_time - 2))
+                max_time = delivery_summary.get('max_time', avg_time + 3)
+                
+                if min_time <= 0:
+                    min_time = max(1, avg_time - 2)
+                if max_time <= min_time:
+                    max_time = avg_time + 3
+            else:
+                min_time = getattr(setting, 'min_time', 3)
+                max_time = getattr(setting, 'max_time', 8)
+                avg_time = getattr(setting, 'avg_time', 5)
+            
+            now = datetime.now()
+            delivery_window = {
+                'start': (now + timedelta(minutes=int(min_time))).strftime('%I:%M %p'),
+                'end': (now + timedelta(minutes=int(max_time))).strftime('%I:%M %p')
+            }
+            
+            name = get_name_for_type(delivery_type)
+            icon = get_icon_for_type(delivery_type)
+            color = get_color_for_type(delivery_type)
+            
+            options.append({
+                'type': delivery_type,
+                'name': name,
+                'icon': icon,
+                'color': color,
+                'delivery_time': {
+                    'min': int(min_time),
+                    'max': int(max_time),
+                    'avg': int(avg_time),
+                    'unit': 'minutes'
+                },
+                'delivery_window': delivery_window,
+                'price_multiplier': float(getattr(setting, 'multiplier', 1.0)),
+                'fixed_premium': float(getattr(setting, 'fixed_premium', 0)),
+                'queue_length': pending_orders,
+                'queue_wait': f'{int(pending_orders * 0.3)} min',
+                'congestion': congestion,
+                'congestion_message': congestion_message,
+                'status': 'active' if avg_time < 15 else 'delayed' if avg_time < 30 else 'very_delayed',
+                'recommended': delivery_type == 'master',
+                'orders_delivered': analytics_data.get('delivery_summary', {}).get(delivery_type, {}).get('orders_delivered', 0)
+            })
+        
+        options.sort(key=lambda x: x['delivery_time']['avg'])
+        fastest = options[0] if options else None
         
         return jsonify({
             'success': True,
             'data': {
-                'referral_data_balance': float(user.referral_data_balance or 0),
-                'total_referrals': completed_count,
-                'pending_referrals': pending_count,
-                'referrals_needed_for_next': next_reward_at,
-                'reward_amount': '10MB Data',
-                'max_redeemable': 50,  # Max 50MB can be redeemed
-                'redeemable_data': min(float(user.referral_data_balance or 0), 50)
+                'network': network,
+                'timestamp': datetime.now().isoformat(),
+                'pending_orders': pending_orders,
+                'processing_orders': processing_count,
+                'avg_delivery_time': analytics_data.get('averages_by_type', {}).get('master', {}).get('avg', 5),
+                'congestion': congestion,
+                'congestion_message': congestion_message,
+                'is_peak_hour': is_peak_hour,
+                'fastest_network': 'mtn' if fastest else None,
+                'fastest_estimate': fastest['delivery_time']['avg'] if fastest else None,
+                'analytics': analytics_data,
+                'options': options
             }
         })
         
     except Exception as e:
-        print(f"Get referral balance error: {e}")
+        print(f"Error getting delivery status: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
-@app.route('/api/referral/redeem', methods=['POST'])
+
+# ========== DIGIMALL PENDING STATUS ENDPOINT ==========
+
+@app.route('/api/delivery/digimall-status', methods=['GET'])
 @token_required
-def redeem_referral_data():
-    """Redeem referral data for actual data bundle (max 50MB total)"""
+def get_digimall_pending_status():
+    """Fetch real-time pending/delivering status directly from Digimall"""
     try:
-        data = request.get_json()
-        network = data.get('network')
-        mb_amount = data.get('mb', 10)
-        phone = data.get('phone')
+        network = request.args.get('network', 'mtn')
         
-        if not phone:
-            return jsonify({'success': False, 'error': 'Phone number required'}), 400
+        # Use analytics which already combines Digimall + local data
+        analytics = DeliveryAnalytics.analyze_delivery_performance(network, lookback_hours=24)
+        analytics_data = analytics.get('data', {})
         
-        if mb_amount not in [10, 20, 30, 40, 50]:
-            return jsonify({'success': False, 'error': 'Redeem 10, 20, 30, 40, or 50 MB only'}), 400
+        return jsonify({
+            'success': True,
+            'data': {
+                'pending_count': analytics_data.get('pending_count', 0),
+                'processing_count': analytics_data.get('processing_count', 0),
+                'congestion': analytics_data.get('congestion', 'low'),
+                'congestion_color': analytics_data.get('congestion_color', '#28a745'),
+                'message': analytics_data.get('congestion_message', ''),
+                'avg_processing_time': analytics_data.get('averages_by_type', {}).get('master', {}).get('avg', 2),
+                'estimated_wait': analytics_data.get('estimated_wait_by_type', {}).get('master', {}).get('estimated_minutes', 0),
+                'is_peak_hour': (8 <= datetime.now().hour <= 11) or (17 <= datetime.now().hour <= 20),
+                'timestamp': datetime.now().isoformat(),
+                'total_analyzed': analytics_data.get('total_analyzed', 0),
+                'lookback_hours': analytics_data.get('lookback_hours', 24)
+            }
+        })
         
-        user = g.current_user
+    except Exception as e:
+        print(f"Error fetching Digimall status: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ========== DIGIMALL QUEUE DEPTH ENDPOINT ==========
+
+@app.route('/api/delivery/digimall-queue-depth', methods=['GET'])
+@token_required
+def get_digimall_queue_depth():
+    """Get current queue depth from Digimall by checking recent orders"""
+    try:
+        network = request.args.get('network', 'mtn')
         
-        # Check if user has enough referral data
-        if (user.referral_data_balance or 0) < mb_amount:
-            return jsonify({'success': False, 'error': f'Insufficient referral data. You have {user.referral_data_balance or 0} MB'}), 400
+        analytics = DeliveryAnalytics.analyze_delivery_performance(network, lookback_hours=24)
+        analytics_data = analytics.get('data', {})
         
+        pending_count = analytics_data.get('pending_count', 0)
         
-        if not hasattr(user, 'redeemed_referral_data'):
-            user.redeemed_referral_data = 0
+        # Estimated wait time
+        estimated_wait = analytics_data.get('estimated_wait_by_type', {}).get('master', {}).get('estimated_minutes', 0)
         
-        if (user.redeemed_referral_data or 0) + mb_amount > 50:
-            return jsonify({'success': False, 'error': f'Maximum redeemable is 50MB total. You have already redeemed {user.redeemed_referral_data or 0} MB'}), 400
+        return jsonify({
+            'success': True,
+            'data': {
+                'queue_depth': pending_count,
+                'queue_position': pending_count,
+                'estimated_wait_minutes': round(estimated_wait, 1),
+                'avg_processing_time': analytics_data.get('averages_by_type', {}).get('master', {}).get('avg', 2),
+                'timestamp': datetime.now().isoformat()
+            }
+        })
         
-        # Convert MB to GB
-        gb_amount = mb_amount / 1000
+    except Exception as e:
+        print(f"Error getting queue depth: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ========== DELIVERY ANALYTICS ENDPOINT ==========
+
+@app.route('/api/delivery/analytics', methods=['GET'])
+@token_required
+def get_delivery_analytics():
+    """
+    GET /api/delivery/analytics?network=mtn&hours=24
+    Get detailed delivery analytics from Digimall orders (with caching)
+    """
+    try:
+        network = request.args.get('network', 'mtn')
+        hours = request.args.get('hours', 24, type=int)
         
-        # Deduct from referral balance
-        user.referral_data_balance -= mb_amount
-        user.redeemed_referral_data = (user.redeemed_referral_data or 0) + mb_amount
+        # Try cache first
+        cache_key = f"analytics_{network}_{hours}"
+        cached_data = analytics_cache.get(network, hours, 'analytics')
         
-        # Create order record
-        order = Order(
-            user_id=user.id,
-            type='data',
-            network=network,
-            size_gb=gb_amount,
-            phone_number=phone,
-            amount=0,
-            quantity=1,
-            status='completed',
-            payment_method='referral',
-            description=f'Redeemed {mb_amount}MB referral data for {network} data',
-            completed_at=datetime.utcnow(),
-            created_at=datetime.utcnow()
-        )
-        db.session.add(order)
+        if cached_data:
+            return jsonify({
+                'success': True,
+                'data': cached_data,
+                'cached': True,
+                'cache_stats': analytics_cache.get_stats()
+            })
+        
+        analytics = DeliveryAnalytics.analyze_delivery_performance(network, lookback_hours=hours)
+        
+        if analytics.get('success'):
+            analytics_data = analytics.get('data', {})
+            
+            # Store in cache
+            analytics_cache.set(network, hours, 'analytics', analytics_data)
+            
+            return jsonify({
+                'success': True,
+                'data': analytics_data,
+                'cached': False
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'error': 'Failed to analyze delivery performance'
+            }), 500
+            
+    except Exception as e:
+        print(f"Delivery analytics error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+# ========== CHECK PENDING DIGIMALL ORDERS ==========
+
+@app.route('/api/delivery/check-pending-digimall', methods=['GET'])
+@token_required
+def check_pending_digimall_orders():
+    """Check pending orders directly from Digimall without relying on database"""
+    try:
+        digimall = DigimallService()
+        
+        recent_orders = Order.query.filter(
+            Order.provider_order_id.isnot(None),
+            Order.created_at >= datetime.now() - timedelta(days=7)
+        ).all()
+        
+        if not recent_orders:
+            return jsonify({
+                'success': False,
+                'message': 'No orders with Digimall IDs found in database'
+            }), 404
+        
+        identifiers = [order.provider_order_id for order in recent_orders if order.provider_order_id]
+        
+        bulk_result = digimall.bulk_check_order_status(identifiers)
+        
+        if not bulk_result.get('success'):
+            return jsonify({
+                'success': False,
+                'error': bulk_result.get('error', 'Failed to fetch from Digimall')
+            }), 500
+        
+        pending_orders = []
+        delivered_orders = []
+        
+        for order_status in bulk_result.get('orders', []):
+            if order_status.get('found'):
+                order_info = {
+                    'order_id': order_status.get('orderId'),
+                    'reference': order_status.get('reference'),
+                    'status': order_status.get('status'),
+                    'recipient': order_status.get('recipient'),
+                    'volume': order_status.get('volume'),
+                    'timestamp': order_status.get('timestamp')
+                }
+                
+                if order_status.get('status') in ['pending', 'processing']:
+                    pending_orders.append(order_info)
+                else:
+                    delivered_orders.append(order_info)
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'total_checked': len(identifiers),
+                'pending_count': len(pending_orders),
+                'pending_orders': pending_orders,
+                'delivered_count': len(delivered_orders),
+                'delivered_orders': delivered_orders,
+                'timestamp': datetime.now().isoformat()
+            }
+        })
+        
+    except Exception as e:
+        print(f"Error checking Digimall orders: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ========== SYNC DIGIMALL ORDERS ==========
+
+@app.route('/api/delivery/sync-digimall-orders', methods=['POST'])
+@token_required
+@admin_required
+def sync_digimall_orders():
+    """Sync pending orders from Digimall to update local database status"""
+    try:
+        digimall = DigimallService()
+        
+        recent_orders = Order.query.filter(
+            Order.provider_order_id.isnot(None),
+            Order.created_at >= datetime.now() - timedelta(days=7)
+        ).all()
+        
+        if not recent_orders:
+            return jsonify({
+                'success': False,
+                'message': 'No orders with Digimall IDs found in database'
+            }), 404
+        
+        identifiers = []
+        order_map = {}
+        for order in recent_orders:
+            if order.provider_order_id:
+                identifiers.append(order.provider_order_id)
+                order_map[order.provider_order_id] = order
+        
+        print(f"📊 Checking {len(identifiers)} orders with Digimall...")
+        
+        bulk_result = digimall.bulk_check_order_status(identifiers)
+        
+        if not bulk_result.get('success'):
+            return jsonify({
+                'success': False,
+                'error': bulk_result.get('error', 'Failed to fetch from Digimall')
+            }), 500
+        
+        updated_orders = []
+        for digimall_order in bulk_result.get('orders', []):
+            if digimall_order.get('found'):
+                digimall_id = digimall_order.get('identifier') or digimall_order.get('orderId')
+                digimall_status = digimall_order.get('status')
+                
+                if digimall_id in order_map:
+                    local_order = order_map[digimall_id]
+                    old_status = local_order.delivery_status
+                    
+                    status_map = {
+                        'pending': 'pending',
+                        'processing': 'processing',
+                        'delivered': 'delivered',
+                        'failed': 'failed',
+                        'cancelled': 'cancelled'
+                    }
+                    
+                    new_status = status_map.get(digimall_status, old_status)
+                    
+                    if old_status != new_status:
+                        local_order.delivery_status = new_status
+                        local_order.delivery_status_updated_at = datetime.utcnow()
+                        
+                        if new_status == 'delivered':
+                            local_order.completed_at = datetime.utcnow()
+                        
+                        updated_orders.append({
+                            'order_id': local_order.order_id,
+                            'old_status': old_status,
+                            'new_status': new_status,
+                            'digimall_status': digimall_status
+                        })
+                        
+                        print(f"  Updated {local_order.order_id}: {old_status} -> {new_status}")
         
         db.session.commit()
         
-        # Send data to network provider
-        send_data_delivery_to_provider(phone, f"✅ Your {mb_amount}MB {network.upper()} data (earned from referrals on {COMPANY_NAME}) has been delivered!")
-        
-        # Send email confirmation
-        send_email(
-            user.email,
-            f"Referral Data Redeemed - {mb_amount}MB - {COMPANY_NAME}",
-            f"""
-            <div style="font-family: Arial, sans-serif;">
-                <h2 style="color: #8B0000;">Referral Data Redeemed Successfully!</h2>
-                <p>Dear {user.username},</p>
-                <p>You have successfully redeemed <strong>{mb_amount}MB</strong> of referral data for:</p>
-                <h3>{network.upper()} Data</h3>
-                <p><strong>Phone Number:</strong> {phone}</p>
-                <p><strong>Remaining Referral Data:</strong> {user.referral_data_balance} MB</p>
-                <p><strong>Total Redeemed:</strong> {user.redeemed_referral_data} MB (Max 50MB)</p>
-                <p>Your data has been sent to your phone number!</p>
-                <a href="{COMPANY_WEBSITE}/referrals" style="background: #8B0000; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">View Referrals</a>
-            </div>
-            """
-        )
-        
         return jsonify({
             'success': True,
-            'message': f'Successfully redeemed {mb_amount}MB for {network} data',
+            'message': f'Successfully synced {len(updated_orders)} orders',
             'data': {
-                'redeemed_mb': mb_amount,
-                'remaining_referral_data': user.referral_data_balance,
-                'total_redeemed': user.redeemed_referral_data,
-                'max_redeemable': 50
+                'total_checked': len(identifiers),
+                'updated_orders': updated_orders,
+                'digimall_response': bulk_result
             }
         })
         
     except Exception as e:
-        print(f"Redeem referral data error: {e}")
+        print(f"Error syncing Digimall orders: {e}")
         db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
-    
-@app.route('/api/referral/list', methods=['GET'])
-@token_required
-def get_referral_list():
-    """Get list of user's referrals with status"""
+
+
+# ========== DELIVERY ORDER STATUS WEBHOOK ==========
+
+@app.route('/api/delivery/order-status', methods=['POST'])
+def update_order_delivery_status():
+    """Webhook to update order status when data is sent"""
     try:
-        page = request.args.get('page', 1, type=int)
-        per_page = request.args.get('limit', 20, type=int)
+        data = request.get_json()
+        order_id = data.get('order_id')
+        status = data.get('status')
+        provider_response = data.get('provider_response', {})
         
-        pagination = Referral.query.filter_by(
-            referrer_id=g.current_user.id
-        ).order_by(Referral.created_at.desc()).paginate(
-            page=page, per_page=per_page, error_out=False
-        )
+        order = Order.query.filter_by(order_id=order_id).first()
+        if not order:
+            return jsonify({'success': False, 'error': 'Order not found'}), 404
         
-        referrals_data = []
-        for r in pagination.items:
-            referred_user = User.query.get(r.referred_id)
-            referrals_data.append({
-                'id': r.id,
-                'username': referred_user.username if referred_user else 'Unknown',
-                'email': referred_user.email if referred_user else 'Unknown',
-                'phone': referred_user.phone if referred_user else 'Unknown',
-                'status': r.status,
-                'registered_at': r.created_at.isoformat(),
-                'completed_at': r.completed_at.isoformat() if r.completed_at else None,
-                'reward': '1 point towards 10MB' if r.status == 'completed' else 'Pending first purchase'
-            })
+        old_status = order.delivery_status
+        order.delivery_status = status
+        order.delivery_status_updated_at = datetime.utcnow()
+        
+        if status == 'delivered':
+            order.completed_at = datetime.utcnow()
+        
+        db.session.commit()
+        
+        trigger_websocket_update(order.agent_id, order_id, status)
         
         return jsonify({
             'success': True,
-            'data': referrals_data,
-            'total': pagination.total,
-            'page': page,
-            'total_pages': pagination.pages
+            'message': f'Order {order_id} status updated to {status}'
         })
         
     except Exception as e:
-        print(f"Get referral list error: {e}")
+        print(f"Error updating order status: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ========== SWITCH DELIVERY OPTION ==========
+
+@app.route('/api/delivery/switch', methods=['POST'])
+@token_required
+def switch_delivery_option():
+    """Switch to a different delivery option for an order"""
+    try:
+        data = request.get_json()
+        order_id = data.get('order_id')
+        new_offer_slug = data.get('offer_slug')
+        
+        order = Order.query.filter_by(order_id=order_id).first()
+        if not order:
+            return jsonify({'success': False, 'error': 'Order not found'}), 404
+        
+        if order.delivery_status not in ['pending', 'queued']:
+            return jsonify({'success': False, 'error': f'Cannot switch order in {order.delivery_status} status'}), 400
+        
+        order.provider_offer_slug = new_offer_slug
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': 'Delivery option updated successfully',
+            'data': {
+                'order_id': order_id,
+                'new_offer_slug': new_offer_slug
+            }
+        })
+        
+    except Exception as e:
+        print(f"Switch delivery option error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ========== DELIVERY ESTIMATES ENDPOINT ==========
+
+delivery_estimates_cache = {
+    'data': None,
+    'last_updated': 0,
+    'ttl': 30
+}
+
+@app.route('/api/delivery/estimates', methods=['GET'])
+@token_required
+def get_delivery_estimates():
+    """Get real-time delivery estimates for all networks with caching"""
+    try:
+        import time
+        current_time = time.time()
+        
+        if delivery_estimates_cache['data'] and delivery_estimates_cache['last_updated']:
+            cache_age = current_time - delivery_estimates_cache['last_updated']
+            if cache_age < delivery_estimates_cache['ttl']:
+                return jsonify({
+                    'success': True,
+                    'data': delivery_estimates_cache['data'],
+                    'cached': True,
+                    'cache_age': int(cache_age)
+                })
+        
+        networks = ['mtn', 'telecel', 'airteltigo']
+        estimates = {}
+        
+        for network in networks:
+            analytics = DeliveryAnalytics.analyze_delivery_performance(network, lookback_hours=24)
+            analytics_data = analytics.get('data', {})
+            
+            estimated_wait = analytics_data.get('estimated_wait_by_type', {}).get('master', {})
+            avg_time = estimated_wait.get('estimated_minutes', 5)
+            
+            if avg_time <= 2:
+                status = 'excellent'
+                congestion = 'low'
+            elif avg_time <= 5:
+                status = 'good'
+                congestion = 'low'
+            elif avg_time <= 10:
+                status = 'fair'
+                congestion = 'medium'
+            else:
+                status = 'poor'
+                congestion = 'high'
+            
+            estimates[network] = {
+                'min': max(1, avg_time - 2),
+                'max': avg_time + 3,
+                'avg': avg_time,
+                'unit': 'minutes',
+                'network_status': status,
+                'congestion': congestion,
+                'pending_orders': analytics_data.get('pending_count', 0)
+            }
+        
+        fastest_network = min(estimates.items(), key=lambda x: x[1]['avg'])
+        
+        response_data = {
+            'estimates': estimates,
+            'fastest_network': {
+                'network': fastest_network[0],
+                'avg_time': fastest_network[1]['avg']
+            },
+            'last_updated': datetime.utcnow().isoformat(),
+            'refresh_interval': 30
+        }
+        
+        delivery_estimates_cache['data'] = response_data
+        delivery_estimates_cache['last_updated'] = current_time
+        
+        return jsonify({
+            'success': True,
+            'data': response_data
+        })
+        
+    except Exception as e:
+        print(f"Error getting delivery estimates: {e}")
+        fallback_estimates = {
+            'mtn': {'min': 2, 'max': 5, 'avg': 3, 'unit': 'minutes', 'network_status': 'excellent', 'congestion': 'low', 'pending_orders': 0},
+            'telecel': {'min': 3, 'max': 8, 'avg': 5, 'unit': 'minutes', 'network_status': 'good', 'congestion': 'medium', 'pending_orders': 0},
+            'airteltigo': {'min': 3, 'max': 7, 'avg': 4, 'unit': 'minutes', 'network_status': 'excellent', 'congestion': 'low', 'pending_orders': 0}
+        }
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'estimates': fallback_estimates,
+                'fastest_network': {'network': 'mtn', 'avg_time': 3},
+                'last_updated': datetime.utcnow().isoformat(),
+                'refresh_interval': 30
+            }
+        }), 200
+
+
+# ========== HELPER FUNCTIONS ==========
+
+def get_name_for_type(delivery_type):
+    """Get display name for delivery type"""
+    names = {
+        'express': 'MTN EXPRESS BUNDLE',
+        'master': 'MTN Master Bundle',
+        'mashup': 'MTN MASHUP (BUNDLE ONLY)',
+        'standard': 'Standard Delivery'
+    }
+    return names.get(delivery_type, 'MTN Data Bundle')
+
+def get_icon_for_type(delivery_type):
+    """Get icon for delivery type"""
+    icons = {
+        'express': '⚡',
+        'master': '👑',
+        'mashup': '📦',
+        'standard': '📱'
+    }
+    return icons.get(delivery_type, '📱')
+
+def get_color_for_type(delivery_type):
+    """Get color for delivery type"""
+    colors = {
+        'express': '#f39c12',
+        'master': '#8B0000',
+        'mashup': '#dc3545',
+        'standard': '#3498db'
+    }
+    return colors.get(delivery_type, '#3498db')
+
+def get_delivery_window(avg_time):
+    """Calculate delivery window based on average time"""
+    now = datetime.now()
+    start = now + timedelta(minutes=int(avg_time * 0.7))
+    end = now + timedelta(minutes=int(avg_time * 1.3))
+    return {
+        'start': start.strftime('%I:%M %p'),
+        'end': end.strftime('%I:%M %p')
+    }
+
+
+def trigger_websocket_update(agent_id, order_id, status):
+    """Trigger WebSocket update for real-time notifications"""
+    try:
+        # Import socketio instance if available
+        try:
+            from extensions import socketio
+            socketio.emit('order_status_update', {
+                'order_id': order_id,
+                'status': status,
+                'agent_id': agent_id,
+                'timestamp': datetime.now().isoformat()
+            }, room=f'agent_{agent_id}')
+        except:
+            pass
+    except Exception as e:
+        print(f"WebSocket update error: {e}")
+
+
 # ========== WAEC VOUCHER ENDPOINTS ==========
 
 @app.route('/api/waec/vouchers', methods=['GET'])
@@ -5332,6 +9657,9 @@ def create_order():
         phone = data.get('phone')
         payment_method = data.get('payment_method', 'wallet')
         quantity = data.get('quantity', 1)
+        delivery_type = data.get('delivery_type', 'master')  # Get delivery type from request
+        
+        print(f"📦 Delivery Type: {delivery_type}")
         
         # Check required fields
         missing = []
@@ -5353,22 +9681,56 @@ def create_order():
         print(f"  Is Agent: {is_agent}")
         print(f"  Network: {network}")
         print(f"  Size: {size_gb}GB")
+        print(f"  Delivery Type: {delivery_type}")
         
+        # Get price based on delivery type
+        from models import PriceSetting
+        
+        # Try to get delivery-specific price first
         if is_agent:
-            unit_price = get_agent_price(network, size_gb)
-            print(f"  Agent price: ₵{unit_price}")
+            # Agent price with delivery type
+            price_setting = PriceSetting.query.filter_by(
+                category='agent_price',
+                network=network,
+                size_gb=size_gb,
+                delivery_type=delivery_type,
+                is_available=True
+            ).first()
+            
+            if price_setting:
+                unit_price = float(price_setting.price)
+                print(f"  Agent {delivery_type} price: ₵{unit_price}")
+            else:
+                # Fallback to base agent price
+                unit_price = get_agent_price(network, size_gb)
+                print(f"  Agent base price: ₵{unit_price}")
         else:
-            unit_price = get_user_price(network, size_gb)
-            print(f"  User price: ₵{unit_price}")
+            # User price with delivery type
+            price_setting = PriceSetting.query.filter_by(
+                category='user_price',
+                network=network,
+                size_gb=size_gb,
+                delivery_type=delivery_type,
+                is_available=True
+            ).first()
+            
+            if price_setting:
+                unit_price = float(price_setting.price)
+                print(f"  User {delivery_type} price: ₵{unit_price}")
+            else:
+                # Fallback to base user price
+                unit_price = get_user_price(network, size_gb)
+                print(f"  User base price: ₵{unit_price}")
         
         if unit_price == 0:
             return jsonify({
                 'success': False, 
-                'error': f'Price not configured for {network} {size_gb}GB. Please contact admin.',
+                'error': f'Price not configured for {network} {size_gb}GB ({delivery_type}). Please contact admin.',
                 'debug': {
                     'network': network,
                     'size_gb': size_gb,
-                    'is_agent': is_agent
+                    'is_agent': is_agent,
+                    'delivery_type': delivery_type
                 }
             }), 400
         
@@ -5395,6 +9757,27 @@ def create_order():
         # Generate order ID
         order_id = f"ORD-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{g.current_user.id}"
         
+        # Get the offer_slug for Digimall based on delivery_type
+        from models import DeliverySetting
+        delivery_setting = DeliverySetting.query.filter_by(
+            network=network,
+            delivery_type=delivery_type,
+            is_active=True
+        ).first()
+        
+        if delivery_setting and delivery_setting.offer_slug:
+            offer_slug = delivery_setting.offer_slug
+            print(f"📦 Using offer_slug: {offer_slug}")
+        else:
+            # Fallback defaults
+            if delivery_type == 'express':
+                offer_slug = 'mtn_express_bundle'
+            elif delivery_type == 'master':
+                offer_slug = 'mtn_master_bundle'
+            else:
+                offer_slug = 'standard_bundle'
+            print(f"📦 Using fallback offer_slug: {offer_slug}")
+        
         # Create order with delivery status tracking
         order = Order(
             user_id=g.current_user.id,
@@ -5409,10 +9792,26 @@ def create_order():
             delivery_status='pending',
             delivery_status_updated_at=datetime.utcnow(),
             payment_method=payment_method,
+            delivery_type=delivery_type,  # Store the delivery type
+            offer_slug=offer_slug,  # Store the offer_slug
             created_at=datetime.utcnow()
         )
         db.session.add(order)
         db.session.flush()
+        
+        previous_orders = Order.query.filter(
+            Order.user_id == g.current_user.id,
+            Order.status == 'completed'
+        ).count()
+        
+        # Check if this user was referred by someone
+        referred_by_user = None
+        if g.current_user.referred_by:
+            referred_by_user = User.query.get(g.current_user.referred_by)
+        
+        print(f"\n[REFERRAL CHECK]")
+        print(f"  Previous completed orders: {previous_orders}")
+        print(f"  Referred by: {referred_by_user.username if referred_by_user else 'None'}")
         
         if payment_method == 'wallet':
             # Initialize Digimall service for delivery only
@@ -5433,7 +9832,7 @@ def create_order():
                 amount=total_price,
                 balance_before=balance_before,
                 balance_after=g.current_user.wallet_balance,
-                description=f'Purchase: {quantity}x {network} {size_gb}GB to {phone}',
+                description=f'Purchase: {quantity}x {network} {size_gb}GB to {phone} ({delivery_type})',
                 reference=order_id,
                 status='pending'
             )
@@ -5458,12 +9857,15 @@ def create_order():
                 print(f"  Network: {network}")
                 print(f"  Volume: {size_gb}GB")
                 print(f"  Phone: {formatted_phone}")
+                print(f"  Offer Slug: {offer_slug}")
+                print(f"  Delivery Type: {delivery_type}")
                 
                 # Call deliver_data with correct parameters
                 digimall_response = digimall.deliver_data(
                     network=network,
                     phone_number=formatted_phone,
-                    volume=size_gb
+                    volume=size_gb,
+                    offer_slug=offer_slug  # Pass the correct offer_slug
                 )
                 
                 print(f"  Response: {digimall_response}")
@@ -5481,6 +9883,39 @@ def create_order():
                     transaction.status = 'completed'
                     db.session.commit()
                     
+                    # ========== COMPLETE REFERRAL AFTER SUCCESSFUL ORDER ==========
+                    # Check if this is the first purchase and user was referred
+                    if previous_orders == 0 and referred_by_user:
+                        referral = Referral.query.filter_by(
+                            referrer_id=referred_by_user.id,
+                            referred_user_id=g.current_user.id,
+                            status='pending'
+                        ).first()
+                        
+                        if referral:
+                            # Complete the referral
+                            referral.status = 'completed'
+                            referral.completed_at = datetime.utcnow()
+                            
+                            # Award points to referrer
+                            points_awarded = POINTS_CONFIG['REFERRAL_POINTS']  # 1 point
+                            referred_by_user.points_balance = (referred_by_user.points_balance or 0) + points_awarded
+                            referred_by_user.total_points_earned = (referred_by_user.total_points_earned or 0) + points_awarded
+                            
+                            # Create points transaction for referrer
+                            points_trans = PointsTransaction(
+                                user_id=referred_by_user.id,
+                                points=points_awarded,
+                                type='referral_bonus',
+                                description=f'Referral bonus for {g.current_user.username}\'s first purchase',
+                                reference=referral.referral_code,
+                                balance_after=referred_by_user.points_balance
+                            )
+                            db.session.add(points_trans)
+                            
+                            db.session.commit()
+                            print(f"✅ Referral completed! {referred_by_user.username} earned {points_awarded} point(s)")
+                    
                     return jsonify({
                         'success': True,
                         'data': {
@@ -5489,9 +9924,11 @@ def create_order():
                             'amount': float(total_price),
                             'provider_order_id': digimall_response.get('orderId'),
                             'provider_status': digimall_response.get('status'),
-                            'delivery_status': order.delivery_status
+                            'delivery_status': order.delivery_status,
+                            'delivery_type': delivery_type,
+                            'offer_slug': offer_slug
                         },
-                        'message': f'✅ {size_gb}GB {network.upper()} data ordered. Delivery in progress...'
+                        'message': f'✅ {size_gb}GB {network.upper()} {delivery_type} bundle ordered. Delivery in progress...'
                     })
                 else:
                     # Delivery failed - refund
@@ -5564,7 +10001,8 @@ def create_order():
                     'order_id': order_id,
                     'reference': reference,
                     'amount': total_price,
-                    'delivery_status': 'pending'
+                    'delivery_status': 'pending',
+                    'delivery_type': delivery_type
                 },
                 'payment_instructions': {
                     'mobile_money_number': COMPANY_PHONE,
@@ -5582,7 +10020,60 @@ def create_order():
         db.session.rollback()
         
         return jsonify({'success': False, 'error': str(e)}), 500
-    
+
+# Add this function to check and complete referrals
+
+def check_and_complete_referral(user):
+    """Check if user was referred and complete the referral on first purchase"""
+    try:
+        # Check if this is the user's first completed order
+        previous_orders = Order.query.filter(
+            Order.user_id == user.id,
+            Order.status == 'completed'
+        ).count()
+        
+        # If this is the first order (previous count is 0 before adding this one)
+        if previous_orders == 0:
+            # Check if this user was referred by someone
+            if user.referred_by:
+                referrer = User.query.get(user.referred_by)
+                if referrer:
+                    # Find the pending referral
+                    referral = Referral.query.filter_by(
+                        referrer_id=referrer.id,
+                        referred_user_id=user.id,
+                        status='pending'
+                    ).first()
+                    
+                    if referral:
+                        # Complete the referral
+                        referral.status = 'completed'
+                        referral.completed_at = datetime.utcnow()
+                        
+                        # Award points to referrer
+                        points_awarded = POINTS_CONFIG['REFERRAL_POINTS']  # 1 point
+                        referrer.points_balance = (referrer.points_balance or 0) + points_awarded
+                        referrer.total_points_earned = (referrer.total_points_earned or 0) + points_awarded
+                        
+                        # Create points transaction for referrer
+                        points_trans = PointsTransaction(
+                            user_id=referrer.id,
+                            points=points_awarded,
+                            type='referral_bonus',
+                            description=f'Referral bonus for {user.username}\'s first purchase',
+                            reference=referral.referral_code,
+                            balance_after=referrer.points_balance
+                        )
+                        db.session.add(points_trans)
+                        
+                        db.session.commit()
+                        print(f"✅ Referral completed! {referrer.username} earned {points_awarded} point(s)")
+                        return True
+        return False
+    except Exception as e:
+        print(f"Error checking referral: {e}")
+        return False
+
 @app.route('/api/order/bulk', methods=['POST'])
 @token_required
 @agent_required
@@ -5847,13 +10338,31 @@ def bulk_check_digimall_status():
         digimall = DigimallService()
         results = []
         
-        for identifier in identifiers[:20]:  # Limit to 20 per request
+        # Limit to 20 per request to avoid timeouts
+        for identifier in identifiers[:20]:
             try:
-                result = digimall.check_delivery_status(identifier)
+                # FIXED: Use check_order_status (not check_delivery_status)
+                result = digimall.check_order_status(identifier)
                 
-                if result.get('success'):
-                    order_data = result.get('order', {})
-                    status = order_data.get('status')
+                # Handle different response formats
+                if result.get('success') or result.get('found'):
+                    # Extract status from various possible response formats
+                    status = None
+                    order_data = {}
+                    
+                    if result.get('order'):
+                        order_data = result.get('order', {})
+                        status = order_data.get('status')
+                    elif result.get('data'):
+                        order_data = result.get('data', {})
+                        status = order_data.get('status')
+                    else:
+                        status = result.get('status')
+                        order_data = result
+                    
+                    # If no status found, try to get it from the result directly
+                    if not status:
+                        status = result.get('status')
                     
                     # Update local database
                     order = Order.query.filter(
@@ -5861,6 +10370,7 @@ def bulk_check_digimall_status():
                         (Order.order_id == identifier)
                     ).first()
                     
+                    updated = False
                     if order and status and status != order.delivery_status:
                         old_status = order.delivery_status
                         order.delivery_status = status
@@ -5868,19 +10378,21 @@ def bulk_check_digimall_status():
                         if status == 'delivered':
                             order.completed_at = datetime.utcnow()
                         db.session.commit()
+                        updated = True
                         print(f"[DIGIMALL BULK] Updated order {order.order_id}: {old_status} -> {status}")
                     
                     results.append({
                         'identifier': identifier,
                         'status': status,
-                        'found': True
+                        'found': True,
+                        'updated': updated
                     })
                 else:
                     results.append({
                         'identifier': identifier,
                         'status': None,
                         'found': False,
-                        'error': result.get('error')
+                        'error': result.get('error', 'Order not found')
                     })
             except Exception as e:
                 print(f"[DIGIMALL BULK] Error checking {identifier}: {e}")
@@ -5893,16 +10405,22 @@ def bulk_check_digimall_status():
         
         db.session.commit()
         
+        # Count found orders
+        found_count = sum(1 for r in results if r.get('found'))
+        
         return jsonify({
             'success': True,
             'results': results,
-            'total': len(results)
+            'total': len(results),
+            'found': found_count,
+            'notFound': len(results) - found_count
         })
         
     except Exception as e:
         print(f"Bulk status check error: {e}")
         import traceback
         traceback.print_exc()
+        db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
@@ -5914,11 +10432,29 @@ def check_single_order_status(identifier):
         print(f"[DIGIMALL] Checking status for identifier: {identifier}")
         
         digimall = DigimallService()
-        result = digimall.check_delivery_status(identifier)
         
-        if result.get('success'):
-            order_data = result.get('order', {})
-            status = order_data.get('status')
+        # FIXED: Use check_order_status (not check_delivery_status)
+        result = digimall.check_order_status(identifier)
+        
+        # Handle different response formats
+        if result.get('success') or result.get('found'):
+            # Extract status from various possible response formats
+            status = None
+            order_data = {}
+            
+            if result.get('order'):
+                order_data = result.get('order', {})
+                status = order_data.get('status')
+            elif result.get('data'):
+                order_data = result.get('data', {})
+                status = order_data.get('status')
+            else:
+                status = result.get('status')
+                order_data = result
+            
+            # If no status found, try to get it from the result directly
+            if not status:
+                status = result.get('status')
             
             # Update local database
             order = Order.query.filter(
@@ -5926,6 +10462,7 @@ def check_single_order_status(identifier):
                 (Order.order_id == identifier)
             ).first()
             
+            updated = False
             if order and status:
                 old_status = order.delivery_status
                 if status != old_status:
@@ -5934,6 +10471,7 @@ def check_single_order_status(identifier):
                     if status == 'delivered':
                         order.completed_at = datetime.utcnow()
                     db.session.commit()
+                    updated = True
                     print(f"[DIGIMALL] Updated order {order.order_id}: {old_status} -> {status}")
                 
                 return jsonify({
@@ -5941,7 +10479,7 @@ def check_single_order_status(identifier):
                     'status': status,
                     'order_id': order.order_id,
                     'provider_status': order_data,
-                    'updated': status != old_status
+                    'updated': updated
                 })
             else:
                 return jsonify({
@@ -5952,14 +10490,14 @@ def check_single_order_status(identifier):
                     'updated': False
                 })
         
-        return jsonify({'success': False, 'error': result.get('error')}), 400
+        return jsonify({'success': False, 'error': result.get('error', 'Order not found')}), 400
         
     except Exception as e:
         print(f"Check order status error: {e}")
         import traceback
         traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
-
+    
 @app.route('/api/admin/digimall-balance', methods=['GET'])
 @token_required
 @admin_required
@@ -6345,16 +10883,29 @@ def store_paystack_webhook():
         db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
     
+# ============================================================
+# AGENT STORE & PAYMENT VERIFICATION - AFDALNOVA
+# ============================================================
+
 @app.route('/api/agent/store-earnings', methods=['GET'])
 @token_required
 @agent_required
 def get_agent_store_earnings():
-    """Get agent's earnings from store sales"""
+    """Get agent's earnings from store sales - AFDALNOVA"""
     try:
         from models import Store, Order
         
-        # Get store - make sure to select only existing columns
-        store = Store.query.filter_by(agent_id=g.current_user.id).first()
+        # Get platform info
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        primary_color = platform_config.get('primary_color', '#1A2A6C')
+        
+        # Get store
+        store = Store.query.filter_by(
+            agent_id=g.current_user.id,
+            platform=platform
+        ).first()
         
         if not store:
             return jsonify({
@@ -6366,12 +10917,15 @@ def get_agent_store_earnings():
                     'orders_count': 0,
                     'earnings_by_month': {},
                     'recent_orders': []
-                }
+                },
+                'platform': platform,
+                'platform_name': platform_name
             })
         
-        # Get all store orders (using payment_method='paystack' or just all orders)
+        # Get all store orders
         orders = Order.query.filter_by(
-            agent_id=g.current_user.id
+            agent_id=g.current_user.id,
+            platform=platform
         ).filter(
             Order.payment_method.in_(['paystack', 'store_pending', 'store_payment'])
         ).order_by(Order.created_at.desc()).all()
@@ -6403,23 +10957,33 @@ def get_agent_store_earnings():
                     'customer_phone': o.phone_number,
                     'product': f"{o.size_gb}GB {o.network}" if o.network else 'Data Bundle',
                     'created_at': o.created_at.isoformat(),
-                    'status': o.status
+                    'status': o.status,
+                    'platform': platform_name
                 } for o in orders[:20]]
+            },
+            'platform': platform,
+            'platform_name': platform_name,
+            'branding': {
+                'name': platform_config.get('brand_name', platform_name),
+                'primary_color': primary_color,
+                'secondary_color': platform_config.get('secondary_color', '#C9A84C')
             }
         })
         
     except Exception as e:
-        print(f"Get store earnings error: {e}")
+        print(f"[STORE EARNINGS ERROR] {e}")
         import traceback
         traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
+
 @app.route('/api/store/order', methods=['POST'])
 def public_store_order():
-    """Public endpoint to place order - NO LOGIN REQUIRED"""
+    """Public endpoint to place order - NO LOGIN REQUIRED - AFDALNOVA"""
     try:
         from models import Store, User, Order
         
+        # Get platform from store
         data = request.get_json()
         
         store_slug = data.get('store_slug')
@@ -6429,7 +10993,7 @@ def public_store_order():
         amount = data.get('amount')
         
         print(f"\n{'='*60}")
-        print(f"🔓 PUBLIC STORE ORDER")
+        print(f"🔓 PUBLIC STORE ORDER - AFDALNOVA")
         print(f"{'='*60}")
         print(f"Store Slug: {store_slug}")
         print(f"Network: {network}")
@@ -6440,13 +11004,19 @@ def public_store_order():
         if not all([store_slug, network, size_gb, phone, amount]):
             return jsonify({'success': False, 'error': 'Missing required fields'}), 400
         
-        # Find store by slug to get agent_id
+        # Find store by slug
         store = Store.query.filter_by(store_slug=store_slug, is_active=True).first()
         if not store:
             return jsonify({'success': False, 'error': 'Store not found'}), 404
         
+        # Get platform from store
+        platform = store.platform if hasattr(store, 'platform') else 'platform_a'
+        platform_config = get_platform_config(platform)
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        
         agent_id = store.agent_id
         print(f"Agent ID: {agent_id}")
+        print(f"Platform: {platform_name}")
         
         # Find agent
         agent = User.query.get(agent_id)
@@ -6474,32 +11044,36 @@ def public_store_order():
             quantity=1,
             status='pending',
             payment_method='store_pending',
-            created_at=datetime.utcnow()
+            created_at=datetime.utcnow(),
+            platform=platform
         )
         db.session.add(order)
         db.session.commit()
         
-        print(f"✅ Order created: {order_id}")
+        print(f"✅ Order created: {order_id} on {platform_name}")
         
         return jsonify({
             'success': True,
-            'message': 'Order placed successfully! The agent will contact you to confirm payment.',
+            'message': f'Order placed successfully on {platform_name}! The agent will contact you to confirm payment.',
             'data': {
                 'order_id': order_id,
-                'status': 'pending'
+                'status': 'pending',
+                'platform': platform,
+                'platform_name': platform_name
             }
         })
         
     except Exception as e:
-        print(f"Public store order error: {e}")
+        print(f"[PUBLIC STORE ORDER ERROR] {e}")
         import traceback
         traceback.print_exc()
         db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
 
+
 @app.route('/api/store/initiate-payment', methods=['POST'])
 def initiate_store_payment():
-    """Initialize Paystack payment"""
+    """Initialize Paystack payment for store - AFDALNOVA"""
     try:
         from models import Store, PaymentSession
         
@@ -6513,7 +11087,7 @@ def initiate_store_payment():
         customer_email = data.get('email')
         
         print(f"\n{'='*60}")
-        print(f"🔓 INITIATE STORE PAYMENT")
+        print(f"🔓 INITIATE STORE PAYMENT - AFDALNOVA")
         print(f"{'='*60}")
         print(f"Store Slug: {store_slug}")
         print(f"Network: {network}")
@@ -6529,13 +11103,18 @@ def initiate_store_payment():
         if not store:
             return jsonify({'success': False, 'error': 'Store not found'}), 404
         
+        # Get platform
+        platform = store.platform if hasattr(store, 'platform') else 'platform_a'
+        platform_config = get_platform_config(platform)
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        website_url = platform_config.get('base_url', 'https://abigalisticstudious.com')
+        
         # Generate unique reference
         payment_ref = f"PAY-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{store.agent_id}"
         
-        # Check if reference already exists (unique constraint)
+        # Check if reference already exists
         existing = PaymentSession.query.filter_by(reference=payment_ref).first()
         if existing:
-            # Generate new reference with timestamp
             payment_ref = f"PAY-{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}-{store.agent_id}"
         
         # Create payment session
@@ -6548,21 +11127,28 @@ def initiate_store_payment():
             phone=phone,
             amount=amount,
             status='pending',
+            platform=platform,
             created_at=datetime.utcnow(),
             expires_at=datetime.utcnow() + timedelta(hours=1)
         )
         db.session.add(payment_session)
         db.session.commit()
         
-        print(f"✅ Payment session created: {payment_ref}")
+        print(f"✅ Payment session created: {payment_ref} on {platform_name}")
         
-        # Initialize Paystack
-        paystack_secret = current_app.config.get('PAYSTACK_SECRET_KEY')
+        # Get Paystack keys based on platform
+        if platform == 'platform_a':
+            paystack_secret = AFDALNOVA_PAYSTACK_SECRET_KEY
+        else:
+            paystack_secret = ROAMSMART_PAYSTACK_SECRET_KEY
         
         headers = {
             'Authorization': f'Bearer {paystack_secret}',
             'Content-Type': 'application/json'
         }
+        
+        callback_url = f"{website_url}/store/{store_slug}?reference={payment_ref}"
+        print(f"🔗 Callback URL: {callback_url}")
         
         payload = {
             'email': customer_email,
@@ -6575,9 +11161,10 @@ def initiate_store_payment():
                 'network': network,
                 'size_gb': size_gb,
                 'phone': phone,
-                'session_id': payment_session.id
+                'session_id': payment_session.id,
+                'platform': platform_name
             },
-            'callback_url': f"{current_app.config.get('FRONTEND_URL', 'http://localhost:3000')}/store/{store_slug}?reference={payment_ref}"
+            'callback_url': callback_url
         }
         
         response = requests.post(
@@ -6594,26 +11181,34 @@ def initiate_store_payment():
                     'success': True,
                     'data': {
                         'authorization_url': result['data']['authorization_url'],
-                        'reference': payment_ref
+                        'reference': payment_ref,
+                        'platform': platform,
+                        'platform_name': platform_name
                     }
                 })
         
-        return jsonify({'success': False, 'error': 'Payment initialization failed'}), 400
+        return jsonify({
+            'success': False, 
+            'error': f'Payment initialization failed on {platform_name}',
+            'platform': platform,
+            'platform_name': platform_name
+        }), 400
         
     except Exception as e:
-        print(f"Initiate payment error: {e}")
+        print(f"[INITIATE STORE PAYMENT ERROR] {e}")
         import traceback
         traceback.print_exc()
         db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
 
+
 @app.route('/api/webhooks/paystack-store', methods=['POST'])
 def paystack_store_webhook():
-    """Create order ONLY after successful payment"""
+    """Create order ONLY after successful payment - AFDALNOVA"""
     try:
         # Log EVERYTHING
         print(f"\n{'='*80}")
-        print(f"🔥 PAYSTACK WEBHOOK RECEIVED")
+        print(f"🔥 PAYSTACK STORE WEBHOOK RECEIVED")
         print(f"{'='*80}")
         print(f"Headers: {dict(request.headers)}")
         print(f"Body: {request.get_data(as_text=True)}")
@@ -6642,13 +11237,17 @@ def paystack_store_webhook():
             
             if not payment_session:
                 print(f"⚠️ No pending session found for reference: {reference}")
-                # Check if session exists with different status
                 any_session = PaymentSession.query.filter_by(reference=reference).first()
                 if any_session:
                     print(f"Session exists but status is: {any_session.status}")
                 return jsonify({'success': False, 'error': 'Session not found'}), 404
             
-            print(f"✅ Found payment session for store: {payment_session.store_slug}")
+            # Get platform info
+            platform = payment_session.platform if hasattr(payment_session, 'platform') else 'platform_a'
+            platform_config = get_platform_config(platform)
+            platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+            
+            print(f"✅ Found payment session for store: {payment_session.store_slug} on {platform_name}")
             
             # Update session
             payment_session.status = 'completed'
@@ -6670,42 +11269,57 @@ def paystack_store_webhook():
                 status='completed',
                 payment_method='paystack',
                 payment_reference=reference,
-                created_at=datetime.utcnow()
+                created_at=datetime.utcnow(),
+                platform=platform
             )
             db.session.add(order)
             db.session.commit()
             
-            print(f"✅ Order created: {order_id}")
+            print(f"✅ Order created: {order_id} on {platform_name}")
             
         return jsonify({'success': True}), 200
         
     except Exception as e:
-        print(f"Webhook error: {e}")
+        print(f"[PAYSTACK STORE WEBHOOK ERROR] {e}")
         import traceback
         traceback.print_exc()
         db.session.rollback()
-        return jsonify({'success': False, 'error': str(e)}), 50
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 
 @app.route('/api/store/verify-payment', methods=['POST'])
 def verify_store_payment():
-    """Verify payment and deliver data via Digimall"""
+    """Verify payment and deliver data via Digimall - AFDALNOVA"""
     try:
         from models import PaymentSession, Order, User
-        
         
         data = request.get_json()
         reference = data.get('reference')
         
         print(f"\n{'='*60}")
-        print(f"🔍 VERIFY PAYMENT & DELIVER DATA")
+        print(f"🔍 VERIFY PAYMENT & DELIVER DATA - AFDALNOVA")
         print(f"{'='*60}")
         print(f"Reference: {reference}")
         
         if not reference:
             return jsonify({'success': False, 'error': 'Reference is required'}), 400
         
-        # Call Paystack API to verify
-        paystack_secret = current_app.config.get('PAYSTACK_SECRET_KEY')
+        # Find payment session
+        payment_session = PaymentSession.query.filter_by(reference=reference).first()
+        
+        if not payment_session:
+            return jsonify({'success': False, 'error': 'Payment session not found'}), 404
+        
+        # Get platform info
+        platform = payment_session.platform if hasattr(payment_session, 'platform') else 'platform_a'
+        platform_config = get_platform_config(platform)
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        
+        # Get Paystack keys based on platform
+        if platform == 'platform_a':
+            paystack_secret = AFDALNOVA_PAYSTACK_SECRET_KEY
+        else:
+            paystack_secret = ROAMSMART_PAYSTACK_SECRET_KEY
         
         headers = {
             'Authorization': f'Bearer {paystack_secret}'
@@ -6718,7 +11332,10 @@ def verify_store_payment():
         )
         
         if response.status_code != 200:
-            return jsonify({'success': False, 'error': 'Failed to verify payment with Paystack'}), 400
+            return jsonify({
+                'success': False, 
+                'error': f'Failed to verify payment with Paystack on {platform_name}'
+            }), 400
         
         result = response.json()
         
@@ -6735,17 +11352,13 @@ def verify_store_payment():
         
         amount = transaction.get('amount', 0) / 100
         
-        # Find payment session
-        payment_session = PaymentSession.query.filter_by(reference=reference).first()
-        
-        if not payment_session:
-            return jsonify({'success': False, 'error': 'Payment session not found'}), 404
-        
         if payment_session.status == 'completed':
             return jsonify({
                 'success': True,
                 'message': 'Payment already verified',
-                'order_id': payment_session.order_id
+                'order_id': payment_session.order_id,
+                'platform': platform,
+                'platform_name': platform_name
             })
         
         if payment_session.status != 'pending':
@@ -6779,15 +11392,16 @@ def verify_store_payment():
             payment_method='paystack',
             payment_reference=reference,
             delivery_status='processing',
-            created_at=datetime.utcnow()
+            created_at=datetime.utcnow(),
+            platform=platform
         )
         db.session.add(order)
-        db.session.flush()  # Get the order ID without committing yet
+        db.session.flush()
         
         payment_session.order_id = order_id
         db.session.commit()
         
-        print(f"✅ Order created: {order_id}")
+        print(f"✅ Order created: {order_id} on {platform_name}")
         
         # ========== DELIVER DATA VIA DIGIMALL ==========
         digimall_result = None
@@ -6798,6 +11412,7 @@ def verify_store_payment():
             print(f"Network: {payment_session.network}")
             print(f"Phone: {payment_session.phone}")
             print(f"Volume: {payment_session.size_gb}GB")
+            print(f"Platform: {platform_name}")
             
             digimall = DigimallService()
             digimall_result = digimall.deliver_data(
@@ -6817,16 +11432,16 @@ def verify_store_payment():
                 order.completed_at = datetime.utcnow()
                 delivery_success = True
                 db.session.commit()
-                print(f"✅ Data delivered successfully to {payment_session.phone}")
+                print(f"✅ Data delivered successfully to {payment_session.phone} on {platform_name}")
             else:
                 error_msg = digimall_result.get('error') if digimall_result else 'No response from Digimall'
                 order.delivery_status = 'failed'
                 order.last_delivery_error = error_msg
                 db.session.commit()
-                print(f"❌ Digimall delivery failed: {error_msg}")
+                print(f"❌ Digimall delivery failed on {platform_name}: {error_msg}")
                 
         except Exception as e:
-            print(f"❌ Digimall exception: {e}")
+            print(f"❌ Digimall exception on {platform_name}: {e}")
             order.delivery_status = 'failed'
             order.last_delivery_error = str(e)
             db.session.commit()
@@ -6841,29 +11456,37 @@ def verify_store_payment():
                     # Add profit to agent
                     agent.wallet_balance += (amount - wholesale_price)
                     db.session.commit()
-                    print(f"💰 Agent wallet updated: +₵{amount - wholesale_price} profit")
+                    print(f"💰 Agent wallet updated: +₵{amount - wholesale_price} profit on {platform_name}")
             except Exception as e:
-                print(f"Agent wallet update error: {e}")
+                print(f"Agent wallet update error on {platform_name}: {e}")
         
         return jsonify({
             'success': True,
-            'message': 'Payment verified successfully!',
+            'message': f'Payment verified successfully on {platform_name}!',
             'order_id': order_id,
             'delivery_status': order.delivery_status,
             'data_delivered': delivery_success,
-            'amount': amount
+            'amount': amount,
+            'platform': platform,
+            'platform_name': platform_name,
+            'branding': {
+                'name': platform_config.get('brand_name', platform_name),
+                'primary_color': platform_config.get('primary_color', '#1A2A6C'),
+                'secondary_color': platform_config.get('secondary_color', '#C9A84C')
+            }
         })
         
     except Exception as e:
-        print(f"Verify payment error: {e}")
+        print(f"[VERIFY STORE PAYMENT ERROR] {e}")
         import traceback
         traceback.print_exc()
         db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
 
+
 @app.route('/api/store/order', methods=['POST'])
 def create_store_order():
-    """Create order from public store (no login required)"""
+    """Create order from public store (no login required) - AFDALNOVA"""
     try:
         data = request.get_json()
         
@@ -6873,10 +11496,14 @@ def create_store_order():
         phone = data.get('phone')
         amount = data.get('amount')
         
-        # Get agent
+        # Get platform info from agent
         agent = User.query.get(agent_id)
         if not agent:
             return jsonify({'success': False, 'error': 'Agent not found'}), 404
+        
+        platform = agent.platform if agent.platform else 'platform_a'
+        platform_config = get_platform_config(platform)
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
         
         # Get wholesale price
         wholesale_price = get_agent_price(network, size_gb)
@@ -6885,7 +11512,10 @@ def create_store_order():
         
         # Check agent's wallet balance
         if agent.wallet_balance < wholesale_price:
-            return jsonify({'success': False, 'error': 'Agent has insufficient balance'}), 400
+            return jsonify({
+                'success': False, 
+                'error': f'Agent has insufficient balance on {platform_name}'
+            }), 400
         
         # Create order
         order_id = f"STORE-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{agent_id}"
@@ -6907,7 +11537,8 @@ def create_store_order():
             status='completed',
             delivery_status='pending',
             payment_method='store',
-            created_at=datetime.utcnow()
+            created_at=datetime.utcnow(),
+            platform=platform
         )
         db.session.add(order)
         db.session.commit()
@@ -6924,14 +11555,17 @@ def create_store_order():
         
         return jsonify({
             'success': True,
-            'message': 'Order placed successfully!',
-            'order_id': order_id
+            'message': f'Order placed successfully on {platform_name}!',
+            'order_id': order_id,
+            'platform': platform,
+            'platform_name': platform_name
         })
         
     except Exception as e:
-        print(f"Store order error: {e}")
+        print(f"[STORE ORDER ERROR] {e}")
         db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
+
 
 # ========== AGENT STORE PRODUCT MANAGEMENT ENDPOINTS ==========
 
@@ -6939,13 +11573,20 @@ def create_store_order():
 @token_required
 @agent_required
 def get_agent_store_products():
-    """Get products for agent's store with custom prices"""
+    """Get products for agent's store with custom prices - AFDALNOVA"""
     try:
         agent_id = g.current_user.id
-        print(f"[DEBUG] Getting products for agent: {agent_id}")
+        
+        # Get platform info
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = get_platform_config(platform)
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        primary_color = platform_config.get('primary_color', '#1A2A6C')
+        
+        print(f"[DEBUG] Getting products for agent: {agent_id} on {platform_name}")
         
         # Get agent's store settings
-        store = Store.query.filter_by(agent_id=agent_id).first()
+        store = Store.query.filter_by(agent_id=agent_id, platform=platform).first()
         print(f"[DEBUG] Store found: {store}")
         
         # Get base wholesale prices
@@ -6959,7 +11600,7 @@ def get_agent_store_products():
         
         print(f"[DEBUG] Base prices: {base_prices}")
         
-        # Safely get custom_prices and markup (handle None values)
+        # Safely get custom_prices and markup
         custom_prices = store.custom_prices if store and store.custom_prices else {}
         markup = store.markup if store and store.markup else 15
         
@@ -6981,7 +11622,8 @@ def get_agent_store_products():
                     'wholesale_price': wholesale_price,
                     'selling_price': round(selling_price, 2),
                     'profit': round(selling_price - wholesale_price, 2),
-                    'custom_price': selling_price if is_custom else None
+                    'custom_price': selling_price if is_custom else None,
+                    'platform': platform_name
                 })
         
         print(f"[DEBUG] Total products found: {len(products)}")
@@ -6995,8 +11637,16 @@ def get_agent_store_products():
                     'store_slug': store.store_slug if store else None,
                     'markup': markup,
                     'custom_prices': custom_prices,
-                    'banner_color': store.banner_color if store else '#8B0000'
+                    'banner_color': store.banner_color if store else primary_color,
+                    'platform': platform_name
                 }
+            },
+            'platform': platform,
+            'platform_name': platform_name,
+            'branding': {
+                'name': platform_config.get('brand_name', platform_name),
+                'primary_color': primary_color,
+                'secondary_color': platform_config.get('secondary_color', '#C9A84C')
             }
         })
         
@@ -7006,12 +11656,19 @@ def get_agent_store_products():
         traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
+
 @app.route('/api/wallet/verify-payment', methods=['POST'])
 @token_required
 def verify_wallet_payment():
-    """Verify manual payment and credit wallet"""
+    """Verify manual payment and credit wallet - AFDALNOVA"""
     try:
         data = request.get_json()
+        
+        # Get platform info
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = get_platform_config(platform)
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        primary_color = platform_config.get('primary_color', '#1A2A6C')
         
         reference = data.get('reference')
         transaction_id = data.get('transaction_id')
@@ -7019,27 +11676,44 @@ def verify_wallet_payment():
         sender_phone = data.get('sender_phone')
         
         print(f"\n{'='*60}")
-        print(f"VERIFY PAYMENT REQUEST")
+        print(f"VERIFY PAYMENT REQUEST - {platform_name}")
         print(f"{'='*60}")
         print(f"User: {g.current_user.username} (ID: {g.current_user.id})")
         print(f"Reference: {reference}")
         print(f"Transaction ID: {transaction_id}")
         print(f"Sender: {sender_name} / {sender_phone}")
+        print(f"Platform: {platform_name}")
         
         if not reference or not transaction_id:
-            return jsonify({'success': False, 'error': 'Reference and transaction ID are required'}), 400
+            return jsonify({
+                'success': False, 
+                'error': 'Reference and transaction ID are required',
+                'platform': platform,
+                'platform_name': platform_name
+            }), 400
         
         # Find the manual payment request
         manual_payment = ManualPayment.query.filter_by(
             reference=reference.upper(),
-            user_id=g.current_user.id
+            user_id=g.current_user.id,
+            platform=platform
         ).first()
         
         if not manual_payment:
-            return jsonify({'success': False, 'error': f'Payment request not found for reference: {reference}'}), 404
+            return jsonify({
+                'success': False, 
+                'error': f'Payment request not found for reference: {reference} on {platform_name}',
+                'platform': platform,
+                'platform_name': platform_name
+            }), 404
         
         if manual_payment.status != 'pending':
-            return jsonify({'success': False, 'error': f'Payment already {manual_payment.status}'}), 400
+            return jsonify({
+                'success': False, 
+                'error': f'Payment already {manual_payment.status}',
+                'platform': platform,
+                'platform_name': platform_name
+            }), 400
         
         # Update payment record
         manual_payment.status = 'verified'
@@ -7047,8 +11721,8 @@ def verify_wallet_payment():
         manual_payment.sender_name = sender_name
         manual_payment.sender_phone = sender_phone
         manual_payment.verified_at = datetime.utcnow()
-        manual_payment.verified_by = g.current_user.id  # or 'system'
-        manual_payment.notes = f'Verified via auto verification with transaction ID: {transaction_id}'
+        manual_payment.verified_by = g.current_user.id
+        manual_payment.notes = f'Verified via auto verification with transaction ID: {transaction_id} on {platform_name}'
         
         # Credit user's wallet
         old_balance = g.current_user.wallet_balance
@@ -7061,9 +11735,10 @@ def verify_wallet_payment():
             amount=manual_payment.amount,
             balance_before=old_balance,
             balance_after=g.current_user.wallet_balance,
-            description=f'Manual payment verification - Ref: {reference}',
+            description=f'Manual payment verification - Ref: {reference} on {platform_name}',
             reference=reference,
             status='completed',
+            platform=platform,
             meta_data={
                 'payment_id': manual_payment.id,
                 'transaction_id': transaction_id,
@@ -7074,34 +11749,90 @@ def verify_wallet_payment():
         
         db.session.commit()
         
-        print(f"✅ Payment verified! Credited ₵{manual_payment.amount} to {g.current_user.username}")
+        print(f"✅ Payment verified! Credited ₵{manual_payment.amount} to {g.current_user.username} on {platform_name}")
+        
+        # Send confirmation email
+        email_html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+                body {{ font-family: 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: 0 auto; background-color: #f5f7fa; }}
+                .header {{ background: {primary_color}; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }}
+                .header h1 {{ color: white; margin: 0; font-size: 24px; }}
+                .header p {{ color: white; margin: 10px 0 0; opacity: 0.9; }}
+                .content {{ background: white; padding: 30px; border-radius: 0 0 10px 10px; }}
+                .info-box {{ background: #f8f9fa; padding: 15px; border-radius: 8px; margin: 15px 0; border-left: 4px solid {primary_color}; }}
+                .footer {{ text-align: center; padding: 20px; background: #f8f9fa; color: #666; font-size: 12px; }}
+            </style>
+        </head>
+        <body>
+            <div class="header">
+                <h1>💰 Payment Verified!</h1>
+                <p>{platform_name}</p>
+            </div>
+            <div class="content">
+                <p>Dear <strong>{g.current_user.username}</strong>,</p>
+                <p>Your manual payment has been <strong style="color: #28a745;">VERIFIED</strong> and credited to your wallet.</p>
+                <div class="info-box">
+                    <h3 style="color: {primary_color};">📋 Payment Details:</h3>
+                    <ul>
+                        <li><strong>Amount:</strong> GHS {manual_payment.amount:.2f}</li>
+                        <li><strong>Reference:</strong> {reference}</li>
+                        <li><strong>Previous Balance:</strong> GHS {old_balance:.2f}</li>
+                        <li><strong>New Balance:</strong> GHS {g.current_user.wallet_balance:.2f}</li>
+                    </ul>
+                </div>
+                <p>Thank you for using {platform_name}!</p>
+            </div>
+            <div class="footer">
+                <p>© 2025 {platform_name}. All rights reserved.</p>
+                <p style="color: #C9A84C;">{platform_config.get('tagline', 'Innovation Meets Excellence')}</p>
+            </div>
+        </body>
+        </html>
+        """
+        
+        send_email(g.current_user.email, f"Payment Verified - {platform_name}", email_html, platform)
         
         return jsonify({
             'success': True,
-            'message': f'Payment verified! ₵{manual_payment.amount:.2f} credited to your wallet.',
+            'message': f'Payment verified! ₵{manual_payment.amount:.2f} credited to your wallet on {platform_name}.',
             'data': {
                 'amount': manual_payment.amount,
                 'reference': reference,
                 'transaction_id': transaction_id,
-                'new_balance': g.current_user.wallet_balance
+                'new_balance': g.current_user.wallet_balance,
+                'platform': platform,
+                'platform_name': platform_name,
+                'branding': {
+                    'name': platform_config.get('brand_name', platform_name),
+                    'primary_color': primary_color,
+                    'secondary_color': platform_config.get('secondary_color', '#C9A84C')
+                }
             }
         })
         
     except Exception as e:
-        print(f"Verify payment error: {e}")
+        print(f"[VERIFY WALLET PAYMENT ERROR] {e}")
         import traceback
         traceback.print_exc()
         db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
-
 @app.route('/api/payment/verify-transfer', methods=['POST'])
 @token_required
 def verify_transfer_payment():
-    """Verify mobile money transfer using Paystack Transfer API"""
+    """Verify mobile money transfer using Paystack Transfer API - AFDALNOVA"""
     try:
         data = request.get_json()
+        
+        # Get platform info
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = get_platform_config(platform)
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        primary_color = platform_config.get('primary_color', '#1A2A6C')
         
         reference = data.get('reference')
         transaction_id = data.get('transaction_id')
@@ -7109,7 +11840,7 @@ def verify_transfer_payment():
         sender_phone = data.get('sender_phone')
         
         print(f"\n{'='*80}")
-        print(f"🔍 VERIFY TRANSFER PAYMENT - DEBUG START")
+        print(f"🔍 VERIFY TRANSFER PAYMENT - {platform_name}")
         print(f"{'='*80}")
         print(f"📱 User: {g.current_user.username} (ID: {g.current_user.id})")
         print(f"📧 Email: {g.current_user.email}")
@@ -7118,57 +11849,63 @@ def verify_transfer_payment():
         print(f"🆔 Transaction ID: {transaction_id}")
         print(f"💵 Amount: ₵{amount}")
         print(f"📞 Sender Phone: {sender_phone}")
+        print(f"📱 Platform: {platform_name}")
         print(f"{'='*80}\n")
         
         # Validate required fields
         if not reference or not transaction_id:
             print(f"❌ Validation failed: Missing reference or transaction_id")
-            return jsonify({'success': False, 'error': 'Reference and transaction ID are required'}), 400
-        
-        # Debug: Check all manual payments for this user
-        print(f"📊 Checking all manual payments for user {g.current_user.username}:")
-        all_user_payments = ManualPayment.query.filter_by(user_id=g.current_user.id).all()
-        if all_user_payments:
-            for p in all_user_payments:
-                print(f"   - ID: {p.id}, Ref: {p.reference}, Status: {p.status}, Amount: ₵{p.amount}, Created: {p.created_at}")
-        else:
-            print(f"   ⚠️ No manual payments found for this user")
+            return jsonify({
+                'success': False, 
+                'error': 'Reference and transaction ID are required',
+                'platform': platform,
+                'platform_name': platform_name
+            }), 400
         
         # Find the pending manual payment
         print(f"\n🔎 Searching for payment with reference: {reference.upper()}")
         manual_payment = ManualPayment.query.filter_by(
             reference=reference.upper(),
-            user_id=g.current_user.id
+            user_id=g.current_user.id,
+            platform=platform
         ).first()
         
         if not manual_payment:
             print(f"❌ No payment found with reference: {reference.upper()}")
-            return jsonify({'success': False, 'error': f'Payment request not found for reference: {reference}'}), 404
+            return jsonify({
+                'success': False, 
+                'error': f'Payment request not found for reference: {reference} on {platform_name}',
+                'platform': platform,
+                'platform_name': platform_name
+            }), 404
         
         print(f"✅ Found payment: ID={manual_payment.id}, Status={manual_payment.status}, Amount=₵{manual_payment.amount}")
         
-        # Check payment status
         if manual_payment.status != 'pending':
             print(f"❌ Payment status is '{manual_payment.status}', not 'pending'")
-            return jsonify({'success': False, 'error': f'Payment already {manual_payment.status}'}), 400
+            return jsonify({
+                'success': False, 
+                'error': f'Payment already {manual_payment.status}',
+                'platform': platform,
+                'platform_name': platform_name
+            }), 400
         
-        # Call Paystack Transfer API to verify
-        print(f"\n🔗 Calling Paystack Transfer API...")
-        paystack_secret = current_app.config.get('PAYSTACK_SECRET_KEY')
-        
-        if not paystack_secret:
-            print(f"⚠️ PAYSTACK_SECRET_KEY not configured!")
+        # Get Paystack keys based on platform
+        if platform == 'platform_a':
+            paystack_secret = AFDALNOVA_PAYSTACK_SECRET_KEY
+            paystack_public = AFDALNOVA_PAYSTACK_PUBLIC_KEY
         else:
-            print(f"🔑 Paystack API Key exists: {bool(paystack_secret)}")
+            paystack_secret = ROAMSMART_PAYSTACK_SECRET_KEY
+            paystack_public = ROAMSMART_PAYSTACK_PUBLIC_KEY
         
         headers = {
             'Authorization': f'Bearer {paystack_secret}',
             'Content-Type': 'application/json'
         }
         
-        # Option 1: Check by transfer reference
         api_url = f'https://api.paystack.co/transfer/verify/{transaction_id}'
         print(f"📡 Requesting: {api_url}")
+        print(f"🔑 Using {platform_name} Paystack keys")
         
         response = requests.get(
             api_url,
@@ -7192,22 +11929,26 @@ def verify_transfer_payment():
                 print(f"   Status: {transfer_status}")
                 print(f"   Amount: ₵{transfer_amount}")
                 print(f"   Reference: {transfer_reference}")
+                print(f"   Platform: {platform_name}")
                 
                 if transfer_status != 'success':
                     print(f"❌ Transfer status is '{transfer_status}', not 'success'")
                     return jsonify({
                         'success': False, 
-                        'error': f'Payment status: {transfer_status}. Please wait or contact support.'
+                        'error': f'Payment status: {transfer_status}. Please wait or contact support.',
+                        'platform': platform,
+                        'platform_name': platform_name
                     }), 400
                 
-                # Verify amount matches
                 if amount:
                     user_amount = float(amount)
-                    if abs(user_amount - transfer_amount) > 1:  # 1 GHS tolerance
+                    if abs(user_amount - transfer_amount) > 1:
                         print(f"❌ Amount mismatch: User entered ₵{user_amount}, Paystack shows ₵{transfer_amount}")
                         return jsonify({
                             'success': False,
-                            'error': f'Amount mismatch. Paystack shows ₵{transfer_amount:.2f}, you entered ₵{user_amount:.2f}'
+                            'error': f'Amount mismatch. Paystack shows ₵{transfer_amount:.2f}, you entered ₵{user_amount:.2f}',
+                            'platform': platform,
+                            'platform_name': platform_name
                         }), 400
                     else:
                         print(f"✅ Amount verified: ₵{transfer_amount}")
@@ -7220,7 +11961,7 @@ def verify_transfer_payment():
                 manual_payment.verified_at = datetime.utcnow()
                 manual_payment.verified_by = 'paystack_api'
                 manual_payment.amount = transfer_amount
-                manual_payment.notes = f'Verified via Paystack API. Transaction ID: {transaction_id}'
+                manual_payment.notes = f'Verified via Paystack API. Transaction ID: {transaction_id} on {platform_name}'
                 
                 # Credit wallet
                 old_balance = g.current_user.wallet_balance
@@ -7234,9 +11975,10 @@ def verify_transfer_payment():
                     amount=transfer_amount,
                     balance_before=old_balance,
                     balance_after=g.current_user.wallet_balance,
-                    description=f'Mobile money payment verified - Ref: {reference}',
+                    description=f'Mobile money payment verified - Ref: {reference} on {platform_name}',
                     reference=reference,
                     status='completed',
+                    platform=platform,
                     meta_data={
                         'transaction_id': transaction_id,
                         'paystack_reference': transfer_reference,
@@ -7247,48 +11989,96 @@ def verify_transfer_payment():
                 
                 db.session.commit()
                 
-                print(f"\n✅ SUCCESS! Payment verified and credited!")
+                print(f"\n✅ SUCCESS! Payment verified and credited on {platform_name}!")
                 print(f"   Amount: ₵{transfer_amount}")
                 print(f"   New Balance: ₵{g.current_user.wallet_balance}")
                 print(f"{'='*80}\n")
                 
+                # Send confirmation email
+                email_html = f"""
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <style>
+                        body {{ font-family: 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: 0 auto; background-color: #f5f7fa; }}
+                        .header {{ background: {primary_color}; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }}
+                        .header h1 {{ color: white; margin: 0; font-size: 24px; }}
+                        .header p {{ color: white; margin: 10px 0 0; opacity: 0.9; }}
+                        .content {{ background: white; padding: 30px; border-radius: 0 0 10px 10px; }}
+                        .info-box {{ background: #f8f9fa; padding: 15px; border-radius: 8px; margin: 15px 0; border-left: 4px solid {primary_color}; }}
+                        .footer {{ text-align: center; padding: 20px; background: #f8f9fa; color: #666; font-size: 12px; }}
+                    </style>
+                </head>
+                <body>
+                    <div class="header">
+                        <h1>✅ Payment Verified!</h1>
+                        <p>{platform_name}</p>
+                    </div>
+                    <div class="content">
+                        <p>Dear <strong>{g.current_user.username}</strong>,</p>
+                        <p>Your mobile money transfer has been <strong style="color: #28a745;">VERIFIED</strong> and credited to your wallet.</p>
+                        <div class="info-box">
+                            <h3 style="color: {primary_color};">📋 Payment Details:</h3>
+                            <ul>
+                                <li><strong>Amount:</strong> GHS {transfer_amount:.2f}</li>
+                                <li><strong>Reference:</strong> {reference}</li>
+                                <li><strong>Previous Balance:</strong> GHS {old_balance:.2f}</li>
+                                <li><strong>New Balance:</strong> GHS {g.current_user.wallet_balance:.2f}</li>
+                            </ul>
+                        </div>
+                        <p>Thank you for using {platform_name}!</p>
+                    </div>
+                    <div class="footer">
+                        <p>© 2025 {platform_name}. All rights reserved.</p>
+                        <p style="color: #C9A84C;">{platform_config.get('tagline', 'Innovation Meets Excellence')}</p>
+                    </div>
+                </body>
+                </html>
+                """
+                
+                send_email(g.current_user.email, f"Payment Verified - {platform_name}", email_html, platform)
+                
                 return jsonify({
                     'success': True,
-                    'message': f'✅ Payment verified! ₵{transfer_amount:.2f} credited to your wallet.',
+                    'message': f'✅ Payment verified! ₵{transfer_amount:.2f} credited to your wallet on {platform_name}.',
                     'data': {
                         'amount': transfer_amount,
                         'reference': reference,
                         'transaction_id': transaction_id,
                         'new_balance': g.current_user.wallet_balance,
-                        'paystack_status': transfer_status
+                        'paystack_status': transfer_status,
+                        'platform': platform,
+                        'platform_name': platform_name,
+                        'branding': {
+                            'name': platform_config.get('brand_name', platform_name),
+                            'primary_color': primary_color,
+                            'secondary_color': platform_config.get('secondary_color', '#C9A84C')
+                        }
                     }
                 })
-            else:
-                print(f"❌ Paystack API returned status: false")
-                print(f"   Message: {result.get('message', 'Unknown error')}")
         else:
             print(f"❌ Paystack API request failed with status {response.status_code}")
             print(f"   Response: {response.text[:500]}")
         
-        # If Paystack verification fails
-        print(f"\n❌ VERIFICATION FAILED - Unable to verify payment with Paystack")
+        print(f"\n❌ VERIFICATION FAILED - Unable to verify payment with Paystack on {platform_name}")
         print(f"{'='*80}\n")
         
         return jsonify({
             'success': False,
-            'error': 'Unable to verify payment. Please check your transaction ID and try again, or contact support.'
+            'error': f'Unable to verify payment on {platform_name}. Please check your transaction ID and try again, or contact support.',
+            'platform': platform,
+            'platform_name': platform_name
         }), 400
         
     except Exception as e:
-        print(f"\n❌ EXCEPTION in verify_transfer_payment:")
+        print(f"\n❌ EXCEPTION in verify_transfer_payment on {platform_name}:")
         print(f"   Error: {str(e)}")
         import traceback
         traceback.print_exc()
         print(f"{'='*80}\n")
         db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
-
-
+    
 @app.route('/api/payment/manual-with-paystack-verify', methods=['POST'])
 @token_required
 def manual_payment_with_paystack_verify():
@@ -8369,191 +13159,486 @@ def admin_get_manual_payment(payment_id):
 
 # KEEP ONLY ONE of these - delete the duplicate
 
-@app.route('/api/payment/paystack/verify/<reference>', methods=['GET'])
+@app.route('/api/payment/paystack/initialize', methods=['POST'])
 @token_required
-def verify_paystack_payment(reference):
-    """Verify Paystack payment status"""
+@limiter.limit("10 per minute")
+@limiter.limit("30 per hour")
+def roamsmart_initialize_paystack_payment():
+    """Initialize Paystack payment for Roamsmart wallet funding"""
     try:
-        if not reference:
-            return jsonify({'success': False, 'error': 'Reference required'}), 400
+        data = request.get_json()
+        amount = data.get('amount')
+        email = data.get('email')
+        phone = data.get('phone')
         
-        print(f"🔍 Verifying Paystack payment: {reference}")
+        if not amount or amount < 10:
+            return jsonify({'success': False, 'error': 'Minimum amount is GHS 10'}), 400
         
-        # First, check if we have a pending transaction
-        pending_tx = PendingTransaction.query.filter_by(reference=reference).first()
+        if not email:
+            return jsonify({'success': False, 'error': 'Email is required'}), 400
         
-        if not pending_tx:
-            print(f"⚠️ No pending transaction found for reference: {reference}")
-            
-            # Check if already completed
-            completed_tx = Transaction.query.filter_by(reference=reference).first()
-            if completed_tx:
-                print(f"✅ Transaction already processed: {reference}")
-                return jsonify({
-                    'success': True,
-                    'data': {
-                        'status': 'success',
-                        'amount': float(completed_tx.amount),
-                        'message': 'Payment already processed'
-                    }
-                })
-            
-            # Check if there's any transaction with similar reference
-            partial_match = Transaction.query.filter(
-                Transaction.reference.like(f'%{reference[-20:]}%')
-            ).first()
-            if partial_match:
-                return jsonify({
-                    'success': True,
-                    'data': {
-                        'status': 'success',
-                        'amount': float(partial_match.amount),
-                        'message': 'Payment already processed'
-                    }
-                })
-            
-            return jsonify({
-                'success': False, 
-                'error': f'No pending transaction found for reference: {reference}. Please create a new payment request.'
-            }), 404
+        user = g.current_user
         
-        print(f"📝 Found pending transaction: {pending_tx.id}, status: {pending_tx.status}")
+        # Use Roamsmart keys
+        secret_key = ROAMSMART_PAYSTACK_SECRET_KEY
         
-        # Verify with Paystack
-        result = verify_paystack_transaction(reference)
+        if not secret_key:
+            print("[ERROR] ROAMSMART_PAYSTACK_SECRET_KEY is not set!")
+            return jsonify({'success': False, 'error': 'Payment system not configured for Roamsmart'}), 500
         
-        if not result['success']:
-            return jsonify({'success': False, 'error': 'Payment verification failed'}), 400
+        # Generate unique reference with Roamsmart prefix
+        reference = f"RS-{int(datetime.utcnow().timestamp())}-{user.id}-{secrets.token_hex(4)}"
         
-        if result['status'] == 'success':
-            # Update user wallet
-            user = User.query.get(pending_tx.user_id)
-            if not user:
-                return jsonify({'success': False, 'error': 'User not found'}), 404
-            
-            print(f"💰 Adding {result['amount']} to wallet for user {user.username}")
-            
-            # Add to wallet
-            balance_before = user.wallet_balance
-            user.wallet_balance += result['amount']
-            
-            # Update pending transaction
-            pending_tx.status = 'completed'
-            pending_tx.completed_at = datetime.utcnow()
-            
-            # Create transaction record
-            transaction = Transaction(
+        print(f"[ROAMSMART PAYSTACK] Initializing payment")
+        print(f"[ROAMSMART PAYSTACK] Amount: {amount}")
+        print(f"[ROAMSMART PAYSTACK] Email: {email}")
+        print(f"[ROAMSMART PAYSTACK] Reference: {reference}")
+        
+        # ✅ Roamsmart callback URL with fallback
+        roamsmart_wallet = "https://roamsmart.shop/wallet"
+        roamsmart_dashboard = "https://roamsmart.shop/dashboard"
+        callback_url = roamsmart_dashboard  # Primary: dashboard page
+        
+        result = initialize_paystack_transaction(
+            email=email,
+            amount=amount,
+            reference=reference,
+            metadata={
+                'user_id': user.id,
+                'username': user.username,
+                'phone': phone,
+                'type': 'wallet_funding',
+                'platform': 'Roamsmart'
+            },
+            secret_key=secret_key,
+            callback_url=callback_url
+        )
+        
+        if result['success']:
+            pending_tx = PendingTransaction(
                 user_id=user.id,
-                type='fund',
-                amount=result['amount'],
-                balance_before=balance_before,
-                balance_after=user.wallet_balance,
-                description=f'Wallet funding via Paystack - {reference}',
                 reference=reference,
-                status='completed',
-                meta_data={
-                    'payment_method': 'paystack',
-                    'reference': reference
-                }
+                amount=amount,
+                payment_method='paystack',
+                platform='platform_b',
+                status='pending',
+                created_at=datetime.utcnow()
             )
-            db.session.add(transaction)
+            db.session.add(pending_tx)
             db.session.commit()
             
-            print(f"✅ Successfully credited {user.username} with GHS {result['amount']:.2f}")
+            return jsonify({
+                'success': True,
+                'data': {
+                    'authorization_url': result['authorization_url'],
+                    'reference': reference,
+                    'amount': amount,
+                    'access_code': result.get('access_code'),
+                    'platform': 'Roamsmart',
+                    'callback_url': callback_url  # Send to frontend
+                }
+            })
+        else:
+            return jsonify({'success': False, 'error': result.get('error', 'Payment initialization failed')}), 500
+        
+    except Exception as e:
+        print(f"[ROAMSMART PAYSTACK ERROR] {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/payment/paystack/verify/<reference>', methods=['GET'])
+@token_required
+@limiter.limit("10 per minute")
+def roamsmart_verify_paystack_payment(reference):
+    """Verify Paystack payment for Roamsmart"""
+    try:
+        secret_key = ROAMSMART_PAYSTACK_SECRET_KEY
+        
+        result = verify_paystack_transaction(
+            reference=reference,
+            secret_key=secret_key
+        )
+        
+        if result['success'] and result.get('status') == 'success':
+            pending_tx = PendingTransaction.query.filter_by(
+                reference=reference,
+                platform='platform_b'
+            ).first()
             
-            # Send email confirmation
-            try:
-                send_wallet_funding_email(user.email, user.username, result['amount'], user.wallet_balance)
-            except Exception as email_err:
-                print(f"Email error (non-critical): {email_err}")
+            if pending_tx and pending_tx.status == 'pending':
+                pending_tx.status = 'completed'
+                pending_tx.completed_at = datetime.utcnow()
+                
+                user = User.query.get(pending_tx.user_id)
+                if user:
+                    balance_before = user.wallet_balance
+                    user.wallet_balance += pending_tx.amount
+                    
+                    transaction = Transaction(
+                        user_id=user.id,
+                        type='deposit',
+                        amount=pending_tx.amount,
+                        balance_before=balance_before,
+                        balance_after=user.wallet_balance,
+                        description=f'Wallet funding via Paystack (Roamsmart) - {reference}',
+                        reference=reference,
+                        status='completed',
+                        platform='platform_b'
+                    )
+                    db.session.add(transaction)
+                    db.session.commit()
+                    
+                    send_email(
+                        user.email,
+                        f"💰 Wallet Funded - {reference} - Roamsmart",
+                        f"""
+                        <div style="font-family: Arial, sans-serif;">
+                            <h2 style="color: #28a745;">Payment Successful!</h2>
+                            <p>Dear {user.username},</p>
+                            <p>Your Roamsmart wallet has been funded successfully.</p>
+                            <p><strong>Amount:</strong> GHS {pending_tx.amount:.2f}</p>
+                            <p><strong>Reference:</strong> {reference}</p>
+                            <p><strong>New Balance:</strong> GHS {user.wallet_balance:.2f}</p>
+                        </div>
+                        """
+                    )
             
             return jsonify({
                 'success': True,
                 'data': {
                     'status': 'success',
-                    'amount': float(result['amount']),
-                    'new_balance': float(user.wallet_balance),
-                    'message': f'Successfully added GHS {result["amount"]:.2f} to your wallet'
+                    'reference': reference,
+                    'amount': result.get('amount'),
+                    'platform': 'Roamsmart'
                 }
             })
         else:
-            # Update failed transaction
-            pending_tx.status = 'failed'
+            return jsonify({
+                'success': True,
+                'data': {
+                    'status': 'failed',
+                    'reference': reference,
+                    'message': result.get('error', 'Payment not successful'),
+                    'platform': 'Roamsmart'
+                }
+            })
+        
+    except Exception as e:
+        print(f"[ROAMSMART PAYSTACK VERIFY ERROR] {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ============================================================
+# AFDALNOVA PAYMENT (Platform A) - NEW /api/v1/
+# ============================================================
+
+@app.route('/api/v1/payment/paystack/initialize', methods=['POST'])
+@token_required
+@limiter.limit("10 per minute")
+def afdalnova_initialize_paystack_payment():
+    """Initialize Paystack payment for AFDALNOVA wallet funding"""
+    try:
+        data = request.get_json()
+        amount = data.get('amount')
+        email = data.get('email')
+        phone = data.get('phone')
+        
+        if not amount or amount < 10:
+            return jsonify({'success': False, 'error': 'Minimum amount is GHS 10'}), 400
+        
+        if not email:
+            return jsonify({'success': False, 'error': 'Email is required'}), 400
+        
+        user = g.current_user
+        platform = getattr(g, 'platform', 'platform_a')
+        
+        # Use AFDALNOVA keys
+        secret_key = AFDALNOVA_PAYSTACK_SECRET_KEY
+        
+        if not secret_key:
+            print("[ERROR] AFDALNOVA_PAYSTACK_SECRET_KEY is not set!")
+            return jsonify({'success': False, 'error': 'Payment system not configured for AFDALNOVA'}), 500
+        
+        # Generate unique reference with AFDALNOVA prefix
+        reference = f"AFD-{int(datetime.utcnow().timestamp())}-{user.id}-{secrets.token_hex(4)}"
+        
+        print(f"[AFDALNOVA PAYSTACK] Initializing payment")
+        print(f"[AFDALNOVA PAYSTACK] Amount: {amount}")
+        print(f"[AFDALNOVA PAYSTACK] Email: {email}")
+        print(f"[AFDALNOVA PAYSTACK] Reference: {reference}")
+        print(f"[AFDALNOVA PAYSTACK] Platform: {platform}")
+        
+        # ✅ AFDALNOVA callback URL with fallback
+        afdalnova_wallet = "https://abigalisticstudious.com/wallet"
+        afdalnova_dashboard = "https://abigalisticstudious.com/dashboard"
+        callback_url = afdalnova_dashboard  # Primary: dashboard page
+        
+        result = initialize_paystack_transaction(
+            email=email,
+            amount=amount,
+            reference=reference,
+            metadata={
+                'user_id': user.id,
+                'username': user.username,
+                'phone': phone,
+                'type': 'wallet_funding',
+                'platform': 'AFDALNOVA'
+            },
+            secret_key=secret_key,
+            callback_url=callback_url
+        )
+        
+        if result['success']:
+            pending_tx = PendingTransaction(
+                user_id=user.id,
+                reference=reference,
+                amount=amount,
+                payment_method='paystack',
+                platform='platform_a',
+                status='pending',
+                created_at=datetime.utcnow()
+            )
+            db.session.add(pending_tx)
             db.session.commit()
             
             return jsonify({
-                'success': False,
+                'success': True,
                 'data': {
-                    'status': 'failed',
-                    'message': result.get('message', 'Payment was not successful')
+                    'authorization_url': result['authorization_url'],
+                    'reference': reference,
+                    'amount': amount,
+                    'access_code': result.get('access_code'),
+                    'platform': 'AFDALNOVA',
+                    'platform_key': platform,
+                    'callback_url': callback_url  # Send to frontend
                 }
-            }), 400
+            })
+        else:
+            return jsonify({'success': False, 'error': result.get('error', 'Payment initialization failed')}), 500
         
     except Exception as e:
-        print(f"❌ Verify Paystack payment error: {e}")
+        print(f"[AFDALNOVA PAYSTACK ERROR] {e}")
+        import traceback
+        traceback.print_exc()
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/v1/payment/paystack/verify/<reference>', methods=['GET'])
+@token_required
+@limiter.limit("10 per minute")
+def afdalnova_verify_paystack_payment(reference):
+    """Verify Paystack payment for AFDALNOVA"""
+    try:
+        # Use AFDALNOVA keys
+        secret_key = AFDALNOVA_PAYSTACK_SECRET_KEY
+        
+        result = verify_paystack_transaction(
+            reference=reference,
+            secret_key=secret_key
+        )
+        
+        if result['success'] and result.get('status') == 'success':
+            pending_tx = PendingTransaction.query.filter_by(
+                reference=reference,
+                platform='platform_a'
+            ).first()
+            
+            if pending_tx and pending_tx.status == 'pending':
+                pending_tx.status = 'completed'
+                pending_tx.completed_at = datetime.utcnow()
+                
+                user = User.query.get(pending_tx.user_id)
+                if user:
+                    balance_before = user.wallet_balance
+                    user.wallet_balance += pending_tx.amount
+                    
+                    transaction = Transaction(
+                        user_id=user.id,
+                        type='deposit',
+                        amount=pending_tx.amount,
+                        balance_before=balance_before,
+                        balance_after=user.wallet_balance,
+                        description=f'Wallet funding via Paystack (AFDALNOVA) - {reference}',
+                        reference=reference,
+                        status='completed',
+                        platform='platform_a'
+                    )
+                    db.session.add(transaction)
+                    db.session.commit()
+                    
+                    platform = getattr(g, 'platform', 'platform_a')
+                    platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+                    primary_color = platform_config.get('primary_color', '#1A2A6C')
+                    
+                    send_email(
+                        user.email,
+                        f"💰 Wallet Funded - {reference} - AFDALNOVA",
+                        f"""
+                        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                            <div style="background: {primary_color}; color: white; padding: 20px; text-align: center; border-radius: 10px 10px 0 0;">
+                                <h2 style="margin: 0;">💳 Payment Successful!</h2>
+                            </div>
+                            <div style="background: #f9f9f9; padding: 30px; border-radius: 0 0 10px 10px;">
+                                <p>Dear {user.username},</p>
+                                <p>Your AFDALNOVA wallet has been funded successfully.</p>
+                                <p><strong>Amount:</strong> GHS {pending_tx.amount:.2f}</p>
+                                <p><strong>Reference:</strong> {reference}</p>
+                                <p><strong>New Balance:</strong> GHS {user.wallet_balance:.2f}</p>
+                                <p>Thank you for using AFDALNOVA!</p>
+                            </div>
+                        </div>
+                        """
+                    )
+            
+            return jsonify({
+                'success': True,
+                'data': {
+                    'status': 'success',
+                    'reference': reference,
+                    'amount': result.get('amount'),
+                    'platform': 'AFDALNOVA',
+                    'platform_key': 'platform_a'
+                }
+            })
+        else:
+            return jsonify({
+                'success': True,
+                'data': {
+                    'status': 'failed',
+                    'reference': reference,
+                    'message': result.get('error', 'Payment not successful'),
+                    'platform': 'AFDALNOVA',
+                    'platform_key': 'platform_a'
+                }
+            })
+        
+    except Exception as e:
+        print(f"[AFDALNOVA PAYSTACK VERIFY ERROR] {e}")
         import traceback
         traceback.print_exc()
         db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
-@app.route('/api/payment/paystack/webhook', methods=['POST'])
-def paystack_webhook():
-    """Paystack webhook for automatic payment confirmation"""
+# ============================================================
+# PLATFORM-AWARE AUTO-DETECT (NEW - Recommended)
+# ============================================================
+
+@app.route('/api/payment/initialize', methods=['POST'])
+@token_required
+@limiter.limit("10 per minute")
+def initialize_payment_auto():
+    """Auto-detect platform and route to correct payment endpoint"""
     try:
-        # Verify webhook signature
-        signature = request.headers.get('x-paystack-signature')
-        if not signature:
-            return jsonify({'success': False, 'error': 'No signature'}), 401
+        user = g.current_user
+        platform = user.platform if user.platform else 'platform_b'
         
-        # Get event data
-        event_data = request.get_json()
-        event = event_data.get('event')
+        print(f"[PAYMENT AUTO] User: {user.username}, Platform: {platform}")
         
-        print(f"Paystack webhook received: {event}")
+        if platform == 'platform_a':
+            return afdalnova_initialize_paystack_payment()
+        else:
+            return roamsmart_initialize_paystack_payment()
+        
+    except Exception as e:
+        print(f"[PAYMENT AUTO ERROR] {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ============================================================
+# PAYMENT WEBHOOK - Handles both platforms
+# ============================================================
+
+@app.route('/api/payment/webhook/paystack', methods=['POST'])
+def paystack_webhook():
+    """Handle Paystack webhook for both platforms"""
+    try:
+        data = request.get_json()
+        event = data.get('event')
+        
+        print(f"[WEBHOOK] Event: {event}")
         
         if event == 'charge.success':
-            data = event_data.get('data', {})
-            reference = data.get('reference')
-            amount = data.get('amount', 0) / 100
+            reference = data.get('data', {}).get('reference')
             
-            # Find pending transaction
-            pending_tx = PendingTransaction.query.filter_by(
-                reference=reference,
-                status='pending',
-                payment_method='paystack'
-            ).first()
+            if not reference:
+                return jsonify({'success': False, 'error': 'No reference'}), 400
             
-            if pending_tx and pending_tx.status == 'pending':
-                user = User.query.get(pending_tx.user_id)
-                if user:
-                    balance_before = user.wallet_balance
-                    user.wallet_balance += amount
-                    
+            # Detect platform from reference prefix
+            if reference.startswith('AFD-'):
+                platform = 'platform_a'
+                secret_key = AFDALNOVA_PAYSTACK_SECRET_KEY
+                platform_name = 'AFDALNOVA'
+            else:
+                platform = 'platform_b'
+                secret_key = ROAMSMART_PAYSTACK_SECRET_KEY
+                platform_name = 'Roamsmart'
+            
+            print(f"[WEBHOOK] Processing {platform_name} payment: {reference}")
+            
+            # Verify transaction
+            result = verify_paystack_transaction(reference, secret_key=secret_key)
+            
+            if result['success'] and result.get('status') == 'success':
+                pending_tx = PendingTransaction.query.filter_by(
+                    reference=reference,
+                    platform=platform
+                ).first()
+                
+                if pending_tx and pending_tx.status == 'pending':
                     pending_tx.status = 'completed'
                     pending_tx.completed_at = datetime.utcnow()
                     
-                    transaction = Transaction(
-                        user_id=user.id,
-                        type='credit',
-                        amount=amount,
-                        balance_before=balance_before,
-                        balance_after=user.wallet_balance,
-                        description=f'Wallet funding via Paystack - {reference}',
-                        reference=reference,
-                        status='completed'
-                    )
-                    db.session.add(transaction)
-                    db.session.commit()
-                    
-                    print(f"[WEBHOOK] Processed Paystack payment {reference} for {user.email}")
-                    send_wallet_funding_email(user.email, user.username, amount, user.wallet_balance)
+                    user = User.query.get(pending_tx.user_id)
+                    if user:
+                        balance_before = user.wallet_balance
+                        user.wallet_balance += pending_tx.amount
+                        
+                        transaction = Transaction(
+                            user_id=user.id,
+                            type='deposit',
+                            amount=pending_tx.amount,
+                            balance_before=balance_before,
+                            balance_after=user.wallet_balance,
+                            description=f'Wallet funding via Paystack webhook ({platform_name}) - {reference}',
+                            reference=reference,
+                            status='completed',
+                            platform=platform
+                        )
+                        db.session.add(transaction)
+                        db.session.commit()
+                        
+                        print(f"[WEBHOOK] ✅ Payment completed for {user.email} ({platform_name})")
+                        
+                        # Send confirmation email
+                        send_email(
+                            user.email,
+                            f"💰 Wallet Funded - {reference} - {platform_name}",
+                            f"""
+                            <div style="font-family: Arial, sans-serif;">
+                                <h2 style="color: #28a745;">Payment Successful!</h2>
+                                <p>Dear {user.username},</p>
+                                <p>Your {platform_name} wallet has been funded successfully.</p>
+                                <p><strong>Amount:</strong> GHS {pending_tx.amount:.2f}</p>
+                                <p><strong>Reference:</strong> {reference}</p>
+                                <p><strong>New Balance:</strong> GHS {user.wallet_balance:.2f}</p>
+                            </div>
+                            """
+                        )
         
-        return jsonify({'success': True})
+        return jsonify({'success': True}), 200
         
     except Exception as e:
-        print(f"Paystack webhook error: {e}")
+        print(f"[WEBHOOK ERROR] {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
+
+
+
 
 
 def send_wallet_funding_email(email, username, amount, new_balance):
@@ -8626,25 +13711,463 @@ def admin_update_role(admin_id):
         return jsonify({'success': False, 'error': 'Failed to update role'}), 500
 # ========== AGENT ROUTES ==========
 
+def get_device_type(user_agent):
+    """Detect device type from user agent"""
+    ua = user_agent.lower() if user_agent else ''
+    
+    if 'mobile' in ua or 'android' in ua or 'iphone' in ua or 'ipod' in ua:
+        return 'mobile'
+    elif 'tablet' in ua or 'ipad' in ua:
+        return 'tablet'
+    else:
+        return 'desktop'
+
+def get_browser(user_agent):
+    """Detect browser from user agent"""
+    ua = user_agent.lower() if user_agent else ''
+    
+    if 'chrome' in ua and 'edg' not in ua:
+        return 'chrome'
+    elif 'firefox' in ua:
+        return 'firefox'
+    elif 'safari' in ua and 'chrome' not in ua:
+        return 'safari'
+    elif 'edg' in ua:
+        return 'edge'
+    else:
+        return 'other'
+
+def get_os(user_agent):
+    """Detect OS from user agent"""
+    ua = user_agent.lower() if user_agent else ''
+    
+    if 'windows' in ua:
+        return 'Windows'
+    elif 'mac' in ua:
+        return 'macOS'
+    elif 'linux' in ua:
+        return 'Linux'
+    elif 'android' in ua:
+        return 'Android'
+    elif 'ios' in ua or 'iphone' in ua or 'ipad' in ua:
+        return 'iOS'
+    else:
+        return 'Unknown'
+
+# ============================================================
+# TRACKING ENDPOINTS
+# ============================================================
+
+@app.route('/api/track/visit', methods=['POST'])
+def track_visit():
+    """Track a page visit from a visitor"""
+    try:
+        data = request.get_json() or {}
+        
+        # Get session/visitor IDs
+        session_id = request.headers.get('X-Session-ID') or data.get('session_id')
+        visitor_id = request.headers.get('X-Visitor-ID') or data.get('visitor_id')
+        platform = getattr(g, 'platform', 'platform_a')
+        
+        # Get page info
+        page_url = data.get('page_url', '/')
+        page_title = data.get('page_title', '')
+        referrer_url = data.get('referrer_url', '')
+        time_spent = data.get('time_spent', 0)
+        scroll_depth = data.get('scroll_depth', 0)
+        
+        # Get user agent
+        user_agent = request.headers.get('User-Agent', '')
+        ip_address = request.remote_addr
+        
+        # Generate session_id if not provided
+        if not session_id:
+            session_id = str(uuid.uuid4())
+        
+        # Find or create visitor log
+        visitor_log = None
+        
+        if session_id:
+            visitor_log = VisitorLog.query.filter_by(
+                session_id=session_id,
+                platform=platform
+            ).first()
+        
+        if not visitor_log:
+            # Try to find by visitor_id (persistent cookie)
+            if visitor_id:
+                visitor_log = VisitorLog.query.filter_by(
+                    visitor_id=visitor_id,
+                    platform=platform
+                ).order_by(VisitorLog.first_visit.desc()).first()
+        
+        if not visitor_log:
+            # Create new visitor log
+            visitor_log = VisitorLog(
+                session_id=session_id,
+                visitor_id=visitor_id or str(uuid.uuid4()),
+                ip_address=ip_address,
+                user_agent=user_agent,
+                device_type=get_device_type(user_agent),
+                browser=get_browser(user_agent),
+                os=get_os(user_agent),
+                referrer_url=referrer_url,
+                landing_page=page_url,
+                platform=platform,
+                first_visit=datetime.utcnow(),
+                last_activity=datetime.utcnow(),
+                page_views=1,
+                is_active=True
+            )
+            db.session.add(visitor_log)
+        else:
+            # Update existing visitor log
+            visitor_log.last_activity = datetime.utcnow()
+            visitor_log.page_views += 1
+            visitor_log.is_active = True
+            
+            # Update time_spent if provided
+            if time_spent:
+                visitor_log.session_duration += time_spent
+        
+        db.session.commit()
+        
+        # Track individual page visit
+        page_visit = PageVisit(
+            visitor_id=visitor_log.id,
+            page_url=page_url,
+            page_title=page_title,
+            referrer_url=referrer_url,
+            time_spent=time_spent,
+            scroll_depth=scroll_depth,
+            created_at=datetime.utcnow()
+        )
+        db.session.add(page_visit)
+        db.session.commit()
+        
+        # Clean up inactive sessions (older than 30 minutes)
+        thirty_minutes_ago = datetime.utcnow() - timedelta(minutes=30)
+        inactive_sessions = VisitorLog.query.filter(
+            VisitorLog.platform == platform,
+            VisitorLog.last_activity < thirty_minutes_ago,
+            VisitorLog.is_active == True
+        ).update({'is_active': False})
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'session_id': visitor_log.session_id,
+                'visitor_id': visitor_log.visitor_id,
+                'page_views': visitor_log.page_views,
+                'message': 'Visit tracked successfully'
+            }
+        })
+        
+    except Exception as e:
+        print(f"[VISITOR TRACKING ERROR] {e}")
+        import traceback
+        traceback.print_exc()
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/track/heartbeat', methods=['POST'])
+def track_heartbeat():
+    """Update visitor activity (heartbeat)"""
+    try:
+        data = request.get_json() or {}
+        session_id = data.get('session_id')
+        platform = getattr(g, 'platform', 'platform_a')
+        
+        if not session_id:
+            return jsonify({'success': False, 'error': 'Session ID required'}), 400
+        
+        visitor_log = VisitorLog.query.filter_by(
+            session_id=session_id,
+            platform=platform
+        ).first()
+        
+        if visitor_log:
+            visitor_log.last_activity = datetime.utcnow()
+            visitor_log.is_active = True
+            
+            # Update time spent
+            time_spent = data.get('time_spent', 0)
+            if time_spent:
+                visitor_log.session_duration += time_spent
+            
+            db.session.commit()
+        
+        return jsonify({'success': True})
+        
+    except Exception as e:
+        print(f"[HEARTBEAT ERROR] {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/track/leave', methods=['POST'])
+def track_leave():
+    """Track when visitor leaves the page"""
+    try:
+        data = request.get_json() or {}
+        session_id = data.get('session_id')
+        platform = getattr(g, 'platform', 'platform_a')
+        
+        if not session_id:
+            return jsonify({'success': False, 'error': 'Session ID required'}), 400
+        
+        visitor_log = VisitorLog.query.filter_by(
+            session_id=session_id,
+            platform=platform
+        ).first()
+        
+        if visitor_log:
+            visitor_log.is_active = False
+            db.session.commit()
+        
+        return jsonify({'success': True})
+        
+    except Exception as e:
+        print(f"[LEAVE TRACKING ERROR] {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ============================================================
+# ADMIN VISITOR STATS ENDPOINTS
+# ============================================================
+
+@app.route('/api/admin/visitor-stats', methods=['GET'])
+@token_required
+@admin_required
+def get_visitor_stats():
+    """Get comprehensive visitor statistics for admin"""
+    try:
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        
+        # Get stats from database
+        stats = VisitorLog.get_visitor_stats(platform)
+        
+        # Get historical data for charts (last 30 days)
+        thirty_days_ago = datetime.utcnow() - timedelta(days=30)
+        daily_stats = db.session.query(
+            db.func.date(VisitorLog.first_visit).label('date'),
+            db.func.count(db.distinct(VisitorLog.visitor_id)).label('unique_visitors'),
+            db.func.sum(VisitorLog.page_views).label('page_views')
+        ).filter(
+            VisitorLog.platform == platform,
+            VisitorLog.first_visit >= thirty_days_ago
+        ).group_by(
+            db.func.date(VisitorLog.first_visit)
+        ).order_by(
+            db.func.date(VisitorLog.first_visit).asc()
+        ).all()
+        
+        visitor_history = [{
+            'date': row.date.isoformat() if row.date else None,
+            'unique_visitors': row.unique_visitors or 0,
+            'page_views': row.page_views or 0
+        } for row in daily_stats]
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'total_visitors': stats.get('total_visitors', 0),
+                'unique_visitors': stats.get('unique_visitors', 0),
+                'today_visitors': stats.get('today_visitors', 0),
+                'this_week_visitors': stats.get('this_week_visitors', 0),
+                'this_month_visitors': stats.get('this_month_visitors', 0),
+                'active_now': stats.get('active_now', 0),
+                'page_views': stats.get('page_views', 0),
+                'bounce_rate': stats.get('bounce_rate', 0),
+                'avg_session_duration': stats.get('avg_session_duration', 0),
+                'devices': stats.get('devices', {'desktop': 0, 'mobile': 0, 'tablet': 0}),
+                'browsers': stats.get('browsers', {'chrome': 0, 'firefox': 0, 'safari': 0, 'edge': 0, 'other': 0}),
+                'top_pages': stats.get('top_pages', []),
+                'visitor_history': visitor_history
+            },
+            'platform': platform,
+            'platform_name': platform_name,
+            'branding': {
+                'name': platform_config.get('brand_name', platform_name),
+                'primary_color': platform_config.get('primary_color', '#1A2A6C'),
+                'secondary_color': platform_config.get('secondary_color', '#C9A84C')
+            }
+        })
+        
+    except Exception as e:
+        print(f"[VISITOR STATS ERROR] {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/admin/visitor-stats/realtime', methods=['GET'])
+@token_required
+@admin_required
+def get_realtime_visitor_stats():
+    """Get real-time visitor statistics"""
+    try:
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        
+        now = datetime.utcnow()
+        five_minutes_ago = now - timedelta(minutes=5)
+        fifteen_minutes_ago = now - timedelta(minutes=15)
+        
+        # Active in last 5 minutes
+        active_now = VisitorLog.query.filter(
+            VisitorLog.platform == platform,
+            VisitorLog.last_activity >= five_minutes_ago,
+            VisitorLog.is_active == True
+        ).count()
+        
+        # Active in last 15 minutes
+        active_15min = VisitorLog.query.filter(
+            VisitorLog.platform == platform,
+            VisitorLog.last_activity >= fifteen_minutes_ago
+        ).count()
+        
+        # Current page views per minute (last 5 minutes average)
+        five_min_ago = now - timedelta(minutes=5)
+        recent_page_visits = PageVisit.query.join(VisitorLog).filter(
+            VisitorLog.platform == platform,
+            PageVisit.created_at >= five_min_ago
+        ).count()
+        page_views_per_minute = recent_page_visits / 5
+        
+        # Today's visitors so far
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        today_visitors = db.session.query(db.func.count(db.distinct(VisitorLog.visitor_id))).filter(
+            VisitorLog.platform == platform,
+            VisitorLog.first_visit >= today_start,
+            VisitorLog.visitor_id.isnot(None)
+        ).scalar() or 0
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'active_now': active_now,
+                'active_15min': active_15min,
+                'page_views_per_minute': round(page_views_per_minute, 1),
+                'today_visitors': today_visitors,
+                'timestamp': now.isoformat()
+            },
+            'platform': platform,
+            'platform_name': platform_name
+        })
+        
+    except Exception as e:
+        print(f"[REALTIME VISITOR STATS ERROR] {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/admin/visitors', methods=['GET'])
+@token_required
+@admin_required
+def get_visitor_list():
+    """Get list of recent visitors for admin"""
+    try:
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('limit', 50, type=int)
+        
+        pagination = VisitorLog.query.filter_by(
+            platform=platform
+        ).order_by(
+            VisitorLog.last_activity.desc()
+        ).paginate(page=page, per_page=per_page, error_out=False)
+        
+        visitors = [{
+            'session_id': v.session_id,
+            'visitor_id': v.visitor_id,
+            'device_type': v.device_type,
+            'browser': v.browser,
+            'os': v.os,
+            'country': v.country,
+            'landing_page': v.landing_page,
+            'page_views': v.page_views,
+            'session_duration': v.session_duration,
+            'is_active': v.is_active,
+            'first_visit': v.first_visit.isoformat() if v.first_visit else None,
+            'last_activity': v.last_activity.isoformat() if v.last_activity else None
+        } for v in pagination.items]
+        
+        return jsonify({
+            'success': True,
+            'data': visitors,
+            'total': pagination.total,
+            'page': page,
+            'total_pages': pagination.pages,
+            'platform': platform,
+            'platform_name': platform_name
+        })
+        
+    except Exception as e:
+        print(f"[VISITOR LIST ERROR] {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ============================================================
+# VISITOR TRACKING MIGRATION
+# ============================================================
+
+def create_visitor_tables():
+    """Create visitor tracking tables if they don't exist"""
+    from sqlalchemy import inspect
+    inspector = inspect(db.engine)
+    
+    if 'visitor_logs' not in inspector.get_table_names():
+        print("📊 Creating visitor_logs table...")
+        VisitorLog.__table__.create(db.engine)
+        print("✅ visitor_logs table created")
+    
+    if 'page_visits' not in inspector.get_table_names():
+        print("📊 Creating page_visits table...")
+        PageVisit.__table__.create(db.engine)
+        print("✅ page_visits table created")
+# ========== AGENT ROUTES ==========
+
 @app.route('/api/agent/apply', methods=['POST'])
 @token_required
 def apply_agent():
-    """Apply to become an agent - FREE now (no payment required)"""
+    """Apply to become an agent - FREE now (no payment required) - AFDALNOVA"""
     try:
         data = request.get_json() or request.form
         
+        # Get platform info
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        primary_color = platform_config.get('primary_color', '#1A2A6C')
+        secondary_color = platform_config.get('secondary_color', '#C9A84C')
+        website_url = platform_config.get('base_url', 'https://abigalisticstudious.com')
+        support_phone = platform_config.get('support_phone', '0548247241')
+        support_email = platform_config.get('support_email', 'support@abigalisticstudious.com')
+        company_name = platform_config.get('name', 'AFDALNOVA')
+        company_short = platform_config.get('brand_name', 'AFDALNOVA')
+        
         # Check if already agent
         if g.current_user.is_agent and g.current_user.agent_approved:
-            return jsonify({'success': False, 'error': 'You are already an approved agent'}), 400
+            return jsonify({'success': False, 'error': f'You are already an approved {platform_name} agent'}), 400
         
         # Check for existing pending request
         existing = AgentRequest.query.filter_by(
             user_id=g.current_user.id, 
-            status='pending'
+            status='pending',
+            platform=platform
         ).first()
         
         if existing:
-            return jsonify({'success': False, 'error': 'You already have a pending application'}), 400
+            return jsonify({'success': False, 'error': f'You already have a pending application for {platform_name}'}), 400
         
         # ========== FREE REGISTRATION - NO PAYMENT REQUIRED ==========
         # Auto-approve since it's free
@@ -8652,6 +14175,8 @@ def apply_agent():
         g.current_user.agent_approved = True
         g.current_user.agent_tier = 'Bronze'
         g.current_user.commission_rate = 10
+        g.current_user.platform = platform
+        g.current_user.updated_at = datetime.utcnow()
         db.session.commit()
         
         # Create agent request record for tracking (already approved)
@@ -8662,6 +14187,7 @@ def apply_agent():
             payment_method='free',
             status='approved',
             payment_reference=reference,
+            platform=platform,
             created_at=datetime.utcnow()
         )
         db.session.add(agent_request)
@@ -8675,25 +14201,26 @@ def apply_agent():
             <style>
                 body {{ font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.6; }}
                 .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
-                .header {{ background: linear-gradient(135deg, #8B0000, #D2691E); color: white; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }}
+                .header {{ background: {primary_color}; color: white; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }}
                 .content {{ padding: 30px; background: #f9f9f9; border-radius: 0 0 10px 10px; }}
-                .feature-box {{ background: white; padding: 15px; border-radius: 8px; margin: 15px 0; border-left: 4px solid #28a745; }}
-                .button {{ display: inline-block; background: #8B0000; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; }}
+                .feature-box {{ background: white; padding: 15px; border-radius: 8px; margin: 15px 0; border-left: 4px solid {secondary_color}; }}
+                .button {{ display: inline-block; background: {primary_color}; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; }}
+                .button:hover {{ background: {secondary_color}; }}
                 .footer {{ text-align: center; padding: 20px; color: #666; font-size: 12px; }}
             </style>
         </head>
         <body>
             <div class="container">
                 <div class="header">
-                    <h2>🎉 Welcome to the Roamsmart Agent Program!</h2>
-                    <p>You're now an official Roamsmart Agent</p>
+                    <h2>🎉 Welcome to the {platform_name} Agent Program!</h2>
+                    <p>You're now an official {platform_name} Agent</p>
                 </div>
                 <div class="content">
                     <p>Dear <strong>{g.current_user.username}</strong>,</p>
-                    <p>Congratulations! Your application to become a Roamsmart Agent has been <strong style="color: #28a745;">APPROVED</strong> - and it was completely FREE!</p>
+                    <p>Congratulations! Your application to become a {platform_name} Agent has been <strong style="color: #28a745;">APPROVED</strong> - and it was completely FREE!</p>
                     
                     <div class="feature-box">
-                        <h3>✨ What you get as a Roamsmart Agent:</h3>
+                        <h3>✨ What you get as a {platform_name} Agent:</h3>
                         <ul>
                             <li>💰 <strong>Up to 25% commission</strong> on every data sale</li>
                             <li>🏪 <strong>Your own branded store page</strong> to sell to customers</li>
@@ -8705,13 +14232,13 @@ def apply_agent():
                     </div>
                     
                     <div style="text-align: center; margin: 30px 0;">
-                        <a href="{COMPANY_WEBSITE}/agent" class="button">🚀 Start Selling Now</a>
+                        <a href="{website_url}/agent" class="button">🚀 Start Selling Now on {platform_name}</a>
                     </div>
                     
                     <div class="feature-box">
                         <h3>📋 Quick Start Guide:</h3>
                         <ol>
-                            <li>Log into your Roamsmart agent dashboard</li>
+                            <li>Log into your {platform_name} agent dashboard</li>
                             <li>Set up your store with your branding</li>
                             <li>Share your store link with customers</li>
                             <li>Start earning commission on every sale!</li>
@@ -8719,21 +14246,22 @@ def apply_agent():
                     </div>
                     
                     <p>Need help? Contact our support team:</p>
-                    <p>📞 Call/WhatsApp: <strong>{COMPANY_PHONE}</strong><br>
-                    📧 Email: <strong>{COMPANY_EMAIL}</strong></p>
+                    <p>📞 Call/WhatsApp: <strong>{support_phone}</strong><br>
+                    📧 Email: <strong>{support_email}</strong></p>
                 </div>
                 <div class="footer">
-                    <p>© 2025 {COMPANY_NAME}. All rights reserved.</p>
+                    <p>© {datetime.utcnow().year} {platform_name}. All rights reserved.</p>
+                    <p style="color: {secondary_color};">{platform_config.get('tagline', 'Innovation Meets Excellence')}</p>
                 </div>
             </div>
         </body>
         </html>
         """
         
-        send_email(g.current_user.email, f"🎉 Welcome to Roamsmart Agent Program! - {COMPANY_NAME}", user_email_html)
+        send_email(g.current_user.email, f"🎉 Welcome to {platform_name} Agent Program!", user_email_html)
         
         # ========== SEND NOTIFICATION TO ADMIN ==========
-        admin_email = COMPANY_ADMIN_EMAIL
+        admin_email = platform_config.get('admin_email', 'admin@abigalisticstudious.com')
         
         admin_email_html = f"""
         <!DOCTYPE html>
@@ -8742,20 +14270,20 @@ def apply_agent():
             <style>
                 body {{ font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.6; }}
                 .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
-                .header {{ background: linear-gradient(135deg, #8B0000, #D2691E); color: white; padding: 30px; text-align: center; }}
-                .content {{ padding: 30px; background: #f9f9f9; }}
-                .info-box {{ background: white; padding: 15px; border-radius: 8px; margin: 15px 0; border-left: 4px solid #28a745; }}
+                .header {{ background: {primary_color}; color: white; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }}
+                .content {{ padding: 30px; background: #f9f9f9; border-radius: 0 0 10px 10px; }}
+                .info-box {{ background: white; padding: 15px; border-radius: 8px; margin: 15px 0; border-left: 4px solid {secondary_color}; }}
             </style>
         </head>
         <body>
             <div class="container">
                 <div class="header">
-                    <h2>🆕 New Agent Registration - {COMPANY_NAME}</h2>
+                    <h2>🆕 New Agent Registration - {platform_name}</h2>
                     <p>FREE Registration</p>
                 </div>
                 <div class="content">
                     <p>Hello Admin,</p>
-                    <p>A new user has successfully registered as a Roamsmart Agent (Free Registration).</p>
+                    <p>A new user has successfully registered as a {platform_name} Agent (Free Registration).</p>
                     
                     <div class="info-box">
                         <h3>Agent Details:</h3>
@@ -8765,32 +14293,50 @@ def apply_agent():
                             <li><strong>Phone:</strong> {g.current_user.phone}</li>
                             <li><strong>Agent Tier:</strong> Bronze</li>
                             <li><strong>Commission Rate:</strong> 10%</li>
+                            <li><strong>Platform:</strong> {platform_name}</li>
                             <li><strong>Registered:</strong> {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}</li>
                         </ul>
                     </div>
+                    
+                    <div style="text-align: center; margin: 20px 0;">
+                        <a href="{website_url}/admin/agents" class="button" style="background: {primary_color}; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">View All Agents</a>
+                    </div>
                 </div>
                 <div class="footer">
-                    <p>© 2025 {COMPANY_NAME}. All rights reserved.</p>
+                    <p>© {datetime.utcnow().year} {platform_name}. All rights reserved.</p>
                 </div>
             </div>
         </body>
         </html>
         """
         
-        send_email(admin_email, f"New Free Agent Registration - {COMPANY_NAME}", admin_email_html)
+        send_email(admin_email, f"New Free Agent Registration - {platform_name}", admin_email_html)
+        
+        # Also send to super admin for cross-platform visibility
+        if platform != 'platform_a':
+            super_admin_email = PLATFORMS.get('platform_a', {}).get('admin_email', 'admin@abigalisticstudious.com')
+            send_email(super_admin_email, f"New Agent Registration - {platform_name}", admin_email_html)
         
         return jsonify({
             'success': True,
-            'message': '🎉 Congratulations! You are now a Roamsmart Agent! Start selling and earning commission.',
+            'message': f'🎉 Congratulations! You are now a {platform_name} Agent! Start selling and earning commission.',
             'data': {
                 'agent_tier': 'Bronze',
                 'commission_rate': 10,
-                'is_agent': True
+                'is_agent': True,
+                'platform': platform,
+                'platform_name': platform_name,
+                'branding': {
+                    'name': platform_config.get('brand_name', platform_name),
+                    'tagline': platform_config.get('tagline', 'Innovation Meets Excellence'),
+                    'primary_color': primary_color,
+                    'secondary_color': secondary_color
+                }
             }
         })
         
     except Exception as e:
-        print(f"Apply agent error: {e}")
+        print(f"[APPLY AGENT ERROR] {e}")
         import traceback
         traceback.print_exc()
         db.session.rollback()
@@ -8865,6 +14411,7 @@ def get_agent_dashboard():
         return jsonify({'success': False, 'error': 'Failed to fetch dashboard data'}), 500
 
 
+
 @app.route('/api/agent/sell', methods=['POST'])
 @token_required
 @agent_required
@@ -8884,6 +14431,8 @@ def agent_sell():
         customer_name = data.get('customer_name')
         quantity = data.get('quantity', 1)
         selling_price = data.get('selling_price')
+        delivery_type = data.get('delivery_type', 'master')
+        offer_slug = data.get('offer_slug')
         
         print(f"📱 Network: {network}")
         print(f"💾 Size GB: {size_gb}")
@@ -8891,13 +14440,56 @@ def agent_sell():
         print(f"👤 Customer: {customer_name}")
         print(f"🔢 Quantity: {quantity}")
         print(f"💰 Selling Price (provided): {selling_price}")
+        print(f"🚀 Delivery Type: {delivery_type}")
+        print(f"📦 Offer Slug (from frontend): {offer_slug}")
         
         if not all([network, size_gb, phone]):
             return jsonify({'success': False, 'error': 'Missing required fields'}), 400
         
-        # Get agent's wholesale price from database
-        agent_cost = get_agent_price(network, size_gb)
-        print(f"💰 Agent Wholesale Cost: GHS {agent_cost}")
+        # ========== GET AGENT WHOLESALE PRICE WITH DELIVERY TYPE ==========
+        print(f"\n{'='*60}")
+        print(f"🔍 GETTING AGENT WHOLESALE PRICE FOR {delivery_type.upper()}")
+        print(f"{'='*60}")
+        
+        # Get delivery-specific price
+        from models import PriceSetting
+        
+        # Method 1: Try delivery-specific price
+        print(f"\n📊 Method 1: Checking delivery-specific price for {delivery_type}")
+        setting = PriceSetting.query.filter_by(
+            category='agent_price',
+            network=network,
+            size_gb=size_gb,
+            delivery_type=delivery_type,
+            is_available=True
+        ).first()
+        
+        if setting:
+            agent_cost = float(setting.price)
+            print(f"   ✅ Found {delivery_type} price: ₵{agent_cost}")
+            print(f"   📋 PriceSetting record: id={setting.id}, category={setting.category}, network={setting.network}, size_gb={setting.size_gb}, delivery_type={setting.delivery_type}, price={setting.price}")
+        else:
+            print(f"   ⚠️ No {delivery_type} price found, checking base price...")
+            
+            # Method 2: Fallback to base price
+            setting = PriceSetting.query.filter_by(
+                category='agent_price',
+                network=network,
+                size_gb=size_gb,
+                delivery_type=None,
+                is_available=True
+            ).first()
+            
+            if setting:
+                agent_cost = float(setting.price)
+                print(f"   ✅ Found base price: ₵{agent_cost}")
+                print(f"   📋 PriceSetting record: id={setting.id}, category={setting.category}, network={setting.network}, size_gb={setting.size_gb}, price={setting.price}")
+            else:
+                agent_cost = 0
+                print(f"   ❌ No price found for {network} {size_gb}GB")
+        
+        print(f"\n💰 FINAL Agent Wholesale Cost: GHS {agent_cost}")
+        print(f"{'='*60}\n")
         
         if agent_cost == 0:
             return jsonify({'success': False, 'error': f'Price not configured for {network} {size_gb}GB'}), 400
@@ -8928,6 +14520,30 @@ def agent_sell():
         order_id = f"ORD-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{g.current_user.id}"
         print(f"🆔 Generated Order ID: {order_id}")
         
+        # Get the offer_slug from delivery_settings if not provided
+        if not offer_slug:
+            from models import DeliverySetting
+            delivery_setting = DeliverySetting.query.filter_by(
+                network=network,
+                delivery_type=delivery_type,
+                is_active=True
+            ).first()
+            
+            if delivery_setting and delivery_setting.offer_slug:
+                offer_slug = delivery_setting.offer_slug
+                print(f"📦 Found offer_slug in delivery_settings: {offer_slug}")
+            else:
+                # Fallback defaults
+                if delivery_type == 'express':
+                    offer_slug = 'mtn_express_bundle'
+                elif delivery_type == 'master':
+                    offer_slug = 'mtn_master_bundle'
+                else:
+                    offer_slug = 'standard_bundle'
+                print(f"📦 Using fallback offer_slug: {offer_slug}")
+        
+        print(f"📦 FINAL OFFER_SLUG: {offer_slug}")
+        
         # Deduct from agent's wallet
         balance_before = g.current_user.wallet_balance
         g.current_user.wallet_balance -= total_cost
@@ -8952,7 +14568,9 @@ def agent_sell():
             delivery_status_updated_at=datetime.utcnow(),
             payment_method='wallet',
             completed_at=datetime.utcnow(),
-            created_at=datetime.utcnow()
+            created_at=datetime.utcnow(),
+            delivery_type=delivery_type,
+            offer_slug=offer_slug
         )
         db.session.add(order)
         print(f"📝 Order created in database (ID: {order.id})")
@@ -8964,7 +14582,7 @@ def agent_sell():
             amount=total_cost,
             balance_before=balance_before,
             balance_after=g.current_user.wallet_balance,
-            description=f'Sale: {quantity}x {size_gb}GB {network} to {phone} (Cost: GHS {total_cost:.2f})',
+            description=f'Sale: {quantity}x {size_gb}GB {network} to {phone} ({delivery_type})',
             reference=order_id,
             status='completed'
         )
@@ -9002,44 +14620,32 @@ def agent_sell():
         db.session.commit()
         print(f"💾 Database changes committed")
         
-        # ========== DIGIMALL DELIVERY WITH FULL DEBUG ==========
+        # ========== DIGIMALL DELIVERY ==========
         print(f"\n{'='*60}")
         print(f"📡 DIGIMALL DELIVERY START")
         print(f"{'='*60}")
         
         digimall_result = None
         try:
-            # Check if DigimallService is available
-            print(f"🔧 Initializing DigimallService...")
             digimall = DigimallService()
-            
-            # Log Digimall configuration
-            print(f"🔑 API Key exists: {bool(digimall.api_key)}")
-            if digimall.api_key:
-                print(f"🔑 API Key (first 10 chars): {digimall.api_key[:10]}...")
-            print(f"🌐 Base URL: {digimall.base_url}")
-            print(f"🔗 Webhook URL: {digimall.webhook_url}")
-            
-            webhook_url = f"{current_app.config.get('BASE_URL', 'https://roamsmart-backend-production.up.railway.app')}/api/webhooks/digimall"
-            print(f"🔗 Generated Webhook URL: {webhook_url}")
             
             print(f"\n📤 Calling digimall.deliver_data with:")
             print(f"   network: {network}")
             print(f"   phone_number: {phone}")
             print(f"   volume: {size_gb}")
+            print(f"   offer_slug: {offer_slug}")
             
-            # Make the Digimall call
             digimall_result = digimall.deliver_data(
                 network=network, 
                 phone_number=phone,
-                volume=size_gb
+                volume=size_gb,
+                offer_slug=offer_slug
             )
             
             print(f"\n📥 Digimall Response:")
             print(f"   Result: {digimall_result}")
             
-            if digimall_result and digimall_result.get('success'):
-                # Update order with Digimall info
+            if digimall_result and digimall_result.get('orderId'):
                 order.provider = 'digimall'
                 order.provider_order_id = digimall_result.get('orderId')
                 order.provider_reference = digimall_result.get('reference')
@@ -9066,7 +14672,6 @@ def agent_sell():
             print(f"   Error type: {type(e).__name__}")
             print(f"   Error message: {str(e)}")
             import traceback
-            print(f"   Traceback:")
             traceback.print_exc()
             order.delivery_status = 'failed'
             order.delivery_status_updated_at = datetime.utcnow()
@@ -9077,10 +14682,9 @@ def agent_sell():
         print(f"🏁 AGENT SELL COMPLETED")
         print(f"{'='*60}")
         
-        # Return response
         return jsonify({
             'success': True,
-            'message': f'Sold {quantity}x {size_gb}GB {network.upper()} to {phone}',
+            'message': f'Sold {quantity}x {size_gb}GB {network.upper()} to {phone} ({delivery_type})',
             'data': {
                 'order_id': order_id,
                 'amount_deducted': float(total_cost),
@@ -9088,7 +14692,9 @@ def agent_sell():
                 'profit': float(total_revenue - total_cost),
                 'balance': float(g.current_user.wallet_balance),
                 'delivery_status': order.delivery_status,
-                'digimall_delivery': digimall_result.get('success') if digimall_result else False,
+                'delivery_type': delivery_type,
+                'offer_slug': offer_slug,
+                'digimall_delivery': digimall_result.get('orderId') is not None if digimall_result else False,
                 'digimall_response': digimall_result if digimall_result else None
             }
         })
@@ -9106,11 +14712,22 @@ def agent_sell():
 @app.route('/api/payment/manual-verify', methods=['POST'])
 @token_required
 def manual_verify_payment():
-    """Submit manual payment proof for admin approval"""
+    """Submit manual payment proof for admin approval - AFDALNOVA"""
     try:
+        # Get platform info
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        primary_color = platform_config.get('primary_color', '#1A2A6C')
+        secondary_color = platform_config.get('secondary_color', '#C9A84C')
+        support_phone = platform_config.get('support_phone', '0548247241')
+        support_email = platform_config.get('support_email', 'support@abigalisticstudious.com')
+        website_url = platform_config.get('base_url', 'https://abigalisticstudious.com')
+        
         # Debug logging
         print(f"\n{'='*60}")
         print(f"[MANUAL VERIFY] Request received from user: {g.current_user.username} (ID: {g.current_user.id})")
+        print(f"[MANUAL VERIFY] Platform: {platform} ({platform_name})")
         print(f"[MANUAL VERIFY] Request method: {request.method}")
         print(f"[MANUAL VERIFY] Request files: {request.files.keys() if request.files else 'No files'}")
         print(f"{'='*60}\n")
@@ -9120,11 +14737,17 @@ def manual_verify_payment():
         amount = request.form.get('amount')
         proof = request.files.get('proof')
         phone = request.form.get('phone')
+        sender_name = request.form.get('sender_name')
+        sender_phone = request.form.get('sender_phone')
+        transaction_id = request.form.get('transaction_id')
         
         # Debug: print received values
         print(f"[DEBUG] Reference: {reference}")
         print(f"[DEBUG] Amount: {amount}")
         print(f"[DEBUG] Phone: {phone}")
+        print(f"[DEBUG] Sender Name: {sender_name}")
+        print(f"[DEBUG] Sender Phone: {sender_phone}")
+        print(f"[DEBUG] Transaction ID: {transaction_id}")
         print(f"[DEBUG] Proof file: {proof.filename if proof else 'None'}")
         
         # Validate required fields
@@ -9137,25 +14760,44 @@ def manual_verify_payment():
         # Validate amount
         try:
             amount_float = float(amount) if amount else 0
+            if amount_float < 10:
+                return jsonify({'success': False, 'error': 'Minimum amount is GHS 10'}), 400
         except ValueError:
             amount_float = 0
+        
+        # Validate file type
+        allowed_extensions = {'png', 'jpg', 'jpeg', 'pdf', 'webp'}
+        file_extension = proof.filename.rsplit('.', 1)[1].lower() if '.' in proof.filename else ''
+        if file_extension not in allowed_extensions:
+            return jsonify({'success': False, 'error': f'Invalid file type. Allowed: {", ".join(allowed_extensions)}'}), 400
+        
+        # Validate file size (max 5MB)
+        proof.seek(0, os.SEEK_END)
+        file_size = proof.tell()
+        proof.seek(0)
+        if file_size > 5 * 1024 * 1024:
+            return jsonify({'success': False, 'error': 'File too large. Max 5MB'}), 400
+        
+        # Check if reference already exists on this platform
+        existing = ManualPayment.query.filter_by(
+            reference=reference.upper(),
+            platform=platform
+        ).first()
+        
+        if existing:
+            print(f"[DEBUG] Reference {reference} already exists on {platform_name}!")
+            return jsonify({'success': False, 'error': f'This reference has already been submitted on {platform_name}'}), 400
         
         # Create upload directory if it doesn't exist
         upload_dir = os.path.join(current_app.config.get('UPLOAD_FOLDER', 'uploads'), 'payment_proofs')
         os.makedirs(upload_dir, exist_ok=True)
         
         # Save the proof file
-        filename = secure_filename(f"manual_proof_{reference}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.jpg")
+        filename = secure_filename(f"manual_proof_{reference}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.{file_extension}")
         filepath = os.path.join(upload_dir, filename)
         proof.save(filepath)
         
         print(f"[DEBUG] File saved to: {filepath}")
-        
-        # Check if reference already exists
-        existing = ManualPayment.query.filter_by(reference=reference.upper()).first()
-        if existing:
-            print(f"[DEBUG] Reference {reference} already exists!")
-            return jsonify({'success': False, 'error': 'This reference has already been submitted'}), 400
         
         # Create manual payment request
         manual_payment = ManualPayment(
@@ -9164,39 +14806,165 @@ def manual_verify_payment():
             amount=amount_float,
             proof_url=f"/uploads/payment_proofs/{filename}",
             phone=phone,
+            sender_name=sender_name,
+            sender_phone=sender_phone,
+            transaction_id=transaction_id,
             status='pending',
+            platform=platform,
             created_at=datetime.utcnow()
         )
         db.session.add(manual_payment)
         db.session.commit()
         
-        print(f"[DEBUG] Manual payment record created with ID: {manual_payment.id}")
+        print(f"[DEBUG] Manual payment record created with ID: {manual_payment.id} on {platform_name}")
         
-        # Create notification for admin
+        # Create notification for user
         try:
             from models import Notification
             notification = Notification(
                 user_id=g.current_user.id,
-                title='Manual Payment Verification Request',
-                message=f'User {g.current_user.username} submitted a manual payment request of ₵{amount_float} with reference {reference}',
-                type='admin_alert',
-                is_admin_only=True,
+                title=f'Payment Submitted on {platform_name}',
+                message=f'Your manual payment of ₵{amount_float} with reference {reference} has been submitted for admin verification.',
+                type='info',
+                platform=platform,
                 created_at=datetime.utcnow()
             )
             db.session.add(notification)
             db.session.commit()
-            print(f"[DEBUG] Admin notification created")
+            print(f"[DEBUG] User notification created")
         except Exception as e:
             print(f"Notification error: {e}")
         
+        # Send confirmation email to user
+        user_email_html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+                body {{ font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.6; }}
+                .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+                .header {{ background: {primary_color}; color: white; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }}
+                .content {{ padding: 30px; background: #f9f9f9; border-radius: 0 0 10px 10px; }}
+                .info-box {{ background: white; padding: 15px; border-radius: 8px; margin: 15px 0; border-left: 4px solid {secondary_color}; }}
+                .footer {{ text-align: center; padding: 20px; color: #666; font-size: 12px; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h2>💰 Payment Submitted - {platform_name}</h2>
+                    <p>Your manual payment is being reviewed</p>
+                </div>
+                <div class="content">
+                    <p>Dear <strong>{g.current_user.username}</strong>,</p>
+                    <p>Your manual payment of <strong>₵{amount_float:.2f}</strong> has been submitted for admin verification.</p>
+                    
+                    <div class="info-box">
+                        <h3>Payment Details:</h3>
+                        <ul>
+                            <li><strong>Reference:</strong> {reference}</li>
+                            <li><strong>Amount:</strong> ₵{amount_float:.2f}</li>
+                            <li><strong>Status:</strong> Pending Verification</li>
+                            <li><strong>Submitted:</strong> {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}</li>
+                            <li><strong>Platform:</strong> {platform_name}</li>
+                        </ul>
+                    </div>
+                    
+                    <p>Our admin team will review your payment within <strong>5-30 minutes</strong>.</p>
+                    <p>You will receive a notification once your wallet is credited.</p>
+                    
+                    <p>Need help? Contact our support team:</p>
+                    <p>📞 Call/WhatsApp: <strong>{support_phone}</strong><br>
+                    📧 Email: <strong>{support_email}</strong></p>
+                </div>
+                <div class="footer">
+                    <p>© {datetime.utcnow().year} {platform_name}. All rights reserved.</p>
+                    <p style="color: {secondary_color};">{platform_config.get('tagline', 'Innovation Meets Excellence')}</p>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        
+        send_email(g.current_user.email, f"Payment Submitted for Verification - {platform_name}", user_email_html)
+        
+        # Send notification to platform admin
+        admin_email = platform_config.get('admin_email', 'admin@abigalisticstudious.com')
+        
+        admin_email_html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+                body {{ font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.6; }}
+                .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+                .header {{ background: {primary_color}; color: white; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }}
+                .content {{ padding: 30px; background: #f9f9f9; border-radius: 0 0 10px 10px; }}
+                .info-box {{ background: white; padding: 15px; border-radius: 8px; margin: 15px 0; border-left: 4px solid {secondary_color}; }}
+                .button {{ display: inline-block; background: {primary_color}; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h2>🆕 Manual Payment Request - {platform_name}</h2>
+                    <p>Payment requires admin verification</p>
+                </div>
+                <div class="content">
+                    <p>Hello Admin,</p>
+                    <p>A user has submitted a manual payment request on {platform_name}.</p>
+                    
+                    <div class="info-box">
+                        <h3>Payment Details:</h3>
+                        <ul>
+                            <li><strong>User:</strong> {g.current_user.username} ({g.current_user.email})</li>
+                            <li><strong>Amount:</strong> ₵{amount_float:.2f}</li>
+                            <li><strong>Reference:</strong> {reference}</li>
+                            <li><strong>Phone:</strong> {phone or 'Not provided'}</li>
+                            <li><strong>Sender Name:</strong> {sender_name or 'Not provided'}</li>
+                            <li><strong>Sender Phone:</strong> {sender_phone or 'Not provided'}</li>
+                            <li><strong>Transaction ID:</strong> {transaction_id or 'Not provided'}</li>
+                            <li><strong>Platform:</strong> {platform_name}</li>
+                            <li><strong>Submitted:</strong> {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}</li>
+                        </ul>
+                    </div>
+                    
+                    <div style="text-align: center; margin: 20px 0;">
+                        <a href="{website_url}/admin/manual-payments/{manual_payment.id}" class="button">🔍 Review Payment</a>
+                    </div>
+                </div>
+                <div class="footer">
+                    <p>© {datetime.utcnow().year} {platform_name}. All rights reserved.</p>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        
+        send_email(admin_email, f"New Manual Payment Request - {platform_name}", admin_email_html)
+        
+        # Also send to super admin for cross-platform visibility if not platform_a
+        if platform != 'platform_a':
+            super_admin_email = PLATFORMS.get('platform_a', {}).get('admin_email', 'admin@abigalisticstudious.com')
+            send_email(super_admin_email, f"New Manual Payment Request - {platform_name}", admin_email_html)
+        
         return jsonify({
             'success': True,
-            'message': 'Payment proof submitted successfully. Admin will review and credit your wallet within 5-30 minutes.',
+            'message': f'Payment proof submitted successfully on {platform_name}. Admin will review and credit your wallet within 5-30 minutes.',
             'data': {
                 'reference': reference,
                 'amount': amount_float,
                 'status': 'pending',
-                'id': manual_payment.id
+                'id': manual_payment.id,
+                'platform': platform,
+                'platform_name': platform_name,
+                'branding': {
+                    'name': platform_config.get('brand_name', platform_name),
+                    'primary_color': primary_color,
+                    'secondary_color': secondary_color,
+                    'support_phone': support_phone,
+                    'support_email': support_email
+                }
             }
         })
         
@@ -9211,11 +14979,17 @@ def manual_verify_payment():
 @app.route('/api/user/pending-payments', methods=['GET'])
 @token_required
 def get_pending_payments():
-    """Get user's pending manual payment requests"""
+    """Get user's pending manual payment requests - AFDALNOVA"""
     try:
+        # Get platform
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        
         pending = ManualPayment.query.filter_by(
             user_id=g.current_user.id,
-            status='pending'
+            status='pending',
+            platform=platform
         ).order_by(ManualPayment.created_at.desc()).all()
         
         return jsonify({
@@ -9225,25 +14999,34 @@ def get_pending_payments():
                 'reference': p.reference,
                 'amount': float(p.amount),
                 'status': p.status,
+                'platform': platform_name,
                 'created_at': p.created_at.isoformat() if p.created_at else None
-            } for p in pending]
+            } for p in pending],
+            'platform': platform,
+            'platform_name': platform_name
         })
         
     except Exception as e:
-        print(f"Get pending payments error: {e}")
+        print(f"[GET PENDING PAYMENTS ERROR] {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
+
 
 @app.route('/api/user/manual-requests', methods=['GET', 'OPTIONS'])
 @token_required
 def get_user_manual_requests():
-    """Get user's manual payment requests (pending approval)"""
+    """Get user's manual payment requests (pending approval) - AFDALNOVA"""
     if request.method == 'OPTIONS':
         return '', 200
     
     try:
+        # Get platform
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
         
         requests = ManualPayment.query.filter_by(
-            user_id=g.current_user.id
+            user_id=g.current_user.id,
+            platform=platform
         ).filter(
             ManualPayment.status.in_(['pending', 'pending_verification'])
         ).order_by(ManualPayment.created_at.desc()).all()
@@ -9256,12 +15039,263 @@ def get_user_manual_requests():
                 'amount': float(r.amount),
                 'status': r.status,
                 'proof_url': r.proof_url,
+                'platform': platform_name,
                 'created_at': r.created_at.isoformat() if r.created_at else None
-            } for r in requests]
+            } for r in requests],
+            'platform': platform,
+            'platform_name': platform_name,
+            'branding': {
+                'name': platform_config.get('brand_name', platform_name),
+                'primary_color': platform_config.get('primary_color', '#1A2A6C'),
+                'secondary_color': platform_config.get('secondary_color', '#C9A84C'),
+                'support_phone': platform_config.get('support_phone', '0548247241'),
+                'support_email': platform_config.get('support_email', 'support@abigalisticstudious.com')
+            }
         })
         
     except Exception as e:
-        print(f"Get user manual requests error: {e}")
+        print(f"[GET MANUAL REQUESTS ERROR] {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/admin/manual-payments/<int:payment_id>/verify', methods=['POST'])
+@token_required
+@admin_required
+def verify_manual_payment_admin(payment_id):
+    """Admin: Verify manual payment and credit wallet - AFDALNOVA"""
+    try:
+        data = request.get_json() or {}
+        
+        # Get platform
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        primary_color = platform_config.get('primary_color', '#1A2A6C')
+        website_url = platform_config.get('base_url', 'https://abigalisticstudious.com')
+        
+        payment = ManualPayment.query.get(payment_id)
+        if not payment:
+            return jsonify({'success': False, 'error': 'Payment not found'}), 404
+        
+        # Check if payment belongs to this platform
+        if payment.platform != platform:
+            return jsonify({
+                'success': False, 
+                'error': f'Payment does not belong to {platform_name}'
+            }), 403
+        
+        if payment.status != 'pending':
+            return jsonify({'success': False, 'error': f'Payment already {payment.status}'}), 400
+        
+        # Credit user's wallet
+        user = User.query.get(payment.user_id)
+        if not user:
+            return jsonify({'success': False, 'error': 'User not found'}), 404
+        
+        # Check if user belongs to this platform
+        if user.platform != platform:
+            return jsonify({
+                'success': False, 
+                'error': f'User does not belong to {platform_name}'
+            }), 403
+        
+        # Update payment status
+        payment.status = 'verified'
+        payment.verified_by = g.current_user.id
+        payment.verified_at = datetime.utcnow()
+        payment.platform = platform
+        
+        # Credit user's wallet
+        balance_before = user.wallet_balance
+        user.wallet_balance += payment.amount
+        
+        # Create transaction record
+        transaction = Transaction(
+            user_id=user.id,
+            type='credit',
+            amount=payment.amount,
+            balance_before=balance_before,
+            balance_after=user.wallet_balance,
+            description=f'Manual payment verification - {payment.reference} - {platform_name}',
+            reference=payment.reference,
+            status='completed',
+            platform=platform
+        )
+        db.session.add(transaction)
+        db.session.commit()
+        
+        # Send notification to user
+        user_email_html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+                body {{ font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.6; }}
+                .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+                .header {{ background: {primary_color}; color: white; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }}
+                .content {{ padding: 30px; background: #f9f9f9; border-radius: 0 0 10px 10px; }}
+                .info-box {{ background: white; padding: 15px; border-radius: 8px; margin: 15px 0; border-left: 4px solid #28a745; }}
+                .footer {{ text-align: center; padding: 20px; color: #666; font-size: 12px; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h2>💰 Payment Verified - {platform_name}</h2>
+                    <p>Your wallet has been credited</p>
+                </div>
+                <div class="content">
+                    <p>Dear <strong>{user.username}</strong>,</p>
+                    <p>Your manual payment of <strong>₵{payment.amount:.2f}</strong> has been <strong style="color: #28a745;">VERIFIED</strong> and credited to your wallet.</p>
+                    
+                    <div class="info-box">
+                        <h3>Transaction Details:</h3>
+                        <ul>
+                            <li><strong>Amount Credited:</strong> ₵{payment.amount:.2f}</li>
+                            <li><strong>Reference:</strong> {payment.reference}</li>
+                            <li><strong>Previous Balance:</strong> ₵{balance_before:.2f}</li>
+                            <li><strong>New Balance:</strong> ₵{user.wallet_balance:.2f}</li>
+                            <li><strong>Platform:</strong> {platform_name}</li>
+                        </ul>
+                    </div>
+                    
+                    <div style="text-align: center; margin: 20px 0;">
+                        <a href="{website_url}/wallet" class="button" style="background: {primary_color}; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">View Wallet</a>
+                    </div>
+                </div>
+                <div class="footer">
+                    <p>© {datetime.utcnow().year} {platform_name}. All rights reserved.</p>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        
+        send_email(user.email, f"Payment Verified - {platform_name}", user_email_html)
+        
+        return jsonify({
+            'success': True,
+            'message': f'Payment verified and wallet credited on {platform_name}',
+            'data': {
+                'user_id': user.id,
+                'username': user.username,
+                'amount': payment.amount,
+                'new_balance': user.wallet_balance,
+                'platform': platform,
+                'platform_name': platform_name
+            }
+        })
+        
+    except Exception as e:
+        print(f"[VERIFY MANUAL PAYMENT ERROR] {e}")
+        import traceback
+        traceback.print_exc()
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/admin/manual-payments/<int:payment_id>/reject', methods=['POST'])
+@token_required
+@admin_required
+def reject_manual_payment_admin(payment_id):
+    """Admin: Reject manual payment - AFDALNOVA"""
+    try:
+        data = request.get_json() or {}
+        reason = data.get('reason', 'No reason provided')
+        
+        # Get platform
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        primary_color = platform_config.get('primary_color', '#1A2A6C')
+        
+        payment = ManualPayment.query.get(payment_id)
+        if not payment:
+            return jsonify({'success': False, 'error': 'Payment not found'}), 404
+        
+        # Check if payment belongs to this platform
+        if payment.platform != platform:
+            return jsonify({
+                'success': False, 
+                'error': f'Payment does not belong to {platform_name}'
+            }), 403
+        
+        if payment.status != 'pending':
+            return jsonify({'success': False, 'error': f'Payment already {payment.status}'}), 400
+        
+        # Update payment status
+        payment.status = 'rejected'
+        payment.rejection_reason = reason
+        payment.rejected_by = g.current_user.id
+        payment.rejected_at = datetime.utcnow()
+        db.session.commit()
+        
+        # Send notification to user
+        user = User.query.get(payment.user_id)
+        if user:
+            user_email_html = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <style>
+                    body {{ font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.6; }}
+                    .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+                    .header {{ background: #dc3545; color: white; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }}
+                    .content {{ padding: 30px; background: #f9f9f9; border-radius: 0 0 10px 10px; }}
+                    .info-box {{ background: white; padding: 15px; border-radius: 8px; margin: 15px 0; border-left: 4px solid #dc3545; }}
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="header">
+                        <h2>❌ Payment Rejected - {platform_name}</h2>
+                        <p>Your manual payment could not be verified</p>
+                    </div>
+                    <div class="content">
+                        <p>Dear <strong>{user.username}</strong>,</p>
+                        <p>Your manual payment of <strong>₵{payment.amount:.2f}</strong> has been <strong style="color: #dc3545;">REJECTED</strong>.</p>
+                        
+                        <div class="info-box">
+                            <h3>Rejection Details:</h3>
+                            <ul>
+                                <li><strong>Reference:</strong> {payment.reference}</li>
+                                <li><strong>Amount:</strong> ₵{payment.amount:.2f}</li>
+                                <li><strong>Reason:</strong> {reason}</li>
+                                <li><strong>Platform:</strong> {platform_name}</li>
+                            </ul>
+                        </div>
+                        
+                        <p style="color: #dc3545;">⚠️ Please contact our support team for assistance.</p>
+                        
+                        <p>📞 Call/WhatsApp: <strong>{platform_config.get('support_phone', '0548247241')}</strong><br>
+                        📧 Email: <strong>{platform_config.get('support_email', 'support@abigalisticstudious.com')}</strong></p>
+                    </div>
+                    <div class="footer">
+                        <p>© {datetime.utcnow().year} {platform_name}. All rights reserved.</p>
+                    </div>
+                </div>
+            </body>
+            </html>
+            """
+            send_email(user.email, f"Payment Rejected - {platform_name}", user_email_html)
+        
+        return jsonify({
+            'success': True,
+            'message': f'Payment rejected on {platform_name}',
+            'data': {
+                'payment_id': payment.id,
+                'reference': payment.reference,
+                'reason': reason,
+                'platform': platform,
+                'platform_name': platform_name
+            }
+        })
+        
+    except Exception as e:
+        print(f"[REJECT MANUAL PAYMENT ERROR] {e}")
+        import traceback
+        traceback.print_exc()
+        db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/agent/earnings', methods=['GET'])
@@ -9323,145 +15357,188 @@ def get_agent_earnings():
 @token_required
 @agent_required
 def get_agent_stats():
-    """Get agent statistics - NO COMMISSION, NO PROFIT, only actual sales data from database"""
+    """Get enhanced agent statistics - OPTIMIZED with fewer queries"""
     try:
         agent = g.current_user
+        platform = getattr(g, 'platform', 'platform_a')
+        agent_id = agent.id
         
-        print(f"\n=== AGENT STATS DEBUG (No Commission, No Profit) ===")
-        print(f"Agent ID: {agent.id}")
+        print(f"\n=== AGENT STATS DEBUG ===")
+        print(f"Agent ID: {agent_id}")
         print(f"Agent Username: {agent.username}")
+        print(f"Platform: {platform}")
         
-        # Get total sales from orders where agent_id matches
-        total_sales = db.session.query(db.func.sum(Order.amount)).filter(
-            Order.agent_id == agent.id,
-            Order.status == 'completed'
-        ).scalar() or 0
+        # ============================================================
+        # OPTIMIZATION: Combine queries where possible
+        # ============================================================
+        
+        # 1. Get all order stats in one query
+        order_stats = db.session.query(
+            db.func.count(Order.id).label('total_orders'),
+            db.func.sum(Order.amount).label('total_sales'),
+            db.func.sum(Order.profit).label('total_profit'),
+            db.func.sum(Order.cost).label('total_wholesale'),
+            db.func.sum(Order.initiator_commission).label('total_commission'),
+            db.func.count(db.distinct(Order.phone_number)).label('customer_count')
+        ).filter(
+            Order.agent_id == agent_id,
+            Order.status == 'completed',
+            Order.platform == platform
+        ).first()
+        
+        total_orders = order_stats.total_orders or 0
+        total_sales = float(order_stats.total_sales or 0)
+        total_profit = float(order_stats.total_profit or 0)
+        total_wholesale = float(order_stats.total_wholesale or 0)
+        total_commission = float(order_stats.total_commission or 0)
+        customer_count = order_stats.customer_count or 0
         
         print(f"Total sales: ₵{total_sales}")
-        
-        # Get total orders count
-        total_orders = Order.query.filter_by(
-            agent_id=agent.id,
-            status='completed'
-        ).count()
-        
         print(f"Total orders: {total_orders}")
+        print(f"Customers: {customer_count}")
         
-        # Get today's sales
+        # 2. Get today's sales (simplified)
         today = datetime.utcnow().date()
         today_start = datetime.combine(today, datetime.min.time())
-        today_end = datetime.combine(today, datetime.max.time())
         
-        today_sales = db.session.query(db.func.sum(Order.amount)).filter(
-            Order.agent_id == agent.id,
+        today_stats = db.session.query(
+            db.func.sum(Order.amount).label('today_sales'),
+            db.func.sum(Order.profit).label('today_profit')
+        ).filter(
+            Order.agent_id == agent_id,
             Order.status == 'completed',
             Order.created_at >= today_start,
-            Order.created_at <= today_end
-        ).scalar() or 0
+            Order.platform == platform
+        ).first()
         
-        print(f"Today's sales: ₵{today_sales}")
+        today_sales = float(today_stats.today_sales or 0)
+        today_profit = float(today_stats.today_profit or 0)
         
-        # Get this week's sales
+        # 3. Get this week's sales
         week_start = today - timedelta(days=today.weekday())
         week_start_dt = datetime.combine(week_start, datetime.min.time())
         
-        week_sales = db.session.query(db.func.sum(Order.amount)).filter(
-            Order.agent_id == agent.id,
+        week_stats = db.session.query(
+            db.func.sum(Order.amount).label('week_sales'),
+            db.func.sum(Order.profit).label('week_profit')
+        ).filter(
+            Order.agent_id == agent_id,
             Order.status == 'completed',
-            Order.created_at >= week_start_dt
-        ).scalar() or 0
+            Order.created_at >= week_start_dt,
+            Order.platform == platform
+        ).first()
         
-        # Get this month's sales
+        week_sales = float(week_stats.week_sales or 0)
+        week_profit = float(week_stats.week_profit or 0)
+        
+        # 4. Get this month's sales
         month_start = today.replace(day=1)
         month_start_dt = datetime.combine(month_start, datetime.min.time())
         
-        month_sales = db.session.query(db.func.sum(Order.amount)).filter(
-            Order.agent_id == agent.id,
+        month_stats = db.session.query(
+            db.func.sum(Order.amount).label('month_sales'),
+            db.func.sum(Order.profit).label('month_profit')
+        ).filter(
+            Order.agent_id == agent_id,
             Order.status == 'completed',
-            Order.created_at >= month_start_dt
-        ).scalar() or 0
+            Order.created_at >= month_start_dt,
+            Order.platform == platform
+        ).first()
         
-        # Get customer count (unique phone numbers)
-        customer_count = db.session.query(Order.phone_number).filter(
-            Order.agent_id == agent.id,
-            Order.status == 'completed'
-        ).distinct().count()
+        month_sales = float(month_stats.month_sales or 0)
+        month_profit = float(month_stats.month_profit or 0)
         
-        print(f"Customers: {customer_count}")
+        # 5. Get referral stats (with safety check)
+        referral_stats = {
+            'total': 0,
+            'completed': 0,
+            'pending': 0,
+            'rewards_earned': 0
+        }
         
-        # REMOVED: profit calculations
-        # REMOVED: commission calculations
-        # REMOVED: any earnings/savings calculations
+        try:
+            # Check if referrals table exists
+            from sqlalchemy import inspect
+            inspector = inspect(db.engine)
+            if 'referrals' in inspector.get_table_names():
+                # Get referral counts in one query
+                referral_counts = db.session.query(
+                    db.func.count(Referral.id).label('total'),
+                    db.func.sum(db.case((Referral.status == 'completed', 1), else_=0)).label('completed'),
+                    db.func.sum(db.case((Referral.status == 'pending', 1), else_=0)).label('pending'),
+                    db.func.sum(Referral.reward_amount).label('rewards')
+                ).filter(
+                    Referral.referrer_id == agent_id,
+                    Referral.platform == platform
+                ).first()
+                
+                referral_stats = {
+                    'total': referral_counts.total or 0,
+                    'completed': referral_counts.completed or 0,
+                    'pending': referral_counts.pending or 0,
+                    'rewards_earned': float(referral_counts.rewards or 0)
+                }
+        except Exception as e:
+            print(f"[REFERRAL ERROR] {e}")
         
-        # Get agent tier based on sales volume (just for display)
-        agent_tier = 'Bronze'
-        next_tier_sales = 500
+        # 6. Agent tier
+        agent_tier = agent.agent_tier or 'Bronze'
         if total_sales >= 10000:
-            agent_tier = 'Platinum'
             next_tier_sales = 10000
+            agent_tier = 'Platinum'
         elif total_sales >= 2000:
-            agent_tier = 'Gold'
             next_tier_sales = 2000
+            agent_tier = 'Gold'
         elif total_sales >= 500:
+            next_tier_sales = 500
             agent_tier = 'Silver'
+        else:
             next_tier_sales = 500
         
+        print(f"Today's sales: ₵{today_sales}")
+        print(f"Agent tier: {agent_tier}")
+        
+        # ============================================================
+        # RESPONSE - Return actual data, NO FALLBACK
+        # ============================================================
         return jsonify({
             'success': True,
             'data': {
-                'wallet_balance': float(agent.wallet_balance),
-                'total_sales': float(total_sales),
+                'wallet_balance': float(agent.wallet_balance or 0),
+                'total_sales': total_sales,
                 'total_orders': total_orders,
-                # REMOVED: 'total_profit'
-                # REMOVED: 'agent_savings'
-                # REMOVED: 'total_commission'
-                # REMOVED: 'pending_commission'
-                'today_sales': float(today_sales),
-                # REMOVED: 'today_profit'
-                'this_week_sales': float(week_sales),
-                # REMOVED: 'this_week_profit'
-                'this_month_sales': float(month_sales),
-                # REMOVED: 'this_month_profit'
+                'agent_savings': total_wholesale,
+                'total_commission': total_commission,
+                'pending_commission': 0,
+                'today_sales': today_sales,
+                'today_profit': today_profit,
+                'this_week_sales': week_sales,
+                'this_week_profit': week_profit,
+                'this_month_sales': month_sales,
+                'this_month_profit': month_profit,
                 'total_customers': customer_count,
                 'agent_tier': agent_tier,
                 'next_tier_sales': next_tier_sales,
-                # REMOVED: 'commission_rate'
+                'commission_rate': agent.commission_rate or 10,
                 'rank': 0,
                 'username': agent.username,
-                'phone': agent.phone or ''
+                'phone': agent.phone or '',
+                'referral_stats': referral_stats,
+                'points_balance': agent.points_balance or 0,
+                'points_value_ghs': float((agent.points_balance or 0) / 10)
             }
         })
         
     except Exception as e:
-        print(f"Get agent stats error: {e}")
+        print(f"[AGENT STATS ERROR] {e}")
         import traceback
         traceback.print_exc()
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-# Helper function to get agent's wholesale price (admin configured)
-def get_agent_price(network, size_gb):
-    """Get wholesale price configured by admin"""
-    from models import Price
+        # Return error, NOT fallback
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
     
-    price_entry = Price.query.filter_by(
-        network=network,
-        size_gb=size_gb,
-        is_active=True
-    ).first()
-    
-    if price_entry:
-        return float(price_entry.wholesale_price)
-    
-    # Fallback to default prices if not in database
-    default_prices = {
-        'mtn': {1: 5.50, 2: 10.00, 5: 22.00, 10: 42.00, 20: 80.00},
-        'telecel': {1: 5.00, 2: 9.00, 5: 20.00, 10: 38.00, 20: 75.00},
-        'airteltigo': {1: 5.00, 2: 9.00, 5: 20.00, 10: 38.00, 20: 75.00}
-    }
-    
-    return default_prices.get(network, {}).get(size_gb, 0)
-
-
 @app.route('/api/agent/withdraw', methods=['POST'])
 @token_required
 @agent_required
@@ -9860,60 +15937,7 @@ def get_agent_customers():
 
 # ========== ADMIN ROUTES ==========
 
-@app.route('/api/admin/stats', methods=['GET'])
-@token_required
-@admin_required
-def get_admin_stats():
-    """Get admin dashboard statistics"""
-    try:
-        total_users = User.query.count()
-        total_agents = User.query.filter_by(is_agent=True, agent_approved=True).count()
-        pending_agents = AgentRequest.query.filter_by(status='pending').count()
-        total_orders = Order.query.count()
-        total_revenue = db.session.query(db.func.sum(Order.amount)).filter_by(status='completed').scalar() or 0
-        pending_manual = ManualPayment.query.filter_by(status='pending_verification').count()
-        pending_withdrawals = Transaction.query.filter_by(type='withdrawal', status='pending').count()
-        
-        # Get recent orders with user info
-        recent_orders = Order.query.order_by(Order.created_at.desc()).limit(10).all()
-        
-        # Build recent orders list safely handling NULL user_id
-        recent_orders_data = []
-        for order in recent_orders:
-            # Handle NULL user_id for public store orders
-            if order.user_id:
-                user = db.session.get(User, order.user_id)
-                username = user.username if user else 'N/A'
-            else:
-                # Public store order (guest customer)
-                username = 'Guest (Store Customer)'
-            
-            recent_orders_data.append({
-                'order_id': order.order_id,
-                'user': username,
-                'amount': float(order.amount),
-                'status': order.status,
-                'date': order.created_at.strftime('%Y-%m-%d') if order.created_at else 'N/A'
-            })
-        
-        return jsonify({
-            'success': True,
-            'data': {
-                'total_users': total_users,
-                'total_agents': total_agents,
-                'pending_agents': pending_agents,
-                'total_orders': total_orders,
-                'total_revenue': float(total_revenue),
-                'pending_manual': pending_manual,
-                'pending_withdrawals': pending_withdrawals,
-                'recent_orders': recent_orders_data
-            }
-        })
-    except Exception as e:
-        print(f"Get admin stats error: {e}")
-        import traceback
-        traceback.print_exc()
-        return jsonify({'success': False, 'error': 'Failed to fetch Roamsmart stats'}), 500
+
 
 @app.route('/api/admin/users/<int:user_id>', methods=['PUT'])
 @token_required
@@ -9958,15 +15982,22 @@ def update_admin_user(user_id):
             new_balance = float(data['wallet_balance'])
             user.wallet_balance = new_balance
             
-            # Log balance change if significant
+            # Log balance change if significant - FIX: Use g.current_user.id
             if abs(new_balance - old_balance) > 0:
-                log_entry = AdminLog(
-                    admin_id=request.user_id,
-                    action='wallet_adjustment',
-                    details=f"Adjusted user {user.username}'s wallet from {old_balance} to {new_balance}",
-                    user_id=user_id
-                )
-                db.session.add(log_entry)
+                # Check if AdminLog model exists, if not, comment out or create it
+                try:
+                    from models import AdminLog
+                    log_entry = AdminLog(
+                        admin_id=g.current_user.id,  # Fixed: use g.current_user.id
+                        action='wallet_adjustment',
+                        details=f"Adjusted user {user.username}'s wallet from {old_balance} to {new_balance}",
+                        target_id=user_id,
+                        target_type='user'
+                    )
+                    db.session.add(log_entry)
+                except ImportError:
+                    # AdminLog model doesn't exist, skip logging
+                    print("AdminLog model not found, skipping log entry")
         
         # Update password only if provided
         if 'password' in data and data['password'] and len(data['password']) > 0:
@@ -9977,19 +16008,22 @@ def update_admin_user(user_id):
         
         # Send notification email if important fields changed
         if 'email' in data or 'password' in data:
-            send_email(
-                user.email,
-                f"Account Updated - {COMPANY_NAME}",
-                f"""
-                <h3>Your {COMPANY_NAME} Account Has Been Updated</h3>
-                <p>Dear {user.username},</p>
-                <p>An administrator has updated your account information.</p>
-                {'<p><strong>Email was changed to:</strong> ' + data["email"] + '</p>' if 'email' in data else ''}
-                {'<p><strong>Password was changed by administrator.</strong></p>' if 'password' in data and data['password'] else ''}
-                <p>If you did not authorize these changes, please contact support immediately.</p>
-                <a href="{COMPANY_WEBSITE}/login" style="background: #8B0000; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Login to Your Account</a>
-                """
-            )
+            try:
+                send_email(
+                    user.email,
+                    f"Account Updated - {COMPANY_NAME}",
+                    f"""
+                    <h3>Your {COMPANY_NAME} Account Has Been Updated</h3>
+                    <p>Dear {user.username},</p>
+                    <p>An administrator has updated your account information.</p>
+                    {'<p><strong>Email was changed to:</strong> ' + data["email"] + '</p>' if 'email' in data else ''}
+                    {'<p><strong>Password was changed by administrator.</strong></p>' if 'password' in data and data['password'] else ''}
+                    <p>If you did not authorize these changes, please contact support immediately.</p>
+                    <a href="{COMPANY_WEBSITE}/login" style="background: #8B0000; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Login to Your Account</a>
+                    """
+                )
+            except Exception as email_error:
+                print(f"Email error: {email_error}")
         
         return jsonify({
             'success': True, 
@@ -9999,8 +16033,563 @@ def update_admin_user(user_id):
         
     except Exception as e:
         print(f"Update admin user error: {e}")
+        import traceback
+        traceback.print_exc()
         db.session.rollback()
-        return jsonify({'success': False, 'error': 'Failed to update user'}), 500
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/admin/failed-orders', methods=['GET'])
+@token_required
+@admin_required
+def get_failed_orders():
+    """Get all failed orders that need attention - AFDALNOVA"""
+    try:
+        # Get platform info
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        primary_color = platform_config.get('primary_color', '#1A2A6C')
+        
+        print(f"\n{'='*80}")
+        print(f"📋 GET FAILED ORDERS - {platform_name}")
+        print(f"{'='*80}")
+        
+        # Get pagination parameters
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('limit', 20, type=int)
+        
+        print(f"📄 Page: {page}, Per page: {per_page}")
+        print(f"🔍 Platform: {platform} ({platform_name})")
+        
+        # Query failed orders (not refunded yet) - Filter by platform
+        query = Order.query.filter(
+            Order.delivery_status == 'failed',
+            Order.status != 'refunded',
+            Order.platform == platform
+        )
+        
+        total_count = query.count()
+        print(f"📊 Total failed orders found: {total_count}")
+        
+        pagination = query.order_by(Order.created_at.desc()).paginate(
+            page=page, per_page=per_page, error_out=False
+        )
+        
+        print(f"📄 Pagination - Total: {pagination.total}, Pages: {pagination.pages}")
+        
+        failed_orders = []
+        for order in pagination.items:
+            # Get user info
+            user = User.query.get(order.user_id) if order.user_id else None
+            
+            print(f"\n📦 Order {order.id}:")
+            print(f"   - Order ID: {order.order_id}")
+            print(f"   - User ID: {order.user_id}")
+            print(f"   - Username: {user.username if user else 'Guest'}")
+            print(f"   - Amount: ₵{order.amount}")
+            print(f"   - Delivery Status: {order.delivery_status}")
+            print(f"   - Error: {order.last_delivery_error}")
+            print(f"   - Platform: {order.platform if hasattr(order, 'platform') else platform}")
+            
+            failed_orders.append({
+                'id': order.id,
+                'order_id': order.order_id,
+                'user_id': order.user_id,
+                'username': user.username if user else 'Guest',
+                'email': user.email if user else f'guest@{platform_name.lower().replace(" ", "")}.com',
+                'phone': user.phone if user else order.phone_number,
+                'amount': float(order.amount),
+                'cost': float(order.cost) if order.cost else 0,
+                'network': order.network,
+                'size_gb': order.size_gb,
+                'quantity': order.quantity,
+                'phone_number': order.phone_number,
+                'error_message': order.last_delivery_error or 'Unknown error',
+                'created_at': order.created_at.isoformat() if order.created_at else None,
+                'delivery_status': order.delivery_status,
+                'platform': order.platform if hasattr(order, 'platform') else platform,
+                'platform_name': platform_name
+            })
+        
+        # Get summary stats - Filter by platform
+        total_failed = query.count()
+        total_refund_amount = db.session.query(db.func.sum(Order.amount)).filter(
+            Order.delivery_status == 'failed',
+            Order.status != 'refunded',
+            Order.platform == platform
+        ).scalar() or 0
+        
+        print(f"\n📊 Summary:")
+        print(f"   - Total Failed: {total_failed}")
+        print(f"   - Total Refund Amount: ₵{total_refund_amount}")
+        print(f"{'='*80}\n")
+        
+        return jsonify({
+            'success': True,
+            'data': failed_orders,
+            'pagination': {
+                'page': page,
+                'per_page': per_page,
+                'total': pagination.total,
+                'pages': pagination.pages
+            },
+            'summary': {
+                'total_failed': total_failed,
+                'total_refund_amount': float(total_refund_amount)
+            },
+            'platform': platform,
+            'platform_name': platform_name,
+            'branding': {
+                'name': platform_config.get('brand_name', platform_name),
+                'primary_color': primary_color,
+                'secondary_color': platform_config.get('secondary_color', '#C9A84C')
+            }
+        })
+        
+    except Exception as e:
+        print(f"❌ Get failed orders error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/admin/resolve-failed-order/<int:order_id>', methods=['POST'])
+@token_required
+@admin_required
+def resolve_failed_order(order_id):
+    """Admin: Resolve failed order - retry delivery or refund - AFDALNOVA"""
+    try:
+        data = request.get_json()
+        action = data.get('action')  # 'retry' or 'refund'
+        
+        # Get platform info
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        primary_color = platform_config.get('primary_color', '#1A2A6C')
+        support_phone = platform_config.get('support_phone', '0548247241')
+        support_email = platform_config.get('support_email', 'support@abigalisticstudious.com')
+        website_url = platform_config.get('base_url', 'https://abigalisticstudious.com')
+        
+        print(f"\n{'='*80}")
+        print(f"🔧 RESOLVE FAILED ORDER - {platform_name}")
+        print(f"{'='*80}")
+        print(f"Order ID: {order_id}")
+        print(f"Action: {action}")
+        print(f"Admin: {g.current_user.username} (ID: {g.current_user.id})")
+        print(f"Platform: {platform} ({platform_name})")
+        
+        order = Order.query.get(order_id)
+        if not order:
+            print(f"❌ Order not found: {order_id}")
+            return jsonify({'success': False, 'error': 'Order not found'}), 404
+        
+        # Check if order belongs to this platform
+        if order.platform != platform:
+            return jsonify({
+                'success': False, 
+                'error': f'Order does not belong to {platform_name}'
+            }), 403
+        
+        print(f"\n📦 Order Details:")
+        print(f"   - Order ID: {order.order_id}")
+        print(f"   - Network: {order.network}")
+        print(f"   - Size: {order.size_gb}GB")
+        print(f"   - Phone: {order.phone_number}")
+        print(f"   - Amount: ₵{order.amount}")
+        print(f"   - Delivery Status: {order.delivery_status}")
+        print(f"   - Current Status: {order.status}")
+        print(f"   - Error: {order.last_delivery_error}")
+        print(f"   - Platform: {order.platform}")
+        
+        if order.delivery_status != 'failed':
+            print(f"❌ Order status is {order.delivery_status}, not failed")
+            return jsonify({'success': False, 'error': f'Order status is {order.delivery_status}, not failed'}), 400
+        
+        user = None
+        if order.user_id:
+            user = User.query.get(order.user_id)
+            if user:
+                print(f"\n👤 User Details:")
+                print(f"   - Username: {user.username}")
+                print(f"   - Email: {user.email}")
+                print(f"   - Current Balance: ₵{user.wallet_balance}")
+                print(f"   - Platform: {user.platform}")
+            else:
+                print(f"⚠️ User not found for ID: {order.user_id}")
+        else:
+            print(f"👤 Guest order (no user account)")
+        
+        if action == 'retry':
+            print(f"\n🔄 Retrying delivery...")
+            
+            # Retry delivery via Digimall
+            try:
+                from digimall import DigimallService
+                digimall = DigimallService()
+                
+                # Clean phone number
+                original_phone = order.phone_number
+                phone = ''.join(filter(str.isdigit, original_phone))
+                if phone.startswith('0'):
+                    phone = '233' + phone[1:]
+                elif not phone.startswith('233'):
+                    phone = '233' + phone
+                
+                print(f"📞 Phone: {original_phone} -> {phone}")
+                print(f"📡 Network: {order.network}")
+                print(f"💾 Volume: {order.size_gb}GB")
+                
+                result = digimall.deliver_data(
+                    network=order.network,
+                    phone_number=phone,
+                    volume=order.size_gb
+                )
+                
+                print(f"📡 Digimall Response: {result}")
+                
+                if result and result.get('success'):
+                    order.delivery_status = 'delivered'
+                    order.status = 'completed'
+                    order.provider = 'digimall'
+                    order.provider_order_id = result.get('orderId')
+                    order.provider_reference = result.get('reference')
+                    order.completed_at = datetime.utcnow()
+                    order.last_delivery_error = None
+                    order.platform = platform
+                    db.session.commit()
+                    
+                    print(f"✅ Order retried and delivered successfully on {platform_name}!")
+                    print(f"   Provider Order ID: {result.get('orderId')}")
+                    print(f"{'='*80}\n")
+                    
+                    # Send notification to user
+                    if user:
+                        send_retry_success_email(user, order, platform_name, platform_config)
+                    
+                    return jsonify({
+                        'success': True,
+                        'message': f'Order {order.order_id} retried and delivered successfully on {platform_name}!',
+                        'data': {
+                            'provider_order_id': result.get('orderId'),
+                            'delivery_status': order.delivery_status,
+                            'platform': platform,
+                            'platform_name': platform_name
+                        }
+                    })
+                else:
+                    error_msg = result.get('error') if result else 'Retry failed'
+                    print(f"❌ Retry failed: {error_msg}")
+                    print(f"{'='*80}\n")
+                    return jsonify({
+                        'success': False,
+                        'error': f'Retry failed on {platform_name}: {error_msg}'
+                    }), 500
+                    
+            except Exception as e:
+                print(f"❌ Retry exception: {e}")
+                import traceback
+                traceback.print_exc()
+                print(f"{'='*80}\n")
+                return jsonify({'success': False, 'error': f'Retry error on {platform_name}: {str(e)}'}), 500
+                
+        elif action == 'refund':
+            print(f"\n💰 Processing refund on {platform_name}...")
+            
+            if not user:
+                print(f"❌ User not found for refund")
+                return jsonify({'success': False, 'error': 'User not found for refund'}), 404
+            
+            # Check if user belongs to this platform
+            if user.platform != platform:
+                return jsonify({
+                    'success': False, 
+                    'error': f'User does not belong to {platform_name}'
+                }), 403
+            
+            old_balance = user.wallet_balance
+            refund_amount = order.amount
+            
+            print(f"💰 User: {user.username}")
+            print(f"   Old Balance: ₵{old_balance}")
+            print(f"   Refund Amount: ₵{refund_amount}")
+            
+            user.wallet_balance += refund_amount
+            
+            print(f"   New Balance: ₵{user.wallet_balance}")
+            
+            # Create refund transaction
+            refund_transaction = Transaction(
+                user_id=user.id,
+                type='refund',
+                amount=refund_amount,
+                balance_before=old_balance,
+                balance_after=user.wallet_balance,
+                description=f'Refund for failed order {order.order_id} on {platform_name}',
+                reference=f"REF-{order.order_id}",
+                status='completed',
+                platform=platform,
+                meta_data={'original_order_id': order.id, 'platform': platform}
+            )
+            db.session.add(refund_transaction)
+            print(f"✅ Refund transaction created on {platform_name}")
+            
+            # Update order status
+            order.delivery_status = 'refunded'
+            order.status = 'refunded'
+            order.platform = platform
+            order.last_delivery_error = f'Refunded by admin {g.current_user.username} on {platform_name} due to delivery failure. Amount ₵{refund_amount} returned.'
+            db.session.commit()
+            
+            print(f"✅ Order marked as refunded on {platform_name}")
+            print(f"{'='*80}\n")
+            
+            # Send refund notification to user
+            send_refund_email(user, order, refund_amount, platform_name, platform_config)
+            
+            return jsonify({
+                'success': True,
+                'message': f'Refunded ₵{refund_amount:.2f} to user {user.username} on {platform_name}',
+                'data': {
+                    'user_id': user.id,
+                    'username': user.username,
+                    'refund_amount': refund_amount,
+                    'new_balance': user.wallet_balance,
+                    'platform': platform,
+                    'platform_name': platform_name
+                }
+            })
+        else:
+            print(f"❌ Invalid action: {action}")
+            return jsonify({'success': False, 'error': f'Invalid action on {platform_name}. Use "retry" or "refund"'}), 400
+            
+    except Exception as e:
+        print(f"❌ Resolve failed order error: {e}")
+        import traceback
+        traceback.print_exc()
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/admin/failed-orders/summary', methods=['GET'])
+@token_required
+@admin_required
+def get_failed_orders_summary():
+    """Get summary of failed orders - AFDALNOVA"""
+    try:
+        # Get platform info
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        primary_color = platform_config.get('primary_color', '#1A2A6C')
+        
+        print(f"\n{'='*80}")
+        print(f"📊 FAILED ORDERS SUMMARY - {platform_name}")
+        print(f"{'='*80}")
+        
+        # Today's failed orders - Filter by platform
+        today = datetime.utcnow().date()
+        today_start = datetime.combine(today, datetime.min.time())
+        
+        today_failed = Order.query.filter(
+            Order.delivery_status == 'failed',
+            Order.status != 'refunded',
+            Order.created_at >= today_start,
+            Order.platform == platform
+        ).count()
+        
+        # This week's failed orders - Filter by platform
+        week_start = today - timedelta(days=today.weekday())
+        week_start_dt = datetime.combine(week_start, datetime.min.time())
+        week_failed = Order.query.filter(
+            Order.delivery_status == 'failed',
+            Order.status != 'refunded',
+            Order.created_at >= week_start_dt,
+            Order.platform == platform
+        ).count()
+        
+        # Total pending refund amount - Filter by platform
+        pending_refund_amount = db.session.query(db.func.sum(Order.amount)).filter(
+            Order.delivery_status == 'failed',
+            Order.status != 'refunded',
+            Order.platform == platform
+        ).scalar() or 0
+        
+        # Failed by network - Filter by platform
+        failed_by_network = db.session.query(
+            Order.network,
+            db.func.count(Order.id).label('count'),
+            db.func.sum(Order.amount).label('total_amount')
+        ).filter(
+            Order.delivery_status == 'failed',
+            Order.status != 'refunded',
+            Order.platform == platform
+        ).group_by(Order.network).all()
+        
+        network_breakdown = []
+        for network, count, total in failed_by_network:
+            network_breakdown.append({
+                'network': network,
+                'count': count,
+                'total_amount': float(total) if total else 0
+            })
+        
+        print(f"📊 Summary for {platform_name}:")
+        print(f"   - Today Failed: {today_failed}")
+        print(f"   - This Week Failed: {week_failed}")
+        print(f"   - Pending Refund Amount: ₵{pending_refund_amount}")
+        print(f"{'='*80}\n")
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'today_failed': today_failed,
+                'week_failed': week_failed,
+                'pending_refund_amount': float(pending_refund_amount),
+                'network_breakdown': network_breakdown
+            },
+            'platform': platform,
+            'platform_name': platform_name,
+            'branding': {
+                'name': platform_config.get('brand_name', platform_name),
+                'primary_color': primary_color,
+                'secondary_color': platform_config.get('secondary_color', '#C9A84C')
+            }
+        })
+        
+    except Exception as e:
+        print(f"❌ Failed orders summary error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ============================================================
+# HELPER FUNCTIONS FOR EMAIL NOTIFICATIONS
+# ============================================================
+
+def send_retry_success_email(user, order, platform_name, platform_config):
+    """Send retry success email notification to user"""
+    try:
+        primary_color = platform_config.get('primary_color', '#1A2A6C')
+        secondary_color = platform_config.get('secondary_color', '#C9A84C')
+        website_url = platform_config.get('base_url', 'https://abigalisticstudious.com')
+        
+        email_html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+                body {{ font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.6; }}
+                .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+                .header {{ background: {primary_color}; color: white; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }}
+                .content {{ padding: 30px; background: #f9f9f9; border-radius: 0 0 10px 10px; }}
+                .info-box {{ background: white; padding: 15px; border-radius: 8px; margin: 15px 0; border-left: 4px solid {secondary_color}; }}
+                .footer {{ text-align: center; padding: 20px; color: #666; font-size: 12px; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h2>✅ Order Delivered Successfully!</h2>
+                    <p>{platform_name}</p>
+                </div>
+                <div class="content">
+                    <p>Dear <strong>{user.username}</strong>,</p>
+                    <p>Your order <strong>{order.order_id}</strong> has been successfully delivered!</p>
+                    
+                    <div class="info-box">
+                        <h3>Order Details:</h3>
+                        <ul>
+                            <li><strong>Order ID:</strong> {order.order_id}</li>
+                            <li><strong>Network:</strong> {order.network.upper()}</li>
+                            <li><strong>Size:</strong> {order.size_gb}GB</li>
+                            <li><strong>Phone:</strong> {order.phone_number}</li>
+                            <li><strong>Amount:</strong> ₵{order.amount:.2f}</li>
+                        </ul>
+                    </div>
+                    
+                    <p>Thank you for using {platform_name}!</p>
+                    
+                    <p>Need help? Contact our support team:</p>
+                    <p>📞 Call/WhatsApp: <strong>{platform_config.get('support_phone', '0548247241')}</strong><br>
+                    📧 Email: <strong>{platform_config.get('support_email', 'support@abigalisticstudious.com')}</strong></p>
+                </div>
+                <div class="footer">
+                    <p>© {datetime.utcnow().year} {platform_name}. All rights reserved.</p>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        
+        send_email(user.email, f"Order Delivered Successfully - {platform_name}", email_html)
+        
+    except Exception as e:
+        print(f"Send retry success email error: {e}")
+
+
+def send_refund_email(user, order, refund_amount, platform_name, platform_config):
+    """Send refund email notification to user"""
+    try:
+        primary_color = platform_config.get('primary_color', '#1A2A6C')
+        website_url = platform_config.get('base_url', 'https://abigalisticstudious.com')
+        support_phone = platform_config.get('support_phone', '0548247241')
+        support_email = platform_config.get('support_email', 'support@abigalisticstudious.com')
+        
+        email_html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+                body {{ font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.6; }}
+                .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+                .header {{ background: {primary_color}; color: white; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }}
+                .content {{ padding: 30px; background: #f9f9f9; border-radius: 0 0 10px 10px; }}
+                .info-box {{ background: white; padding: 15px; border-radius: 8px; margin: 15px 0; border-left: 4px solid #28a745; }}
+                .footer {{ text-align: center; padding: 20px; color: #666; font-size: 12px; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h2>💰 Refund Processed - {platform_name}</h2>
+                    <p>Your refund has been credited to your wallet</p>
+                </div>
+                <div class="content">
+                    <p>Dear <strong>{user.username}</strong>,</p>
+                    <p>Your refund for order <strong>{order.order_id}</strong> has been processed successfully.</p>
+                    
+                    <div class="info-box">
+                        <h3>Refund Details:</h3>
+                        <ul>
+                            <li><strong>Order ID:</strong> {order.order_id}</li>
+                            <li><strong>Refund Amount:</strong> ₵{refund_amount:.2f}</li>
+                            <li><strong>Reason:</strong> Delivery failure</li>
+                            <li><strong>New Balance:</strong> ₵{user.wallet_balance:.2f}</li>
+                        </ul>
+                    </div>
+                    
+                    <div style="text-align: center; margin: 20px 0;">
+                        <a href="{website_url}/wallet" class="button" style="background: {primary_color}; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">View Wallet</a>
+                    </div>
+                    
+                    <p>Need help? Contact our support team:</p>
+                    <p>📞 Call/WhatsApp: <strong>{support_phone}</strong><br>
+                    📧 Email: <strong>{support_email}</strong></p>
+                </div>
+                <div class="footer">
+                    <p>© {datetime.utcnow().year} {platform_name}. All rights reserved.</p>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        
+        send_email(user.email, f"Refund Processed - {platform_name}", email_html)
+        
+    except Exception as e:
+        print(f"Send refund email error: {e}")
 
 @app.route('/api/admin/prices/toggle-availability', methods=['POST'])
 @token_required
@@ -10221,26 +16810,49 @@ def get_user_unavailable_packages():
         traceback.print_exc()
         return jsonify({'success': True, 'data': {}}), 200
 
+def generate_referral_code():
+    """Generate a unique referral code"""
+    # Format: RS + 6 random alphanumeric characters
+    # Example: RS-ABC123
+    chars = string.ascii_uppercase + string.digits
+    code = 'RS-' + ''.join(random.choices(chars, k=6))
+    return code
+
 @app.route('/api/admin/users', methods=['GET'])
 @token_required
 @admin_required
-def get_admin_users():
-    """Get all users"""
+def get_admin1_users():
+    """Get all users - Filtered by platform"""
     try:
-        users = User.query.order_by(User.created_at.desc()).all()
-        return jsonify({'success': True, 'data': [u.to_dict() for u in users]})
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        
+        users = User.query.filter_by(platform=platform).order_by(User.created_at.desc()).all()
+        
+        return jsonify({
+            'success': True, 
+            'data': [u.to_dict() for u in users],
+            'platform': platform,
+            'platform_name': platform_name
+        })
     except Exception as e:
-        print(f"Get admin users error: {e}")
-        return jsonify({'success': False, 'error': 'Failed to fetch users from Roamsmart'}), 500
+        print(f"[ADMIN USERS ERROR] {e}")
+        return jsonify({'success': False, 'error': f'Failed to fetch {platform_name} users'}), 500
 
 
 @app.route('/api/admin/users/create', methods=['POST'])
 @token_required
 @admin_required
-def create_admin_user():
-    """Create user (admin only)"""
+def create_admin1_user():
+    """Create user (admin only) - Sets platform"""
     try:
         data = request.get_json()
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        primary_color = platform_config.get('primary_color', '#1A2A6C')
+        website_url = platform_config.get('base_url', 'https://abigalisticstudious.com')
         
         username = data.get('username')
         email = data.get('email')
@@ -10249,8 +16861,8 @@ def create_admin_user():
         role = data.get('role', 'user')
         wallet_balance = data.get('wallet_balance', 0)
         
-        if User.query.filter_by(email=email).first():
-            return jsonify({'success': False, 'error': 'Email already exists'}), 400
+        if User.query.filter_by(email=email, platform=platform).first():
+            return jsonify({'success': False, 'error': 'Email already exists on this platform'}), 400
         
         new_user = User(
             username=username,
@@ -10258,6 +16870,8 @@ def create_admin_user():
             phone=phone,
             role=role,
             wallet_balance=wallet_balance,
+            platform=platform,
+            platform_created=platform,
             referral_code=f"REF{uuid.uuid4().hex[:8].upper()}"
         )
         if password:
@@ -10268,24 +16882,33 @@ def create_admin_user():
         db.session.add(new_user)
         db.session.commit()
         
-        # Send welcome email (priority)
         send_email(
             email,
-            f"Account Created for You - {COMPANY_NAME}",
+            f"Account Created for You - {platform_name}",
             f"""
-            <h3>Account Created for You - {COMPANY_NAME}</h3>
-            <p>Dear {username},</p>
-            <p>An account has been created for you on {COMPANY_NAME}.</p>
-            <p><strong>Email:</strong> {email}</p>
-            <p><strong>Password:</strong> {password if password else 'password123'}</p>
-            <p>Please login and change your password immediately.</p>
-            <a href="{COMPANY_WEBSITE}/login" style="background: #8B0000; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Login Now</a>
+            <div style="font-family: Arial, sans-serif;">
+                <div style="background: {primary_color}; color: white; padding: 15px; text-align: center;">
+                    <h3>Account Created - {platform_name}</h3>
+                </div>
+                <div style="background: #f9f9f9; padding: 20px;">
+                    <p>Dear {username},</p>
+                    <p>An account has been created for you on {platform_name}.</p>
+                    <p><strong>Email:</strong> {email}</p>
+                    <p><strong>Password:</strong> {password if password else 'password123'}</p>
+                    <p><a href="{website_url}/login" style="background: {primary_color}; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Login Now</a></p>
+                </div>
+            </div>
             """
         )
         
-        return jsonify({'success': True, 'user': new_user.to_dict()})
+        return jsonify({
+            'success': True, 
+            'user': new_user.to_dict(),
+            'platform': platform,
+            'platform_name': platform_name
+        })
     except Exception as e:
-        print(f"Create admin user error: {e}")
+        print(f"[CREATE ADMIN USER ERROR] {e}")
         db.session.rollback()
         return jsonify({'success': False, 'error': 'Failed to create user'}), 500
 
@@ -10293,36 +16916,49 @@ def create_admin_user():
 @app.route('/api/admin/users/<int:user_id>/suspend', methods=['POST'])
 @token_required
 @admin_required
-def suspend_user(user_id):
-    """Suspend a user - Email ONLY"""
+def suspend1_user(user_id):
+    """Suspend a user - Must belong to admin's platform"""
     try:
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        
         user = User.query.get(user_id)
         if not user:
             return jsonify({'success': False, 'error': 'User not found'}), 404
         
+        # CRITICAL: Check if user belongs to this platform
+        if user.platform != platform:
+            return jsonify({
+                'success': False, 
+                'error': f'User does not belong to {platform_name}'
+            }), 403
+        
         user.is_suspended = True
         db.session.commit()
         
-        # Send notification via email only
         send_email(
             user.email,
-            f"Account Suspension Notice - {COMPANY_NAME}",
+            f"Account Suspension Notice - {platform_name}",
             f"""
-            <h3>Account Suspended - {COMPANY_NAME}</h3>
+            <h3 style="color: #dc3545;">Account Suspended - {platform_name}</h3>
             <p>Dear {user.username},</p>
-            <p>Your {COMPANY_NAME} account has been suspended.</p>
+            <p>Your {platform_name} account has been suspended.</p>
             <p>Please contact our support team for assistance.</p>
-            <p><strong>Support Contact:</strong> {COMPANY_PHONE}</p>
-            <hr>
-            <p>If you believe this is an error, please reach out immediately.</p>
+            <p><strong>Support Contact:</strong> {platform_config.get('support_phone', '0548247241')}</p>
             """
         )
         
-        log_activity(g.current_user.id, 'suspend_user', f'Suspended user {user.email}')
+        log_activity(g.current_user.id, 'suspend_user', f'Suspended user {user.email} on {platform_name}', platform=platform)
         
-        return jsonify({'success': True, 'message': 'User suspended'})
+        return jsonify({
+            'success': True, 
+            'message': f'User suspended on {platform_name}',
+            'platform': platform,
+            'platform_name': platform_name
+        })
     except Exception as e:
-        print(f"Suspend user error: {e}")
+        print(f"[SUSPEND USER ERROR] {e}")
         db.session.rollback()
         return jsonify({'success': False, 'error': 'Failed to suspend user'}), 500
 
@@ -10331,32 +16967,55 @@ def suspend_user(user_id):
 @token_required
 @admin_required
 def activate_user(user_id):
-    """Activate a suspended user - Email ONLY"""
+    """Activate a suspended user - Must belong to admin's platform"""
     try:
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        primary_color = platform_config.get('primary_color', '#1A2A6C')
+        website_url = platform_config.get('base_url', 'https://abigalisticstudious.com')
+        
         user = User.query.get(user_id)
         if not user:
             return jsonify({'success': False, 'error': 'User not found'}), 404
+        
+        # CRITICAL: Check if user belongs to this platform
+        if user.platform != platform:
+            return jsonify({
+                'success': False, 
+                'error': f'User does not belong to {platform_name}'
+            }), 403
         
         user.is_suspended = False
         db.session.commit()
         
         send_email(
             user.email,
-            f"Account Reactivated - {COMPANY_NAME}",
+            f"Account Reactivated - {platform_name}",
             f"""
-            <h3>Account Reactivated - {COMPANY_NAME}</h3>
-            <p>Dear {user.username},</p>
-            <p>Your {COMPANY_NAME} account has been reactivated.</p>
-            <p>You can now login and continue using our services.</p>
-            <a href="{COMPANY_WEBSITE}/login" style="background: #8B0000; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Login Now</a>
+            <div style="font-family: Arial, sans-serif;">
+                <div style="background: {primary_color}; color: white; padding: 15px; text-align: center;">
+                    <h3>Account Reactivated - {platform_name}</h3>
+                </div>
+                <div style="background: #f9f9f9; padding: 20px;">
+                    <p>Dear {user.username},</p>
+                    <p>Your {platform_name} account has been reactivated.</p>
+                    <p><a href="{website_url}/login" style="background: {primary_color}; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Login Now</a></p>
+                </div>
+            </div>
             """
         )
         
-        log_activity(g.current_user.id, 'activate_user', f'Activated user {user.email}')
+        log_activity(g.current_user.id, 'activate_user', f'Activated user {user.email} on {platform_name}', platform=platform)
         
-        return jsonify({'success': True, 'message': 'User activated'})
+        return jsonify({
+            'success': True, 
+            'message': f'User activated on {platform_name}',
+            'platform': platform,
+            'platform_name': platform_name
+        })
     except Exception as e:
-        print(f"Activate user error: {e}")
+        print(f"[ACTIVATE USER ERROR] {e}")
         db.session.rollback()
         return jsonify({'success': False, 'error': 'Failed to activate user'}), 500
 
@@ -10364,21 +17023,27 @@ def activate_user(user_id):
 @app.route('/api/admin/agents', methods=['GET'])
 @token_required
 @admin_required
-def get_admin_agents():
-    """Get all agents"""
+def get_admin1_agents():
+    """Get all agents - Filtered by platform"""
     try:
-        agents = User.query.filter_by(is_agent=True, agent_approved=True).order_by(
-            User.created_at.desc()
-        ).all()
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        
+        agents = User.query.filter_by(
+            is_agent=True, 
+            agent_approved=True,
+            platform=platform
+        ).order_by(User.created_at.desc()).all()
         
         agents_data = []
         for agent in agents:
             total_sales = db.session.query(db.func.sum(Order.amount)).filter_by(
-                user_id=agent.id, status='completed'
+                user_id=agent.id, status='completed', platform=platform
             ).scalar() or 0
             
             withdrawals = db.session.query(db.func.sum(Transaction.amount)).filter_by(
-                user_id=agent.id, type='withdrawal', status='completed'
+                user_id=agent.id, type='withdrawal', status='completed', platform=platform
             ).scalar() or 0
             
             agents_data.append({
@@ -10394,21 +17059,31 @@ def get_admin_agents():
                 'created_at': agent.created_at.isoformat()
             })
         
-        return jsonify({'success': True, 'data': agents_data})
+        return jsonify({
+            'success': True, 
+            'data': agents_data,
+            'platform': platform,
+            'platform_name': platform_name
+        })
     except Exception as e:
-        print(f"Get admin agents error: {e}")
-        return jsonify({'success': False, 'error': 'Failed to fetch agents from Roamsmart'}), 500
+        print(f"[GET ADMIN AGENTS ERROR] {e}")
+        return jsonify({'success': False, 'error': f'Failed to fetch {platform_name} agents'}), 500
 
 
 @app.route('/api/admin/agent-requests', methods=['GET'])
 @token_required
 @admin_required
 def get_agent_requests():
-    """Get pending agent requests"""
+    """Get pending agent requests - Filtered by platform"""
     try:
-        requests = AgentRequest.query.filter_by(status='pending').order_by(
-            AgentRequest.created_at.desc()
-        ).all()
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        
+        requests = AgentRequest.query.filter_by(
+            status='pending',
+            platform=platform
+        ).order_by(AgentRequest.created_at.desc()).all()
         
         return jsonify({
             'success': True,
@@ -10421,22 +17096,37 @@ def get_agent_requests():
                 'amount': float(r.amount),
                 'payment_reference': r.payment_reference,
                 'created_at': r.created_at.strftime('%Y-%m-%d %H:%M')
-            } for r in requests]
+            } for r in requests],
+            'platform': platform,
+            'platform_name': platform_name
         })
     except Exception as e:
-        print(f"Get agent requests error: {e}")
-        return jsonify({'success': False, 'error': 'Failed to fetch agent requests'}), 500
+        print(f"[GET AGENT REQUESTS ERROR] {e}")
+        return jsonify({'success': False, 'error': f'Failed to fetch {platform_name} agent requests'}), 500
 
 
 @app.route('/api/admin/agent-requests/<int:request_id>/approve', methods=['POST'])
 @token_required
 @admin_required
 def approve_agent_request(request_id):
-    """Approve agent request - Email ONLY"""
+    """Approve agent request - Must belong to admin's platform"""
     try:
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        primary_color = platform_config.get('primary_color', '#1A2A6C')
+        website_url = platform_config.get('base_url', 'https://abigalisticstudious.com')
+        
         agent_request = AgentRequest.query.get(request_id)
         if not agent_request:
             return jsonify({'success': False, 'error': 'Request not found'}), 404
+        
+        # CRITICAL: Check if request belongs to this platform
+        if agent_request.platform != platform:
+            return jsonify({
+                'success': False, 
+                'error': f'Request does not belong to {platform_name}'
+            }), 403
         
         user = User.query.get(agent_request.user_id)
         user.is_agent = True
@@ -10449,34 +17139,44 @@ def approve_agent_request(request_id):
         
         db.session.commit()
         
-        # Send notification via email only
         send_email(
             user.email,
-            f"🎉 Congratulations! Agent Application Approved - {COMPANY_NAME}",
+            f"🎉 Congratulations! Agent Application Approved - {platform_name}",
             f"""
-            <h3>Welcome to {COMPANY_NAME} Agent Program!</h3>
-            <p>Dear {user.username},</p>
-            <p>Congratulations! Your agent application has been approved.</p>
-            <p><strong>Your Benefits:</strong></p>
-            <ul>
-                <li>Wholesale prices on all data bundles</li>
-                <li>10% base commission on all sales</li>
-                <li>Access to agent dashboard</li>
-                <li>Create your own store</li>
-                <li>Track earnings and withdrawals</li>
-            </ul>
-            <a href="{COMPANY_WEBSITE}/agent/dashboard" style="background: #8B0000; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Go to Agent Dashboard</a>
-            <hr>
-            <p>Need help? Contact support on WhatsApp: {COMPANY_PHONE}</p>
+            <div style="font-family: Arial, sans-serif;">
+                <div style="background: {primary_color}; color: white; padding: 15px; text-align: center;">
+                    <h3>Welcome to {platform_name} Agent Program!</h3>
+                </div>
+                <div style="background: #f9f9f9; padding: 20px;">
+                    <p>Dear {user.username},</p>
+                    <p>Congratulations! Your agent application has been approved.</p>
+                    <p><strong>Your Benefits:</strong></p>
+                    <ul>
+                        <li>Wholesale prices on all data bundles</li>
+                        <li>10% base commission on all sales</li>
+                        <li>Access to agent dashboard</li>
+                        <li>Create your own store</li>
+                        <li>Track earnings and withdrawals</li>
+                    </ul>
+                    <a href="{website_url}/agent/dashboard" style="background: {primary_color}; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Go to Agent Dashboard</a>
+                    <hr>
+                    <p>Need help? Contact support on WhatsApp: {platform_config.get('support_phone', '0548247241')}</p>
+                </div>
+            </div>
             """
         )
         
-        send_webhook('agent.approved', {'user_id': user.id, 'username': user.username})
-        log_activity(g.current_user.id, 'approve_agent', f'Approved agent {user.email}')
+        send_webhook('agent.approved', {'user_id': user.id, 'username': user.username, 'platform': platform})
+        log_activity(g.current_user.id, 'approve_agent', f'Approved agent {user.email} on {platform_name}', platform=platform)
         
-        return jsonify({'success': True, 'message': 'Agent approved on Roamsmart'})
+        return jsonify({
+            'success': True, 
+            'message': f'Agent approved on {platform_name}',
+            'platform': platform,
+            'platform_name': platform_name
+        })
     except Exception as e:
-        print(f"Approve agent error: {e}")
+        print(f"[APPROVE AGENT ERROR] {e}")
         db.session.rollback()
         return jsonify({'success': False, 'error': 'Failed to approve agent'}), 500
 
@@ -10485,11 +17185,22 @@ def approve_agent_request(request_id):
 @token_required
 @admin_required
 def reject_agent_request(request_id):
-    """Reject agent request - Email ONLY"""
+    """Reject agent request - Must belong to admin's platform"""
     try:
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        
         agent_request = AgentRequest.query.get(request_id)
         if not agent_request:
             return jsonify({'success': False, 'error': 'Request not found'}), 404
+        
+        # CRITICAL: Check if request belongs to this platform
+        if agent_request.platform != platform:
+            return jsonify({
+                'success': False, 
+                'error': f'Request does not belong to {platform_name}'
+            }), 403
         
         agent_request.status = 'rejected'
         db.session.commit()
@@ -10498,22 +17209,27 @@ def reject_agent_request(request_id):
         
         send_email(
             user.email,
-            f"Agent Application Update - {COMPANY_NAME}",
+            f"Agent Application Update - {platform_name}",
             f"""
-            <h3>Application Status Update - {COMPANY_NAME}</h3>
+            <h3 style="color: #dc3545;">Application Status Update - {platform_name}</h3>
             <p>Dear {user.username},</p>
-            <p>Thank you for your interest in becoming an agent.</p>
+            <p>Thank you for your interest in becoming an agent with {platform_name}.</p>
             <p>After careful review, we regret to inform you that your application could not be approved at this time.</p>
-            <p>Please contact our support team for more information about the decision.</p>
+            <p>Please contact our support team for more information.</p>
             <p>You may reapply after 30 days.</p>
             """
         )
         
-        log_activity(g.current_user.id, 'reject_agent', f'Rejected agent {user.email}')
+        log_activity(g.current_user.id, 'reject_agent', f'Rejected agent {user.email} on {platform_name}', platform=platform)
         
-        return jsonify({'success': True, 'message': 'Agent request rejected'})
+        return jsonify({
+            'success': True, 
+            'message': f'Agent request rejected on {platform_name}',
+            'platform': platform,
+            'platform_name': platform_name
+        })
     except Exception as e:
-        print(f"Reject agent error: {e}")
+        print(f"[REJECT AGENT ERROR] {e}")
         db.session.rollback()
         return jsonify({'success': False, 'error': 'Failed to reject agent'}), 500
 
@@ -10521,18 +17237,22 @@ def reject_agent_request(request_id):
 @app.route('/api/admin/agent-requests/bulk-approve', methods=['POST'])
 @token_required
 @admin_required
-def bulk_approve_agents():
-    """Bulk approve agent requests - Email ONLY"""
+def bulk_approve1_agents():
+    """Bulk approve agent requests - Must belong to admin's platform"""
     try:
         data = request.get_json()
         request_ids = data.get('request_ids', [])
+        
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
         
         approved_count = 0
         approved_users = []
         
         for request_id in request_ids:
             agent_request = AgentRequest.query.get(request_id)
-            if agent_request and agent_request.status == 'pending':
+            if agent_request and agent_request.status == 'pending' and agent_request.platform == platform:
                 user = User.query.get(agent_request.user_id)
                 user.is_agent = True
                 user.agent_approved = True
@@ -10548,23 +17268,386 @@ def bulk_approve_agents():
         for user in approved_users:
             send_email(
                 user.email,
-                f"🎉 Congratulations! Agent Application Approved - {COMPANY_NAME}",
+                f"🎉 Congratulations! Agent Application Approved - {platform_name}",
                 f"""
-                <h3>Welcome to {COMPANY_NAME} Agent Program!</h3>
+                <h3>Welcome to {platform_name} Agent Program!</h3>
                 <p>Dear {user.username},</p>
                 <p>Congratulations! Your agent application has been approved.</p>
-                <a href="{COMPANY_WEBSITE}/agent/dashboard" style="background: #8B0000; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Go to Agent Dashboard</a>
+                <a href="{platform_config.get('base_url', 'https://abigalisticstudious.com')}/agent/dashboard" style="background: {platform_config.get('primary_color', '#1A2A6C')}; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Go to Agent Dashboard</a>
                 """
             )
         
-        log_activity(g.current_user.id, 'bulk_approve_agents', f'Approved {approved_count} agents')
+        log_activity(g.current_user.id, 'bulk_approve_agents', f'Approved {approved_count} agents on {platform_name}', platform=platform)
         
-        return jsonify({'success': True, 'approved_count': approved_count})
+        return jsonify({
+            'success': True, 
+            'approved_count': approved_count,
+            'platform': platform,
+            'platform_name': platform_name
+        })
     except Exception as e:
-        print(f"Bulk approve agents error: {e}")
+        print(f"[BULK APPROVE AGENTS ERROR] {e}")
         db.session.rollback()
         return jsonify({'success': False, 'error': 'Failed to bulk approve'}), 500
 
+
+@app.route('/api/admin/orders/recent', methods=['GET'])
+@token_required
+@admin_required
+def get_admin_recent_orders():
+    """Get recent orders for admin dashboard - Filtered by platform"""
+    try:
+        # Get platform info
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        
+        # Get limit from query param (default 10)
+        limit = request.args.get('limit', 10, type=int)
+        
+        # Allow super admin to see all platforms
+        show_all = request.args.get('all_platforms', 'false').lower() == 'true'
+        platform_filter = None if (show_all and g.current_user.is_super_admin) else platform
+        
+        # Get recent orders with platform filter
+        query = Order.query.filter_by(status='completed')
+        if platform_filter:
+            query = query.filter_by(platform=platform_filter)
+        
+        recent_orders = query.order_by(Order.created_at.desc()).limit(limit).all()
+        
+        # Format the response
+        orders_data = []
+        for order in recent_orders:
+            user = User.query.get(order.user_id) if order.user_id else None
+            agent = User.query.get(order.agent_id) if order.agent_id else None
+            
+            order_platform_name = 'AFDALNOVA' if order.platform == 'platform_a' else 'Roamsmart' if order.platform == 'platform_b' else order.platform
+            
+            orders_data.append({
+                'id': order.id,
+                'order_id': order.order_id,
+                'customer_name': order.customer_name or (user.username if user else 'Anonymous'),
+                'customer_phone': order.phone_number,
+                'amount': float(order.amount),
+                'status': order.status,
+                'created_at': order.created_at.isoformat() if order.created_at else None,
+                'network': order.network,
+                'size_gb': order.size_gb,
+                'quantity': order.quantity,
+                'agent_name': agent.username if agent else None,
+                'profit': float(order.profit) if order.profit else 0,
+                'platform': order.platform,
+                'platform_name': order_platform_name
+            })
+        
+        return jsonify({
+            'success': True,
+            'data': orders_data,
+            'platform': platform,
+            'platform_name': platform_name if not show_all else 'All Platforms',
+            'count': len(orders_data)
+        })
+        
+    except Exception as e:
+        print(f"[GET RECENT ORDERS ERROR] {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ============================================================
+# ADMIN TOTAL SALES - COMBINED WITH PLATFORM SUPPORT
+# ============================================================
+@app.route('/api/admin/total-sales', methods=['GET'])
+@token_required
+@admin_required
+def get_admin_total_sales():
+    """Get total sales breakdown for admin dashboard - Filtered by platform"""
+    try:
+        # Get platform info
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        
+        # Allow super admin to see all platforms
+        show_all = request.args.get('all_platforms', 'false').lower() == 'true'
+        platform_filter = None if (show_all and g.current_user.is_super_admin) else platform
+        
+        today = datetime.utcnow().date()
+        today_start = datetime.combine(today, datetime.min.time())
+        
+        # Base query
+        query = Order.query.filter_by(status='completed')
+        if platform_filter:
+            query = query.filter_by(platform=platform_filter)
+        
+        # Today's sales
+        today_sales = query.filter(Order.created_at >= today_start).with_entities(
+            db.func.sum(Order.amount)
+        ).scalar() or 0
+        
+        # This week
+        week_start = today - timedelta(days=today.weekday())
+        week_start_dt = datetime.combine(week_start, datetime.min.time())
+        week_sales = query.filter(Order.created_at >= week_start_dt).with_entities(
+            db.func.sum(Order.amount)
+        ).scalar() or 0
+        
+        # This month
+        month_start = today.replace(day=1)
+        month_start_dt = datetime.combine(month_start, datetime.min.time())
+        month_sales = query.filter(Order.created_at >= month_start_dt).with_entities(
+            db.func.sum(Order.amount)
+        ).scalar() or 0
+        
+        # This year
+        year_start = today.replace(month=1, day=1)
+        year_start_dt = datetime.combine(year_start, datetime.min.time())
+        year_sales = query.filter(Order.created_at >= year_start_dt).with_entities(
+            db.func.sum(Order.amount)
+        ).scalar() or 0
+        
+        # All time
+        all_time = query.with_entities(
+            db.func.sum(Order.amount)
+        ).scalar() or 0
+        
+        # Platform breakdown (for super admin)
+        platform_breakdown = []
+        if show_all and g.current_user.is_super_admin:
+            breakdown = db.session.query(
+                Order.platform,
+                db.func.count(Order.id),
+                db.func.sum(Order.amount)
+            ).filter_by(status='completed').group_by(Order.platform).all()
+            
+            for plat, count, total in breakdown:
+                plat_name = 'AFDALNOVA' if plat == 'platform_a' else 'Roamsmart' if plat == 'platform_b' else plat
+                platform_breakdown.append({
+                    'platform': plat,
+                    'platform_name': plat_name,
+                    'order_count': count,
+                    'total_sales': float(total) if total else 0
+                })
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'currency': 'GHS',
+                'today_sales': float(today_sales),
+                'week_sales': float(week_sales),
+                'month_sales': float(month_sales),
+                'year_sales': float(year_sales),
+                'total_sales': float(all_time),
+                'platform_breakdown': platform_breakdown if show_all else None
+            },
+            'platform': platform,
+            'platform_name': platform_name if not show_all else 'All Platforms'
+        })
+        
+    except Exception as e:
+        print(f"[GET TOTAL SALES ERROR] {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+
+@app.route('/api/admin/manual-payments', methods=['GET'])
+@token_required
+@admin_required
+def get_admin_manual_payments():
+    """Get manual payments - Filtered by platform"""
+    try:
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        
+        status = request.args.get('status', 'pending_verification')
+        
+        payments = ManualPayment.query.filter_by(
+            status=status,
+            platform=platform
+        ).order_by(ManualPayment.created_at.desc()).all()
+        
+        return jsonify({
+            'success': True,
+            'data': [{
+                'id': p.id,
+                'amount': float(p.amount),
+                'reference': p.reference,
+                'user_id': p.user_id,
+                'username': User.query.get(p.user_id).username,
+                'email': User.query.get(p.user_id).email,
+                'phone': p.phone_number,
+                'sender_name': p.sender_name,
+                'sender_phone': p.sender_phone,
+                'transaction_id': p.transaction_id,
+                'proof_url': p.proof_url,
+                'status': p.status,
+                'created_at': p.created_at.isoformat(),
+                'platform': p.platform
+            } for p in payments],
+            'platform': platform,
+            'platform_name': platform_name
+        })
+    except Exception as e:
+        print(f"[GET ADMIN MANUAL PAYMENTS ERROR] {e}")
+        return jsonify({'success': False, 'error': f'Failed to fetch {platform_name} manual payments'}), 500
+
+
+@app.route('/api/admin/manual-payments/<int:payment_id>/verify', methods=['POST'])
+@token_required
+@admin_required
+def verify_admin_manual_payment(payment_id):
+    """Verify manual payment - Must belong to admin's platform"""
+    try:
+        data = request.get_json()
+        
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        primary_color = platform_config.get('primary_color', '#1A2A6C')
+        website_url = platform_config.get('base_url', 'https://abigalisticstudious.com')
+        
+        payment = ManualPayment.query.get(payment_id)
+        if not payment:
+            return jsonify({'success': False, 'error': 'Payment not found'}), 404
+        
+        # CRITICAL: Check if payment belongs to this platform
+        if payment.platform != platform:
+            return jsonify({
+                'success': False, 
+                'error': f'Payment does not belong to {platform_name}'
+            }), 403
+        
+        if payment.status not in ['pending', 'pending_verification']:
+            return jsonify({'success': False, 'error': 'Payment already processed'}), 400
+        
+        payment.status = 'completed'
+        payment.verified_at = datetime.utcnow()
+        payment.verified_by = g.current_user.id
+        if data.get('sender_name'):
+            payment.sender_name = data.get('sender_name')
+        if data.get('sender_phone'):
+            payment.sender_phone = data.get('sender_phone')
+        
+        # Credit user's wallet
+        user = User.query.get(payment.user_id)
+        balance_before = user.wallet_balance
+        user.wallet_balance += payment.amount
+        
+        transaction = Transaction(
+            user_id=user.id,
+            type='credit',
+            amount=payment.amount,
+            balance_before=balance_before,
+            balance_after=user.wallet_balance,
+            description=f'Manual payment verification - {payment.reference} - {platform_name}',
+            reference=payment.reference,
+            status='completed',
+            platform=platform
+        )
+        db.session.add(transaction)
+        db.session.commit()
+        
+        send_email(
+            user.email,
+            f"💰 Wallet Credited - {payment.reference} - {platform_name}",
+            f"""
+            <div style="font-family: Arial, sans-serif;">
+                <div style="background: {primary_color}; color: white; padding: 15px; text-align: center;">
+                    <h3>Payment Verified Successfully!</h3>
+                </div>
+                <div style="background: #f9f9f9; padding: 20px;">
+                    <p>Dear {user.username},</p>
+                    <p>Your manual payment has been verified and credited to your wallet on {platform_name}.</p>
+                    <p><strong>Amount Credited:</strong> GHS {payment.amount:.2f}</p>
+                    <p><strong>Previous Balance:</strong> GHS {balance_before:.2f}</p>
+                    <p><strong>New Balance:</strong> GHS {user.wallet_balance:.2f}</p>
+                    <p><strong>Reference:</strong> {payment.reference}</p>
+                    <a href="{website_url}/wallet" style="background: {primary_color}; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">View Wallet</a>
+                </div>
+            </div>
+            """
+        )
+        
+        send_webhook('payment.verified', {'user_id': user.id, 'amount': payment.amount, 'platform': platform})
+        log_activity(g.current_user.id, 'verify_payment', f'Verified payment {payment.reference} for {user.email} on {platform_name}', platform=platform)
+        
+        return jsonify({
+            'success': True, 
+            'message': f'Payment verified and wallet credited on {platform_name}',
+            'platform': platform,
+            'platform_name': platform_name
+        })
+    except Exception as e:
+        print(f"[VERIFY MANUAL PAYMENT ERROR] {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': 'Failed to verify payment'}), 500
+
+
+@app.route('/api/admin/manual-payments/<int:payment_id>/reject', methods=['POST'])
+@token_required
+@admin_required
+def reject_manual_admin_payment(payment_id):
+    """Reject manual payment - Must belong to admin's platform"""
+    try:
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        support_phone = platform_config.get('support_phone', '0548247241')
+        
+        payment = ManualPayment.query.get(payment_id)
+        if not payment:
+            return jsonify({'success': False, 'error': 'Payment not found'}), 404
+        
+        # CRITICAL: Check if payment belongs to this platform
+        if payment.platform != platform:
+            return jsonify({
+                'success': False, 
+                'error': f'Payment does not belong to {platform_name}'
+            }), 403
+        
+        payment.status = 'rejected'
+        db.session.commit()
+        
+        user = User.query.get(payment.user_id)
+        
+        send_email(
+            user.email,
+            f"❌ Payment Rejected - {payment.reference} - {platform_name}",
+            f"""
+            <div style="font-family: Arial, sans-serif;">
+                <h3 style="color: #dc3545;">Payment Verification Failed - {platform_name}</h3>
+                <p>Dear {user.username},</p>
+                <p>Your manual payment of <strong>GHS {payment.amount:.2f}</strong> has been rejected.</p>
+                <p><strong>Reference:</strong> {payment.reference}</p>
+                <p><strong>Possible reasons:</strong></p>
+                <ul>
+                    <li>Proof of payment unclear or invalid</li>
+                    <li>Payment not received</li>
+                    <li>Incorrect amount or reference</li>
+                </ul>
+                <p>Please contact our support team for assistance.</p>
+                <p><strong>Support WhatsApp:</strong> {support_phone}</p>
+            </div>
+            """
+        )
+        
+        log_activity(g.current_user.id, 'reject_payment', f'Rejected payment {payment.reference} on {platform_name}', platform=platform)
+        
+        return jsonify({
+            'success': True, 
+            'message': f'Payment rejected on {platform_name}',
+            'platform': platform,
+            'platform_name': platform_name
+        })
+    except Exception as e:
+        print(f"[REJECT MANUAL PAYMENT ERROR] {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': 'Failed to reject payment'}), 500
 
 @app.route('/api/payment/paystack/check/<reference>', methods=['GET'])
 @token_required
@@ -10881,116 +17964,7 @@ def verify_manual_admin_payment_user():
         db.session.rollback()
         return jsonify({'success': False, 'error': 'Failed to submit verification request'}), 500
 
-@app.route('/api/admin/orders/recent', methods=['GET'])
-@token_required
-@admin_required
-def get_admin_recent_orders():
-    """Get recent orders for admin dashboard"""
-    try:
-        # Get limit from query param (default 10)
-        limit = request.args.get('limit', 10, type=int)
-        
-        # Get recent orders
-        recent_orders = Order.query.filter_by(
-            status='completed'
-        ).order_by(Order.created_at.desc()).limit(limit).all()
-        
-        # Format the response
-        orders_data = []
-        for order in recent_orders:
-            # Get customer/agent info
-            user = User.query.get(order.user_id) if order.user_id else None
-            agent = User.query.get(order.agent_id) if order.agent_id else None
-            
-            orders_data.append({
-                'id': order.id,
-                'order_id': order.order_id,
-                'customer_name': order.customer_name or (user.username if user else 'Anonymous'),
-                'customer_phone': order.phone_number,
-                'amount': float(order.amount),
-                'status': order.status,
-                'created_at': order.created_at.isoformat() if order.created_at else None,
-                'network': order.network,
-                'size_gb': order.size_gb,
-                'quantity': order.quantity,
-                'agent_name': agent.username if agent else None,
-                'profit': float(order.profit) if order.profit else 0
-            })
-        
-        return jsonify({
-            'success': True,
-            'data': orders_data
-        })
-        
-    except Exception as e:
-        print(f"Get recent orders error: {e}")
-        import traceback
-        traceback.print_exc()
-        return jsonify({'success': False, 'error': str(e)}), 500
 
-@app.route('/api/admin/total-sales', methods=['GET'])
-@token_required
-@admin_required
-def get_admin_total_sales():
-    """Get total sales breakdown for admin dashboard"""
-    try:
-        from datetime import datetime, timedelta
-        
-        today = datetime.utcnow().date()
-        today_start = datetime.combine(today, datetime.min.time())
-        
-        # Today's sales
-        today_sales = db.session.query(db.func.sum(Order.amount)).filter(
-            Order.status == 'completed',
-            Order.created_at >= today_start
-        ).scalar() or 0
-        
-        # This week
-        week_start = today - timedelta(days=today.weekday())
-        week_start_dt = datetime.combine(week_start, datetime.min.time())
-        week_sales = db.session.query(db.func.sum(Order.amount)).filter(
-            Order.status == 'completed',
-            Order.created_at >= week_start_dt
-        ).scalar() or 0
-        
-        # This month
-        month_start = today.replace(day=1)
-        month_start_dt = datetime.combine(month_start, datetime.min.time())
-        month_sales = db.session.query(db.func.sum(Order.amount)).filter(
-            Order.status == 'completed',
-            Order.created_at >= month_start_dt
-        ).scalar() or 0
-        
-        # This year
-        year_start = today.replace(month=1, day=1)
-        year_start_dt = datetime.combine(year_start, datetime.min.time())
-        year_sales = db.session.query(db.func.sum(Order.amount)).filter(
-            Order.status == 'completed',
-            Order.created_at >= year_start_dt
-        ).scalar() or 0
-        
-        # All time
-        all_time = db.session.query(db.func.sum(Order.amount)).filter(
-            Order.status == 'completed'
-        ).scalar() or 0
-        
-        return jsonify({
-            'success': True,
-            'data': {
-                'currency': 'GHS',
-                'today_sales': float(today_sales),
-                'week_sales': float(week_sales),
-                'month_sales': float(month_sales),
-                'year_sales': float(year_sales),
-                'total_sales': float(all_time)
-            }
-        })
-        
-    except Exception as e:
-        print(f"Get total sales error: {e}")
-        import traceback
-        traceback.print_exc()
-        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/wallet/manual/requests', methods=['GET'])
 @token_required
@@ -11694,83 +18668,145 @@ def get_agentadmin_customers():
 @app.route('/api/admin/stats', methods=['GET'])
 @token_required
 @admin_required
-def get_amin_stats():
-    """Get admin dashboard statistics"""
+def get_admin_stats():
+    """Get admin dashboard statistics - Filtered by platform only"""
     try:
         from datetime import datetime, timedelta
+        
+        # Get platform info
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        primary_color = platform_config.get('primary_color', '#1A2A6C')
         
         today = datetime.utcnow().date()
         today_start = datetime.combine(today, datetime.min.time())
         
-        print(f"\n=== STATS CALCULATION ===")
+        print(f"\n=== ADMIN STATS ===")
+        print(f"Platform: {platform} ({platform_name})")
         print(f"Current UTC time: {datetime.utcnow()}")
-        print(f"Today's date: {today}")
-        print(f"Today start: {today_start}")
         
-        # Get all completed orders for debugging
-        all_completed = Order.query.filter_by(status='completed').all()
-        print(f"Total completed orders in DB: {len(all_completed)}")
-        
-        for order in all_completed:
-            print(f"  Order: {order.order_id}, Amount: ₵{order.amount}, Created: {order.created_at}")
+        # ============================================================
+        # SALES STATS (Filtered by platform)
+        # ============================================================
         
         # Today's sales
         today_sales = db.session.query(db.func.sum(Order.amount)).filter(
             Order.status == 'completed',
-            Order.created_at >= today_start
+            Order.created_at >= today_start,
+            Order.platform == platform
         ).scalar() or 0
-        print(f"Today's sales query result: ₵{today_sales}")
         
         # Today's orders count
         today_orders = Order.query.filter(
             Order.status == 'completed',
-            Order.created_at >= today_start
+            Order.created_at >= today_start,
+            Order.platform == platform
         ).count()
-        print(f"Today's orders count: {today_orders}")
         
         # This week sales
         week_start = today - timedelta(days=today.weekday())
         week_start_dt = datetime.combine(week_start, datetime.min.time())
         week_sales = db.session.query(db.func.sum(Order.amount)).filter(
             Order.status == 'completed',
-            Order.created_at >= week_start_dt
+            Order.created_at >= week_start_dt,
+            Order.platform == platform
         ).scalar() or 0
-        print(f"Week sales (from {week_start}): ₵{week_sales}")
         
         # This month sales
         month_start = today.replace(day=1)
         month_start_dt = datetime.combine(month_start, datetime.min.time())
         month_sales = db.session.query(db.func.sum(Order.amount)).filter(
             Order.status == 'completed',
-            Order.created_at >= month_start_dt
+            Order.created_at >= month_start_dt,
+            Order.platform == platform
         ).scalar() or 0
-        print(f"Month sales (from {month_start}): ₵{month_sales}")
         
         # This year sales
         year_start = today.replace(month=1, day=1)
         year_start_dt = datetime.combine(year_start, datetime.min.time())
         year_sales = db.session.query(db.func.sum(Order.amount)).filter(
             Order.status == 'completed',
-            Order.created_at >= year_start_dt
+            Order.created_at >= year_start_dt,
+            Order.platform == platform
         ).scalar() or 0
-        print(f"Year sales (from {year_start}): ₵{year_sales}")
         
         # All time sales
         all_time_sales = db.session.query(db.func.sum(Order.amount)).filter(
-            Order.status == 'completed'
+            Order.status == 'completed',
+            Order.platform == platform
         ).scalar() or 0
-        print(f"All time sales: ₵{all_time_sales}")
         
-        # Other stats
-        total_users = User.query.count()
-        total_agents = User.query.filter_by(is_agent=True, agent_approved=True).count()
-        pending_agents = AgentRequest.query.filter_by(status='pending').count()
-        total_orders = Order.query.count()
-        pending_manual = ManualPayment.query.filter_by(status='pending_verification').count()
-        pending_withdrawals = Transaction.query.filter_by(type='withdrawal', status='pending').count()
+        # ============================================================
+        # USER STATS (Filtered by platform)
+        # ============================================================
         
-        # Get recent orders
-        recent_orders = Order.query.order_by(Order.created_at.desc()).limit(10).all()
+        # Total users
+        total_users = User.query.filter_by(platform=platform).count()
+        
+        # Total agents
+        total_agents = User.query.filter_by(
+            platform=platform,
+            is_agent=True,
+            agent_approved=True
+        ).count()
+        
+        # Pending agent requests
+        pending_agents = AgentRequest.query.filter_by(
+            platform=platform,
+            status='pending'
+        ).count()
+        
+        # Total orders
+        total_orders = Order.query.filter_by(
+            platform=platform
+        ).count()
+        
+        # ============================================================
+        # PAYMENT STATS (Filtered by platform)
+        # ============================================================
+        
+        # Pending manual payments
+        pending_manual = ManualPayment.query.filter_by(
+            platform=platform,
+            status='pending_verification'
+        ).count()
+        
+        # Pending withdrawals
+        pending_withdrawals = Transaction.query.filter_by(
+            platform=platform,
+            type='withdrawal',
+            status='pending'
+        ).count()
+        
+        # ============================================================
+        # RECENT ORDERS (Filtered by platform)
+        # ============================================================
+        
+        recent_orders = Order.query.filter_by(
+            platform=platform
+        ).order_by(Order.created_at.desc()).limit(10).all()
+        
+        recent_orders_data = []
+        for order in recent_orders:
+            # Handle NULL user_id for public store orders
+            if order.user_id:
+                user = db.session.get(User, order.user_id)
+                username = user.username if user else 'N/A'
+            else:
+                username = 'Guest (Store Customer)'
+            
+            recent_orders_data.append({
+                'order_id': order.order_id,
+                'user': username,
+                'amount': float(order.amount),
+                'status': order.status,
+                'date': order.created_at.strftime('%Y-%m-%d') if order.created_at else 'Unknown'
+            })
+        
+        # ============================================================
+        # RESPONSE
+        # ============================================================
         
         return jsonify({
             'success': True,
@@ -11794,43 +18830,66 @@ def get_amin_stats():
                 'pending_withdrawals': pending_withdrawals,
                 
                 # Recent orders
-                'recent_orders': [{
-                    'order_id': o.order_id,
-                    'user': User.query.get(o.user_id).username if o.user_id else 'N/A',
-                    'amount': float(o.amount),
-                    'status': o.status,
-                    'date': o.created_at.strftime('%Y-%m-%d') if o.created_at else 'Unknown'
-                } for o in recent_orders]
+                'recent_orders': recent_orders_data
+            },
+            'platform': platform,
+            'platform_name': platform_name,
+            'branding': {
+                'name': platform_config.get('brand_name', platform_name),
+                'primary_color': primary_color,
+                'secondary_color': platform_config.get('secondary_color', '#C9A84C')
             }
         })
         
     except Exception as e:
-        print(f"Get admin stats error: {e}")
+        print(f"[ADMIN STATS ERROR] {e}")
         import traceback
         traceback.print_exc()
-        return jsonify({'success': False, 'error': 'Failed to fetch Roamsmart stats'}), 500
+        return jsonify({'success': False, 'error': f'Failed to fetch {platform_name} stats'}), 500
     
-
 @app.route('/api/admin/users', methods=['GET'])
 @token_required
 @admin_required
-def get_amin_users():
-    """Get all users"""
+def get_admin_users():
+    """Get all users - AFDALNOVA with platform filtering"""
     try:
-        users = User.query.order_by(User.created_at.desc()).all()
-        return jsonify({'success': True, 'data': [u.to_dict() for u in users]})
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        
+        # Filter users by platform
+        users_query = User.query
+        if platform:
+            users_query = users_query.filter_by(platform=platform)
+        
+        users = users_query.order_by(User.created_at.desc()).all()
+        
+        return jsonify({
+            'success': True, 
+            'data': [u.to_dict() for u in users],
+            'platform': platform,
+            'platform_name': platform_name
+        })
+        
     except Exception as e:
-        print(f"Get admin users error: {e}")
-        return jsonify({'success': False, 'error': 'Failed to fetch users from Roamsmart'}), 500
+        print(f"[ADMIN USERS ERROR] {e}")
+        return jsonify({'success': False, 'error': f'Failed to fetch {platform_name} users'}), 500
 
 
 @app.route('/api/admin/users/create', methods=['POST'])
 @token_required
 @admin_required
-def create_amin_user():
-    """Create user (admin only)"""
+def create_admin_user():
+    """Create user (admin only) - AFDALNOVA"""
     try:
         data = request.get_json()
+        
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        primary_color = platform_config.get('primary_color', '#1A2A6C')
+        website_url = platform_config.get('base_url', 'https://abigalisticstudious.com')
+        support_phone = platform_config.get('support_phone', '0548247241')
         
         username = data.get('username')
         email = data.get('email')
@@ -11839,8 +18898,9 @@ def create_amin_user():
         role = data.get('role', 'user')
         wallet_balance = data.get('wallet_balance', 0)
         
-        if User.query.filter_by(email=email).first():
-            return jsonify({'success': False, 'error': 'Email already exists'}), 400
+        # Check if user exists on this platform
+        if User.query.filter_by(email=email, platform=platform).first():
+            return jsonify({'success': False, 'error': f'Email already exists on {platform_name}'}), 400
         
         new_user = User(
             username=username,
@@ -11848,8 +18908,11 @@ def create_amin_user():
             phone=phone,
             role=role,
             wallet_balance=wallet_balance,
+            platform=platform,
+            platform_created=platform,
             referral_code=f"REF{uuid.uuid4().hex[:8].upper()}"
         )
+        
         if password:
             new_user.set_password(password)
         else:
@@ -11858,67 +18921,160 @@ def create_amin_user():
         db.session.add(new_user)
         db.session.commit()
         
-        # Send welcome email (Email ONLY)
+        # Send welcome email with platform branding
         send_email(
             email,
-            f"Welcome to {COMPANY_NAME}",
+            f"Welcome to {platform_name}!",
             f"""
-            <div style="font-family: Arial, sans-serif;">
-                <h2 style="color: #8B0000;">Account Created for You</h2>
-                <p>Dear {username},</p>
-                <p>An account has been created for you on {COMPANY_NAME}.</p>
-                <p><strong>Email:</strong> {email}</p>
-                <p><strong>Password:</strong> {password if password else 'password123'}</p>
-                <p>Please login and change your password immediately.</p>
-                <a href="{COMPANY_WEBSITE}/login" style="background: #8B0000; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Login Now</a>
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                <div style="background: {primary_color}; color: white; padding: 20px; text-align: center; border-radius: 10px 10px 0 0;">
+                    <h2 style="margin: 0;">Welcome to {platform_name}!</h2>
+                </div>
+                <div style="background: #f9f9f9; padding: 30px; border-radius: 0 0 10px 10px;">
+                    <p>Dear {username},</p>
+                    <p>An account has been created for you on {platform_name}.</p>
+                    <p><strong>Email:</strong> {email}</p>
+                    <p><strong>Password:</strong> {password if password else 'password123'}</p>
+                    <p>Please login and change your password immediately.</p>
+                    <div style="text-align: center; margin: 20px 0;">
+                        <a href="{website_url}/login" style="background: {primary_color}; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block;">Login Now</a>
+                    </div>
+                    <hr>
+                    <p style="color: #666; font-size: 12px;">Need help? Contact us at {support_phone}</p>
+                </div>
             </div>
             """
         )
         
-        return jsonify({'success': True, 'user': new_user.to_dict()})
+        return jsonify({
+            'success': True, 
+            'user': new_user.to_dict(),
+            'platform': platform,
+            'platform_name': platform_name
+        })
+        
     except Exception as e:
-        print(f"Create admin user error: {e}")
+        print(f"[CREATE ADMIN USER ERROR] {e}")
         db.session.rollback()
-        return jsonify({'success': False, 'error': 'Failed to create user on Roamsmart'}), 500
+        return jsonify({'success': False, 'error': f'Failed to create user on {platform_name}'}), 500
 
 
 @app.route('/api/admin/users/<int:user_id>/suspend', methods=['POST'])
 @token_required
 @admin_required
 def suspend_admin_user(user_id):
-    """Suspend a user - Email ONLY"""
+    """Suspend a user - Must belong to admin's platform"""
     try:
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        support_phone = platform_config.get('support_phone', '0548247241')
+        
         user = User.query.get(user_id)
         if not user:
             return jsonify({'success': False, 'error': 'User not found'}), 404
         
+        # CRITICAL: Check if user belongs to this platform
+        if user.platform != platform:
+            return jsonify({
+                'success': False, 
+                'error': f'User does not belong to {platform_name}'
+            }), 403
+        
         user.is_suspended = True
         db.session.commit()
         
-        # Send notification via Email ONLY
         send_email(
             user.email,
-            f"Account Suspension Notice - {COMPANY_NAME}",
+            f"Account Suspension Notice - {platform_name}",
             f"""
             <div style="font-family: Arial, sans-serif;">
-                <h2 style="color: #dc3545;">Account Suspended</h2>
+                <h2 style="color: #dc3545;">Account Suspended - {platform_name}</h2>
                 <p>Dear {user.username},</p>
-                <p>Your {COMPANY_NAME} account has been suspended.</p>
+                <p>Your {platform_name} account has been suspended.</p>
                 <p>Please contact our support team for assistance.</p>
-                <p><strong>Support Contact:</strong> {COMPANY_PHONE}</p>
+                <p><strong>Support Contact:</strong> {support_phone}</p>
                 <hr>
                 <p>If you believe this is an error, please reach out immediately.</p>
             </div>
             """
         )
         
-        log_activity(g.current_user.id, 'suspend_user', f'Suspended user {user.email}')
+        log_activity(g.current_user.id, 'suspend_user', f'Suspended user {user.email} on {platform_name}', platform=platform)
         
-        return jsonify({'success': True, 'message': f'User suspended on {COMPANY_NAME}'})
+        return jsonify({
+            'success': True, 
+            'message': f'User suspended on {platform_name}',
+            'platform': platform,
+            'platform_name': platform_name
+        })
+        
     except Exception as e:
-        print(f"Suspend user error: {e}")
+        print(f"[SUSPEND USER ERROR] {e}")
         db.session.rollback()
-        return jsonify({'success': False, 'error': 'Failed to suspend user'}), 500
+        return jsonify({'success': False, 'error': f'Failed to suspend user on {platform_name}'}), 500
+
+
+@app.route('/api/admin/users/<int:user_id>/activate', methods=['POST'])
+@token_required
+@admin_required
+def activate_admin_user(user_id):
+    """Activate a suspended user - Must belong to admin's platform"""
+    try:
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        primary_color = platform_config.get('primary_color', '#1A2A6C')
+        website_url = platform_config.get('base_url', 'https://abigalisticstudious.com')
+        
+        user = User.query.get(user_id)
+        if not user:
+            return jsonify({'success': False, 'error': 'User not found'}), 404
+        
+        # CRITICAL: Check if user belongs to this platform
+        if user.platform != platform:
+            return jsonify({
+                'success': False, 
+                'error': f'User does not belong to {platform_name}'
+            }), 403
+        
+        user.is_suspended = False
+        db.session.commit()
+        
+        send_email(
+            user.email,
+            f"Account Reactivated - {platform_name}",
+            f"""
+            <div style="font-family: Arial, sans-serif;">
+                <div style="background: {primary_color}; color: white; padding: 15px; text-align: center; border-radius: 10px 10px 0 0;">
+                    <h2>Account Reactivated - {platform_name}</h2>
+                </div>
+                <div style="background: #f9f9f9; padding: 20px; border-radius: 0 0 10px 10px;">
+                    <p>Dear {user.username},</p>
+                    <p>Your {platform_name} account has been reactivated.</p>
+                    <p>You can now login and continue using our services.</p>
+                    <div style="text-align: center; margin: 20px 0;">
+                        <a href="{website_url}/login" style="background: {primary_color}; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block;">Login Now</a>
+                    </div>
+                </div>
+            </div>
+            """
+        )
+        
+        log_activity(g.current_user.id, 'activate_user', f'Activated user {user.email} on {platform_name}', platform=platform)
+        
+        return jsonify({
+            'success': True, 
+            'message': f'User activated on {platform_name}',
+            'platform': platform,
+            'platform_name': platform_name
+        })
+        
+    except Exception as e:
+        print(f"[ACTIVATE USER ERROR] {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': f'Failed to activate user on {platform_name}'}), 500
+
 
 @app.route('/api/admin/inventory', methods=['GET'])
 @token_required
@@ -12090,62 +19246,43 @@ def add_to_inventory():
         db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
 
-@app.route('/api/admin/users/<int:user_id>/activate', methods=['POST'])
-@token_required
-@admin_required
-def activate_admin_user(user_id):
-    """Activate a suspended user - Email ONLY"""
-    try:
-        user = User.query.get(user_id)
-        if not user:
-            return jsonify({'success': False, 'error': 'User not found'}), 404
-        
-        user.is_suspended = False
-        db.session.commit()
-        
-        # Send notification via Email ONLY
-        send_email(
-            user.email,
-            f"Account Reactivated - {COMPANY_NAME}",
-            f"""
-            <div style="font-family: Arial, sans-serif;">
-                <h2 style="color: #28a745;">Account Reactivated</h2>
-                <p>Dear {user.username},</p>
-                <p>Your {COMPANY_NAME} account has been reactivated.</p>
-                <p>You can now login and continue using our services.</p>
-                <a href="{COMPANY_WEBSITE}/login" style="background: #8B0000; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Login Now</a>
-            </div>
-            """
-        )
-        
-        log_activity(g.current_user.id, 'activate_user', f'Activated user {user.email}')
-        
-        return jsonify({'success': True, 'message': f'User activated on {COMPANY_NAME}'})
-    except Exception as e:
-        print(f"Activate user error: {e}")
-        db.session.rollback()
-        return jsonify({'success': False, 'error': 'Failed to activate user'}), 500
-
-
 @app.route('/api/admin/agents', methods=['GET'])
 @token_required
 @admin_required
-def get_amin_agents():
-    """Get all agents"""
+def get_admin_agents():
+    """Get all agents - AFDALNOVA with platform filtering"""
     try:
-        agents = User.query.filter_by(is_agent=True, agent_approved=True).order_by(
-            User.created_at.desc()
-        ).all()
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        primary_color = platform_config.get('primary_color', '#1A2A6C')
+        
+        # Filter agents by platform
+        agents = User.query.filter_by(
+            is_agent=True, 
+            agent_approved=True,
+            platform=platform
+        ).order_by(User.created_at.desc()).all()
         
         agents_data = []
         for agent in agents:
+            # Get total sales for this agent (filtered by platform)
             total_sales = db.session.query(db.func.sum(Order.amount)).filter_by(
-                user_id=agent.id, status='completed'
+                user_id=agent.id, 
+                status='completed',
+                platform=platform
             ).scalar() or 0
             
+            # Get withdrawals for this agent (filtered by platform)
             withdrawals = db.session.query(db.func.sum(Transaction.amount)).filter_by(
-                user_id=agent.id, type='withdrawal', status='completed'
+                user_id=agent.id, 
+                type='withdrawal', 
+                status='completed',
+                platform=platform
             ).scalar() or 0
+            
+            # Get commission earned (15% of total sales)
+            commission_earned = total_sales * (agent.commission_rate or 15) / 100
             
             agents_data.append({
                 'id': agent.id,
@@ -12153,141 +19290,466 @@ def get_amin_agents():
                 'email': agent.email,
                 'phone': agent.phone,
                 'total_sales': float(total_sales),
-                'commission_earned': float(total_sales * 0.15),
+                'commission_earned': float(commission_earned),
                 'withdrawn': float(withdrawals),
                 'tier': agent.agent_tier or 'Bronze',
                 'commission_rate': agent.commission_rate or 10,
-                'created_at': agent.created_at.isoformat()
+                'total_customers': agent.total_customers or 0,
+                'created_at': agent.created_at.isoformat() if agent.created_at else None,
+                'platform': agent.platform
             })
         
-        return jsonify({'success': True, 'data': agents_data})
+        return jsonify({
+            'success': True, 
+            'data': agents_data,
+            'platform': platform,
+            'platform_name': platform_name,
+            'branding': {
+                'name': platform_config.get('brand_name', platform_name),
+                'primary_color': primary_color,
+                'secondary_color': platform_config.get('secondary_color', '#C9A84C')
+            }
+        })
+        
     except Exception as e:
-        print(f"Get admin agents error: {e}")
-        return jsonify({'success': False, 'error': 'Failed to fetch agents from Roamsmart'}), 500
+        print(f"[ADMIN AGENTS ERROR] {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': f'Failed to fetch {platform_name} agents'}), 500
 
 
 @app.route('/api/admin/agent-requests', methods=['GET'])
 @token_required
 @admin_required
-def get_agentadmin_requests():
-    """Get pending agent requests"""
+def get_admin_agent_requests():
+    """Get pending agent requests - AFDALNOVA with platform filtering"""
     try:
-        requests = AgentRequest.query.filter_by(status='pending').order_by(
-            AgentRequest.created_at.desc()
-        ).all()
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        
+        # Filter agent requests by platform
+        requests = AgentRequest.query.filter_by(
+            status='pending',
+            platform=platform
+        ).order_by(AgentRequest.created_at.desc()).all()
         
         return jsonify({
             'success': True,
             'data': [{
                 'id': r.id,
                 'user_id': r.user_id,
-                'username': User.query.get(r.user_id).username,
-                'email': User.query.get(r.user_id).email,
-                'phone': User.query.get(r.user_id).phone,
+                'username': User.query.get(r.user_id).username if User.query.get(r.user_id) else 'N/A',
+                'email': User.query.get(r.user_id).email if User.query.get(r.user_id) else 'N/A',
+                'phone': User.query.get(r.user_id).phone if User.query.get(r.user_id) else 'N/A',
                 'amount': float(r.amount),
                 'payment_reference': r.payment_reference,
-                'created_at': r.created_at.strftime('%Y-%m-%d %H:%M')
-            } for r in requests]
+                'created_at': r.created_at.strftime('%Y-%m-%d %H:%M') if r.created_at else 'N/A',
+                'platform': r.platform
+            } for r in requests],
+            'platform': platform,
+            'platform_name': platform_name
         })
+        
     except Exception as e:
-        print(f"Get agent requests error: {e}")
-        return jsonify({'success': False, 'error': 'Failed to fetch agent requests from Roamsmart'}), 500
+        print(f"[AGENT REQUESTS ERROR] {e}")
+        return jsonify({'success': False, 'error': f'Failed to fetch {platform_name} agent requests'}), 500
 
 
 @app.route('/api/admin/agent-requests/<int:request_id>/approve', methods=['POST'])
 @token_required
 @admin_required
-def approve_agentadmin_request(request_id):
-    """Approve agent request - Email ONLY"""
+def approve_admin_agent_request(request_id):
+    """Approve agent request - Must belong to admin's platform"""
     try:
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        primary_color = platform_config.get('primary_color', '#1A2A6C')
+        website_url = platform_config.get('base_url', 'https://abigalisticstudious.com')
+        support_phone = platform_config.get('support_phone', '0548247241')
+        
         agent_request = AgentRequest.query.get(request_id)
         if not agent_request:
             return jsonify({'success': False, 'error': 'Request not found'}), 404
         
+        # CRITICAL: Check if request belongs to this platform
+        if agent_request.platform != platform:
+            return jsonify({
+                'success': False, 
+                'error': f'Request does not belong to {platform_name}'
+            }), 403
+        
         user = User.query.get(agent_request.user_id)
+        if not user:
+            return jsonify({'success': False, 'error': 'User not found'}), 404
+        
+        # Update user to agent
         user.is_agent = True
         user.agent_approved = True
         user.agent_tier = 'Bronze'
         user.commission_rate = 10
+        user.platform = platform
         
+        # Update agent request
         agent_request.status = 'approved'
         agent_request.approved_at = datetime.utcnow()
         
         db.session.commit()
         
-        # Send notification via Email ONLY
+        # Send approval email with platform branding
         send_email(
             user.email,
-            f"🎉 Congratulations! Agent Application Approved - {COMPANY_NAME}",
+            f"🎉 Congratulations! Agent Application Approved - {platform_name}",
             f"""
-            <div style="font-family: Arial, sans-serif;">
-                <h2 style="color: #28a745;">🎉 Welcome to {COMPANY_NAME} Agent Program!</h2>
-                <p>Dear {user.username},</p>
-                <p>Congratulations! Your agent application has been approved.</p>
-                <p><strong>Your Benefits:</strong></p>
-                <ul>
-                    <li>Wholesale prices on all data bundles</li>
-                    <li>10% base commission on all sales</li>
-                    <li>Access to agent dashboard</li>
-                    <li>Create your own store</li>
-                    <li>Track earnings and withdrawals</li>
-                </ul>
-                <a href="{COMPANY_WEBSITE}/agent/dashboard" style="background: #8B0000; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Go to Agent Dashboard</a>
-                <hr>
-                <p>Need help? Contact support on WhatsApp: {COMPANY_PHONE}</p>
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                <div style="background: {primary_color}; color: white; padding: 20px; text-align: center; border-radius: 10px 10px 0 0;">
+                    <h2 style="margin: 0;">🎉 Welcome to {platform_name} Agent Program!</h2>
+                </div>
+                <div style="background: #f9f9f9; padding: 30px; border-radius: 0 0 10px 10px;">
+                    <p>Dear {user.username},</p>
+                    <p>Congratulations! Your agent application has been approved.</p>
+                    <p><strong>Your Benefits:</strong></p>
+                    <ul>
+                        <li>Wholesale prices on all data bundles</li>
+                        <li>10% base commission on all sales</li>
+                        <li>Access to agent dashboard</li>
+                        <li>Create your own store</li>
+                        <li>Track earnings and withdrawals</li>
+                    </ul>
+                    <div style="text-align: center; margin: 20px 0;">
+                        <a href="{website_url}/agent/dashboard" style="background: {primary_color}; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block;">Go to Agent Dashboard</a>
+                    </div>
+                    <hr>
+                    <p style="color: #666; font-size: 12px;">Need help? Contact support on WhatsApp: {support_phone}</p>
+                </div>
             </div>
             """
         )
         
-        send_webhook('agent.approved', {'user_id': user.id, 'username': user.username})
-        log_activity(g.current_user.id, 'approve_agent', f'Approved agent {user.email}')
+        # Send webhook notification
+        send_webhook('agent.approved', {
+            'user_id': user.id, 
+            'username': user.username,
+            'platform': platform,
+            'platform_name': platform_name
+        })
         
-        return jsonify({'success': True, 'message': f'Agent approved on {COMPANY_NAME}'})
+        log_activity(g.current_user.id, 'approve_agent', f'Approved agent {user.email} on {platform_name}', platform=platform)
+        
+        return jsonify({
+            'success': True, 
+            'message': f'Agent approved on {platform_name}',
+            'platform': platform,
+            'platform_name': platform_name
+        })
+        
     except Exception as e:
-        print(f"Approve agent error: {e}")
+        print(f"[APPROVE AGENT ERROR] {e}")
+        import traceback
+        traceback.print_exc()
         db.session.rollback()
-        return jsonify({'success': False, 'error': 'Failed to approve agent'}), 500
+        return jsonify({'success': False, 'error': f'Failed to approve agent on {platform_name}'}), 500
 
 
 @app.route('/api/admin/agent-requests/<int:request_id>/reject', methods=['POST'])
 @token_required
 @admin_required
-def reject_agentadmin_request(request_id):
-    """Reject agent request - Email ONLY"""
+def reject_admin_agent_request(request_id):
+    """Reject agent request - Must belong to admin's platform"""
     try:
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        support_phone = platform_config.get('support_phone', '0548247241')
+        
         agent_request = AgentRequest.query.get(request_id)
         if not agent_request:
             return jsonify({'success': False, 'error': 'Request not found'}), 404
+        
+        # CRITICAL: Check if request belongs to this platform
+        if agent_request.platform != platform:
+            return jsonify({
+                'success': False, 
+                'error': f'Request does not belong to {platform_name}'
+            }), 403
         
         agent_request.status = 'rejected'
         db.session.commit()
         
         user = User.query.get(agent_request.user_id)
+        if user:
+            # Send rejection email
+            send_email(
+                user.email,
+                f"Agent Application Update - {platform_name}",
+                f"""
+                <div style="font-family: Arial, sans-serif;">
+                    <h2 style="color: #dc3545;">Application Status Update - {platform_name}</h2>
+                    <p>Dear {user.username},</p>
+                    <p>Thank you for your interest in becoming a {platform_name} agent.</p>
+                    <p>After careful review, we regret to inform you that your application could not be approved at this time.</p>
+                    <p><strong>Possible reasons:</strong></p>
+                    <ul>
+                        <li>Incomplete application information</li>
+                        <li>Verification issues</li>
+                        <li>Application does not meet current requirements</li>
+                    </ul>
+                    <p>Please contact our support team for more information about the decision.</p>
+                    <p>You may reapply after 30 days.</p>
+                    <p><strong>Support Contact:</strong> {support_phone}</p>
+                </div>
+                """
+            )
         
-        # Send notification via Email ONLY
-        send_email(
-            user.email,
-            f"Agent Application Update - {COMPANY_NAME}",
-            f"""
-            <div style="font-family: Arial, sans-serif;">
-                <h2 style="color: #dc3545;">Application Status Update</h2>
-                <p>Dear {user.username},</p>
-                <p>Thank you for your interest in becoming a {COMPANY_NAME} agent.</p>
-                <p>After careful review, we regret to inform you that your application could not be approved at this time.</p>
-                <p>Please contact our support team for more information about the decision.</p>
-                <p>You may reapply after 30 days.</p>
-                <p>Support: {COMPANY_PHONE}</p>
-            </div>
-            """
-        )
+        log_activity(g.current_user.id, 'reject_agent', f'Rejected agent {user.email if user else "Unknown"} on {platform_name}', platform=platform)
         
-        log_activity(g.current_user.id, 'reject_agent', f'Rejected agent {user.email}')
+        return jsonify({
+            'success': True, 
+            'message': f'Agent request rejected on {platform_name}',
+            'platform': platform,
+            'platform_name': platform_name
+        })
         
-        return jsonify({'success': True, 'message': 'Agent request rejected'})
     except Exception as e:
-        print(f"Reject agent error: {e}")
+        print(f"[REJECT AGENT ERROR] {e}")
+        import traceback
+        traceback.print_exc()
         db.session.rollback()
-        return jsonify({'success': False, 'error': 'Failed to reject agent'}), 500
+        return jsonify({'success': False, 'error': f'Failed to reject agent on {platform_name}'}), 500
+
+
+@app.route('/api/admin/agent-requests/bulk-approve', methods=['POST'])
+@token_required
+@admin_required
+def bulk_approve_admin1_agents():
+    """Bulk approve agent requests - Must belong to admin's platform"""
+    try:
+        data = request.get_json()
+        request_ids = data.get('request_ids', [])
+        
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        primary_color = platform_config.get('primary_color', '#1A2A6C')
+        website_url = platform_config.get('base_url', 'https://abigalisticstudious.com')
+        support_phone = platform_config.get('support_phone', '0548247241')
+        
+        approved_count = 0
+        approved_users = []
+        
+        for request_id in request_ids:
+            agent_request = AgentRequest.query.get(request_id)
+            if agent_request and agent_request.status == 'pending' and agent_request.platform == platform:
+                user = User.query.get(agent_request.user_id)
+                if user:
+                    user.is_agent = True
+                    user.agent_approved = True
+                    user.agent_tier = 'Bronze'
+                    user.commission_rate = 10
+                    user.platform = platform
+                    
+                    agent_request.status = 'approved'
+                    agent_request.approved_at = datetime.utcnow()
+                    
+                    approved_count += 1
+                    approved_users.append(user)
+        
+        db.session.commit()
+        
+        # Send approval emails
+        for user in approved_users:
+            send_email(
+                user.email,
+                f"🎉 Congratulations! Agent Application Approved - {platform_name}",
+                f"""
+                <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                    <div style="background: {primary_color}; color: white; padding: 20px; text-align: center; border-radius: 10px 10px 0 0;">
+                        <h2 style="margin: 0;">🎉 Welcome to {platform_name} Agent Program!</h2>
+                    </div>
+                    <div style="background: #f9f9f9; padding: 30px; border-radius: 0 0 10px 10px;">
+                        <p>Dear {user.username},</p>
+                        <p>Congratulations! Your agent application has been approved.</p>
+                        <div style="text-align: center; margin: 20px 0;">
+                            <a href="{website_url}/agent/dashboard" style="background: {primary_color}; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block;">Go to Agent Dashboard</a>
+                        </div>
+                        <hr>
+                        <p style="color: #666; font-size: 12px;">Need help? Contact support on WhatsApp: {support_phone}</p>
+                    </div>
+                </div>
+                """
+            )
+        
+        log_activity(g.current_user.id, 'bulk_approve_agents', f'Approved {approved_count} agents on {platform_name}', platform=platform)
+        
+        return jsonify({
+            'success': True, 
+            'approved_count': approved_count,
+            'message': f'{approved_count} agents approved on {platform_name}',
+            'platform': platform,
+            'platform_name': platform_name
+        })
+        
+    except Exception as e:
+        print(f"[BULK APPROVE AGENTS ERROR] {e}")
+        import traceback
+        traceback.print_exc()
+        db.session.rollback()
+        return jsonify({'success': False, 'error': f'Failed to bulk approve agents on {platform_name}'}), 500
+
+
+@app.route('/api/admin/agents/<int:agent_id>/commission', methods=['PUT'])
+@token_required
+@admin_required
+def update_agent_admin1_commission(agent_id):
+    """Update agent commission rate - Must belong to admin's platform"""
+    try:
+        data = request.get_json()
+        commission_rate = data.get('commission_rate')
+        
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        
+        if commission_rate is None:
+            return jsonify({'success': False, 'error': 'Commission rate is required'}), 400
+        
+        if commission_rate < 0 or commission_rate > 50:
+            return jsonify({'success': False, 'error': 'Commission rate must be between 0 and 50'}), 400
+        
+        agent = User.query.get(agent_id)
+        if not agent:
+            return jsonify({'success': False, 'error': 'Agent not found'}), 404
+        
+        # CRITICAL: Check if agent belongs to this platform
+        if agent.platform != platform:
+            return jsonify({
+                'success': False, 
+                'error': f'Agent does not belong to {platform_name}'
+            }), 403
+        
+        # Check if user is actually an agent
+        if not agent.is_agent or not agent.agent_approved:
+            return jsonify({'success': False, 'error': 'User is not an approved agent'}), 400
+        
+        # Update commission rate
+        agent.commission_rate = commission_rate
+        agent.updated_at = datetime.utcnow()
+        db.session.commit()
+        
+        log_activity(g.current_user.id, 'update_agent_commission', f'Updated commission for agent {agent.email} to {commission_rate}% on {platform_name}', platform=platform)
+        
+        return jsonify({
+            'success': True,
+            'message': f'Commission rate updated to {commission_rate}% for {agent.username} on {platform_name}',
+            'data': {
+                'agent_id': agent.id,
+                'username': agent.username,
+                'commission_rate': agent.commission_rate,
+                'platform': platform,
+                'platform_name': platform_name
+            }
+        })
+        
+    except Exception as e:
+        print(f"[UPDATE AGENT COMMISSION ERROR] {e}")
+        import traceback
+        traceback.print_exc()
+        db.session.rollback()
+        return jsonify({'success': False, 'error': f'Failed to update commission on {platform_name}'}), 500
+
+
+@app.route('/api/admin/agents/<int:agent_id>/performance', methods=['GET'])
+@token_required
+@admin_required
+def get_agent_admin1_performance(agent_id):
+    """Get agent performance data - Must belong to admin's platform"""
+    try:
+        from datetime import datetime, timedelta
+        
+        range_param = request.args.get('range', 'month')
+        
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        
+        agent = User.query.get(agent_id)
+        if not agent:
+            return jsonify({'success': False, 'error': 'Agent not found'}), 404
+        
+        # CRITICAL: Check if agent belongs to this platform
+        if agent.platform != platform:
+            return jsonify({
+                'success': False, 
+                'error': f'Agent does not belong to {platform_name}'
+            }), 403
+        
+        # Determine date range
+        now = datetime.utcnow()
+        if range_param == 'week':
+            start_date = now - timedelta(days=7)
+        elif range_param == 'month':
+            start_date = now - timedelta(days=30)
+        elif range_param == 'quarter':
+            start_date = now - timedelta(days=90)
+        elif range_param == 'year':
+            start_date = now - timedelta(days=365)
+        else:
+            start_date = now - timedelta(days=30)
+        
+        # Get orders in range
+        orders = Order.query.filter(
+            Order.agent_id == agent_id,
+            Order.status == 'completed',
+            Order.created_at >= start_date,
+            Order.platform == platform
+        ).all()
+        
+        # Calculate performance metrics
+        total_sales = sum(o.amount for o in orders)
+        total_orders = len(orders)
+        total_profit = sum(o.profit or 0 for o in orders)
+        
+        # Daily breakdown
+        daily_sales = {}
+        for order in orders:
+            date_key = order.created_at.strftime('%Y-%m-%d')
+            daily_sales[date_key] = daily_sales.get(date_key, 0) + order.amount
+        
+        # Recent orders
+        recent_orders = orders[-10:] if len(orders) > 10 else orders
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'agent_id': agent.id,
+                'username': agent.username,
+                'total_sales': float(total_sales),
+                'total_orders': total_orders,
+                'total_profit': float(total_profit),
+                'average_order_value': float(total_sales / total_orders) if total_orders > 0 else 0,
+                'commission_rate': agent.commission_rate,
+                'commission_earned': float(total_sales * agent.commission_rate / 100),
+                'daily_sales': daily_sales,
+                'recent_orders': [{
+                    'order_id': o.order_id,
+                    'amount': float(o.amount),
+                    'profit': float(o.profit or 0),
+                    'customer_phone': o.phone,
+                    'created_at': o.created_at.isoformat() if o.created_at else None
+                } for o in recent_orders],
+                'range': range_param,
+                'platform': platform,
+                'platform_name': platform_name
+            }
+        })
+        
+    except Exception as e:
+        print(f"[AGENT PERFORMANCE ERROR] {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': f'Failed to fetch {platform_name} agent performance'}), 500
+
 
 @app.route('/api/admin/africastalking-balance', methods=['GET'])
 @token_required
@@ -12347,9 +19809,13 @@ def admin_get_africastalking_balance():
 @token_required
 @admin_required
 def admin_get_agent_applications():
-    """Admin: Get all agent applications"""
+    """Admin: Get all agent applications - AFDALNOVA with platform filtering"""
     try:
         from sqlalchemy import inspect
+        
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
         
         inspector = inspect(db.engine)
         
@@ -12359,14 +19825,20 @@ def admin_get_agent_applications():
                 'data': [],
                 'total': 0,
                 'page': 1,
-                'total_pages': 0
+                'total_pages': 0,
+                'platform': platform,
+                'platform_name': platform_name
             })
         
         page = request.args.get('page', 1, type=int)
         per_page = request.args.get('limit', 20, type=int)
         status = request.args.get('status', 'pending')
         
-        query = AgentApplication.query.filter_by(status=status)
+        # Filter by platform
+        query = AgentApplication.query.filter_by(
+            status=status,
+            platform=platform
+        )
         pagination = query.order_by(AgentApplication.created_at.desc()).paginate(
             page=page, per_page=per_page, error_out=False
         )
@@ -12386,7 +19858,8 @@ def admin_get_agent_applications():
                 'payment_proof_url': app.payment_proof_url,
                 'status': app.status,
                 'submitted_at': app.created_at.isoformat() if app.created_at else None,
-                'processed_at': app.processed_at.isoformat() if hasattr(app, 'processed_at') and app.processed_at else None
+                'processed_at': app.processed_at.isoformat() if hasattr(app, 'processed_at') and app.processed_at else None,
+                'platform': app.platform if hasattr(app, 'platform') else platform
             })
         
         return jsonify({
@@ -12394,78 +19867,124 @@ def admin_get_agent_applications():
             'data': applications,
             'total': pagination.total,
             'page': page,
-            'total_pages': pagination.pages
+            'total_pages': pagination.pages,
+            'platform': platform,
+            'platform_name': platform_name,
+            'branding': {
+                'name': platform_config.get('brand_name', platform_name),
+                'primary_color': platform_config.get('primary_color', '#1A2A6C'),
+                'secondary_color': platform_config.get('secondary_color', '#C9A84C')
+            }
         })
         
     except Exception as e:
-        print(f"Error fetching agent applications: {e}")
+        print(f"[AGENT APPLICATIONS ERROR] {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({
             'success': True,
             'data': [],
             'total': 0,
             'page': 1,
-            'total_pages': 0
+            'total_pages': 0,
+            'platform': platform if 'platform' in locals() else 'platform_a',
+            'platform_name': platform_name if 'platform_name' in locals() else 'AFDALNOVA'
         })
+
 
 @app.route('/api/admin/agent-requests/bulk-approve', methods=['POST'])
 @token_required
 @admin_required
-def bulk_approveadmin_agents():
-    """Bulk approve agent requests - Email ONLY"""
+def bulk_approve_admin_agents():
+    """Bulk approve agent requests - AFDALNOVA with platform filtering"""
     try:
         data = request.get_json()
         request_ids = data.get('request_ids', [])
+        
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        primary_color = platform_config.get('primary_color', '#1A2A6C')
+        website_url = platform_config.get('base_url', 'https://abigalisticstudious.com')
+        support_phone = platform_config.get('support_phone', '0548247241')
         
         approved_count = 0
         approved_users = []
         
         for request_id in request_ids:
             agent_request = AgentRequest.query.get(request_id)
-            if agent_request and agent_request.status == 'pending':
+            if agent_request and agent_request.status == 'pending' and agent_request.platform == platform:
                 user = User.query.get(agent_request.user_id)
-                user.is_agent = True
-                user.agent_approved = True
-                user.agent_tier = 'Bronze'
-                user.commission_rate = 10
-                agent_request.status = 'approved'
-                agent_request.approved_at = datetime.utcnow()
-                approved_count += 1
-                approved_users.append(user)
+                if user:
+                    user.is_agent = True
+                    user.agent_approved = True
+                    user.agent_tier = 'Bronze'
+                    user.commission_rate = 10
+                    user.platform = platform
+                    
+                    agent_request.status = 'approved'
+                    agent_request.approved_at = datetime.utcnow()
+                    
+                    approved_count += 1
+                    approved_users.append(user)
         
         db.session.commit()
         
-        # Send notifications to all approved agents via Email ONLY
+        # Send notifications to all approved agents
         for user in approved_users:
             send_email(
                 user.email,
-                f"🎉 Congratulations! Agent Application Approved - {COMPANY_NAME}",
+                f"🎉 Congratulations! Agent Application Approved - {platform_name}",
                 f"""
-                <div style="font-family: Arial, sans-serif;">
-                    <h2 style="color: #28a745;">🎉 Welcome to {COMPANY_NAME} Agent Program!</h2>
-                    <p>Dear {user.username},</p>
-                    <p>Congratulations! Your agent application has been approved.</p>
-                    <a href="{COMPANY_WEBSITE}/agent/dashboard" style="background: #8B0000; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Go to Agent Dashboard</a>
+                <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                    <div style="background: {primary_color}; color: white; padding: 20px; text-align: center; border-radius: 10px 10px 0 0;">
+                        <h2 style="margin: 0;">🎉 Welcome to {platform_name} Agent Program!</h2>
+                    </div>
+                    <div style="background: #f9f9f9; padding: 30px; border-radius: 0 0 10px 10px;">
+                        <p>Dear {user.username},</p>
+                        <p>Congratulations! Your agent application has been approved.</p>
+                        <div style="text-align: center; margin: 20px 0;">
+                            <a href="{website_url}/agent/dashboard" style="background: {primary_color}; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block;">Go to Agent Dashboard</a>
+                        </div>
+                        <hr>
+                        <p style="color: #666; font-size: 12px;">Need help? Contact support on WhatsApp: {support_phone}</p>
+                    </div>
                 </div>
                 """
             )
         
-        log_activity(g.current_user.id, 'bulk_approve_agents', f'Approved {approved_count} agents on Roamsmart')
+        log_activity(g.current_user.id, 'bulk_approve_agents', f'Approved {approved_count} agents on {platform_name}', platform=platform)
         
-        return jsonify({'success': True, 'approved_count': approved_count})
+        return jsonify({
+            'success': True, 
+            'approved_count': approved_count,
+            'message': f'{approved_count} agents approved on {platform_name}',
+            'platform': platform,
+            'platform_name': platform_name
+        })
+        
     except Exception as e:
-        print(f"Bulk approve agents error: {e}")
+        print(f"[BULK APPROVE AGENTS ERROR] {e}")
+        import traceback
+        traceback.print_exc()
         db.session.rollback()
-        return jsonify({'success': False, 'error': 'Failed to bulk approve agents on Roamsmart'}), 500
+        return jsonify({'success': False, 'error': f'Failed to bulk approve agents on {platform_name}'}), 500
 
 
 @app.route('/api/admin/manual-payments', methods=['GET'])
 @token_required
 @admin_required
-def get_manualadmin_payments():
-    """Get pending manual payments"""
+def get_admin_manual1_payments():
+    """Get pending manual payments - AFDALNOVA with platform filtering"""
     try:
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        
+        # Filter manual payments by platform
         payments = ManualPayment.query.filter(
-            ManualPayment.status.in_(['pending', 'pending_verification'])
+            ManualPayment.status.in_(['pending', 'pending_verification']),
+            ManualPayment.platform == platform
         ).order_by(ManualPayment.created_at.desc()).all()
         
         return jsonify({
@@ -12473,34 +19992,255 @@ def get_manualadmin_payments():
             'data': [{
                 'id': p.id,
                 'user_id': p.user_id,
-                'username': User.query.get(p.user_id).username,
-                'email': User.query.get(p.user_id).email,
-                'phone': User.query.get(p.user_id).phone,
+                'username': User.query.get(p.user_id).username if User.query.get(p.user_id) else 'Unknown',
+                'email': User.query.get(p.user_id).email if User.query.get(p.user_id) else 'No email',
+                'phone': User.query.get(p.user_id).phone if User.query.get(p.user_id) else 'No phone',
                 'amount': float(p.amount),
                 'reference': p.reference,
                 'proof_url': p.proof_url,
                 'sender_name': p.sender_name,
                 'sender_phone': p.sender_phone,
                 'transaction_id': p.transaction_id,
-                'created_at': p.created_at.strftime('%Y-%m-%d %H:%M')
-            } for p in payments]
+                'created_at': p.created_at.strftime('%Y-%m-%d %H:%M') if p.created_at else 'N/A',
+                'platform': p.platform if hasattr(p, 'platform') else platform
+            } for p in payments],
+            'platform': platform,
+            'platform_name': platform_name
         })
+        
     except Exception as e:
-        print(f"Get manual payments error: {e}")
-        return jsonify({'success': False, 'error': 'Failed to fetch manual payments from Roamsmart'}), 500
+        print(f"[MANUAL PAYMENTS ERROR] {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': f'Failed to fetch {platform_name} manual payments'}), 500
+
+
+@app.route('/api/admin/withdrawals', methods=['GET'])
+@token_required
+@admin_required
+def get_admin1_withdrawals():
+    """Get withdrawal requests - AFDALNOVA with platform filtering"""
+    try:
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        
+        # Filter withdrawals by platform
+        withdrawals = Transaction.query.filter_by(
+            type='withdrawal', 
+            status='pending',
+            platform=platform
+        ).order_by(Transaction.created_at.desc()).all()
+        
+        return jsonify({
+            'success': True,
+            'data': [{
+                'id': w.id,
+                'agent_id': w.user_id,
+                'agent_name': User.query.get(w.user_id).username if User.query.get(w.user_id) else 'Unknown',
+                'agent_email': User.query.get(w.user_id).email if User.query.get(w.user_id) else 'No email',
+                'agent_phone': User.query.get(w.user_id).phone if User.query.get(w.user_id) else 'No phone',
+                'amount': float(w.amount),
+                'mobile_money': w.description.split('to ')[-1] if 'to ' in w.description else 'N/A',
+                'reference': w.reference,
+                'created_at': w.created_at.isoformat() if w.created_at else None,
+                'status': w.status,
+                'platform': w.platform if hasattr(w, 'platform') else platform
+            } for w in withdrawals],
+            'platform': platform,
+            'platform_name': platform_name
+        })
+        
+    except Exception as e:
+        print(f"[WITHDRAWALS ERROR] {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': f'Failed to fetch {platform_name} withdrawals'}), 500
+
+
+@app.route('/api/admin/withdrawals/<int:withdrawal_id>/approve', methods=['POST'])
+@token_required
+@admin_required
+def approve_admin1_withdrawal(withdrawal_id):
+    """Approve withdrawal request - Must belong to admin's platform"""
+    try:
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        primary_color = platform_config.get('primary_color', '#1A2A6C')
+        
+        withdrawal = Transaction.query.get(withdrawal_id)
+        
+        if not withdrawal or withdrawal.type != 'withdrawal':
+            return jsonify({'success': False, 'error': 'Withdrawal not found'}), 404
+        
+        # CRITICAL: Check if withdrawal belongs to this platform
+        if withdrawal.platform != platform:
+            return jsonify({
+                'success': False, 
+                'error': f'Withdrawal does not belong to {platform_name}'
+            }), 403
+        
+        user = User.query.get(withdrawal.user_id)
+        if not user:
+            return jsonify({'success': False, 'error': 'User not found'}), 404
+        
+        # Check if user belongs to this platform
+        if user.platform != platform:
+            return jsonify({
+                'success': False, 
+                'error': f'User does not belong to {platform_name}'
+            }), 403
+        
+        if withdrawal.status == 'pending':
+            # Deduct from wallet
+            user.wallet_balance -= withdrawal.amount
+            withdrawal.status = 'completed'
+            withdrawal.balance_after = user.wallet_balance
+            withdrawal.updated_at = datetime.utcnow()
+            db.session.commit()
+        
+        # Send notification via Email
+        send_email(
+            user.email,
+            f"💰 Withdrawal Processed - {withdrawal.reference} - {platform_name}",
+            f"""
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                <div style="background: {primary_color}; color: white; padding: 20px; text-align: center; border-radius: 10px 10px 0 0;">
+                    <h2 style="margin: 0;">💰 Withdrawal Completed</h2>
+                </div>
+                <div style="background: #f9f9f9; padding: 30px; border-radius: 0 0 10px 10px;">
+                    <p>Dear {user.username},</p>
+                    <p>Your withdrawal request has been processed successfully.</p>
+                    <p><strong>Amount:</strong> GHS {withdrawal.amount:.2f}</p>
+                    <p><strong>Mobile Money:</strong> {withdrawal.description.split('to ')[-1] if 'to ' in withdrawal.description else 'N/A'}</p>
+                    <p><strong>Reference:</strong> {withdrawal.reference}</p>
+                    <p><strong>New Balance:</strong> GHS {user.wallet_balance:.2f}</p>
+                    <p>Funds should reflect in your mobile money account within 24 hours.</p>
+                </div>
+            </div>
+            """
+        )
+        
+        log_activity(g.current_user.id, 'approve_withdrawal', f'Approved withdrawal {withdrawal.reference} for {user.email} on {platform_name}', platform=platform)
+        
+        return jsonify({
+            'success': True, 
+            'message': f'Withdrawal approved on {platform_name}',
+            'platform': platform,
+            'platform_name': platform_name
+        })
+        
+    except Exception as e:
+        print(f"[APPROVE WITHDRAWAL ERROR] {e}")
+        import traceback
+        traceback.print_exc()
+        db.session.rollback()
+        return jsonify({'success': False, 'error': f'Failed to approve withdrawal on {platform_name}'}), 500
+
+
+@app.route('/api/admin/withdrawals/<int:withdrawal_id>/reject', methods=['POST'])
+@token_required
+@admin_required
+def reject_admin1_withdrawal(withdrawal_id):
+    """Reject withdrawal request - Must belong to admin's platform"""
+    try:
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        support_phone = platform_config.get('support_phone', '0548247241')
+        
+        withdrawal = Transaction.query.get(withdrawal_id)
+        
+        if not withdrawal or withdrawal.type != 'withdrawal':
+            return jsonify({'success': False, 'error': 'Withdrawal not found'}), 404
+        
+        # CRITICAL: Check if withdrawal belongs to this platform
+        if withdrawal.platform != platform:
+            return jsonify({
+                'success': False, 
+                'error': f'Withdrawal does not belong to {platform_name}'
+            }), 403
+        
+        user = User.query.get(withdrawal.user_id)
+        if not user:
+            return jsonify({'success': False, 'error': 'User not found'}), 404
+        
+        # Check if user belongs to this platform
+        if user.platform != platform:
+            return jsonify({
+                'success': False, 
+                'error': f'User does not belong to {platform_name}'
+            }), 403
+        
+        withdrawal.status = 'rejected'
+        withdrawal.updated_at = datetime.utcnow()
+        db.session.commit()
+        
+        # Send notification via Email
+        send_email(
+            user.email,
+            f"❌ Withdrawal Rejected - {withdrawal.reference} - {platform_name}",
+            f"""
+            <div style="font-family: Arial, sans-serif;">
+                <h2 style="color: #dc3545;">Withdrawal Request Rejected - {platform_name}</h2>
+                <p>Dear {user.username},</p>
+                <p>Your withdrawal request has been rejected.</p>
+                <p><strong>Amount:</strong> GHS {withdrawal.amount:.2f}</p>
+                <p><strong>Reference:</strong> {withdrawal.reference}</p>
+                <p><strong>Possible reasons:</strong></p>
+                <ul>
+                    <li>Insufficient balance</li>
+                    <li>Invalid mobile money number</li>
+                    <li>Pending verification</li>
+                </ul>
+                <p>Please contact support for more information.</p>
+                <p><strong>Support Contact:</strong> {support_phone}</p>
+            </div>
+            """
+        )
+        
+        log_activity(g.current_user.id, 'reject_withdrawal', f'Rejected withdrawal {withdrawal.reference} for {user.email} on {platform_name}', platform=platform)
+        
+        return jsonify({
+            'success': True, 
+            'message': f'Withdrawal rejected on {platform_name}',
+            'platform': platform,
+            'platform_name': platform_name
+        })
+        
+    except Exception as e:
+        print(f"[REJECT WITHDRAWAL ERROR] {e}")
+        import traceback
+        traceback.print_exc()
+        db.session.rollback()
+        return jsonify({'success': False, 'error': f'Failed to reject withdrawal on {platform_name}'}), 500
 
 
 @app.route('/api/admin/manual-payments/<int:payment_id>/verify', methods=['POST'])
 @token_required
 @admin_required
-def verify_admin_manual_payment(payment_id):
-    """Verify manual payment and credit wallet - Email ONLY"""
+def verify_admin_manual1_payment(payment_id):
+    """Verify manual payment and credit wallet - Must belong to admin's platform"""
     try:
         data = request.get_json()
-        payment = ManualPayment.query.get(payment_id)
         
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        primary_color = platform_config.get('primary_color', '#1A2A6C')
+        website_url = platform_config.get('base_url', 'https://abigalisticstudious.com')
+        
+        payment = ManualPayment.query.get(payment_id)
         if not payment:
             return jsonify({'success': False, 'error': 'Payment not found'}), 404
+        
+        # CRITICAL: Check if payment belongs to this platform
+        if payment.platform != platform:
+            return jsonify({
+                'success': False, 
+                'error': f'Payment does not belong to {platform_name}'
+            }), 403
         
         if payment.status not in ['pending', 'pending_verification']:
             return jsonify({'success': False, 'error': 'Payment already processed'}), 400
@@ -12515,6 +20255,16 @@ def verify_admin_manual_payment(payment_id):
         
         # Credit user's wallet
         user = User.query.get(payment.user_id)
+        if not user:
+            return jsonify({'success': False, 'error': 'User not found'}), 404
+        
+        # Check if user belongs to this platform
+        if user.platform != platform:
+            return jsonify({
+                'success': False, 
+                'error': f'User does not belong to {platform_name}'
+            }), 403
+        
         balance_before = user.wallet_balance
         user.wallet_balance += payment.amount
         
@@ -12525,216 +20275,127 @@ def verify_admin_manual_payment(payment_id):
             amount=payment.amount,
             balance_before=balance_before,
             balance_after=user.wallet_balance,
-            description=f'Manual payment verification - {payment.reference}',
+            description=f'Manual payment verification - {payment.reference} - {platform_name}',
             reference=payment.reference,
-            status='completed'
+            status='completed',
+            platform=platform
         )
         db.session.add(transaction)
-        
         db.session.commit()
         
-        # Send notification to user via Email ONLY
+        # Send notification to user
         send_email(
             user.email,
-            f"💰 Wallet Credited - {payment.reference} - {COMPANY_NAME}",
+            f"💰 Wallet Credited - {payment.reference} - {platform_name}",
             f"""
-            <div style="font-family: Arial, sans-serif;">
-                <h2 style="color: #28a745;">Payment Verified Successfully!</h2>
-                <p>Dear {user.username},</p>
-                <p>Your manual payment has been verified and credited to your wallet.</p>
-                <p><strong>Amount Credited:</strong> GHS {payment.amount:.2f}</p>
-                <p><strong>Previous Balance:</strong> GHS {balance_before:.2f}</p>
-                <p><strong>New Balance:</strong> GHS {user.wallet_balance:.2f}</p>
-                <p><strong>Reference:</strong> {payment.reference}</p>
-                <a href="{COMPANY_WEBSITE}/wallet" style="background: #8B0000; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">View Wallet</a>
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                <div style="background: {primary_color}; color: white; padding: 20px; text-align: center; border-radius: 10px 10px 0 0;">
+                    <h2 style="margin: 0;">💰 Payment Verified Successfully!</h2>
+                </div>
+                <div style="background: #f9f9f9; padding: 30px; border-radius: 0 0 10px 10px;">
+                    <p>Dear {user.username},</p>
+                    <p>Your manual payment has been verified and credited to your wallet on {platform_name}.</p>
+                    <p><strong>Amount Credited:</strong> GHS {payment.amount:.2f}</p>
+                    <p><strong>Previous Balance:</strong> GHS {balance_before:.2f}</p>
+                    <p><strong>New Balance:</strong> GHS {user.wallet_balance:.2f}</p>
+                    <p><strong>Reference:</strong> {payment.reference}</p>
+                    <div style="text-align: center; margin: 20px 0;">
+                        <a href="{website_url}/wallet" style="background: {primary_color}; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block;">View Wallet</a>
+                    </div>
+                </div>
             </div>
             """
         )
         
-        send_webhook('payment.verified', {'user_id': user.id, 'amount': payment.amount})
-        log_activity(g.current_user.id, 'verify_payment', f'Verified payment {payment.reference} for {user.email}')
+        send_webhook('payment.verified', {
+            'user_id': user.id, 
+            'amount': payment.amount, 
+            'platform': platform,
+            'platform_name': platform_name
+        })
         
-        return jsonify({'success': True, 'message': f'Payment verified and wallet credited on {COMPANY_NAME}'})
+        log_activity(g.current_user.id, 'verify_payment', f'Verified payment {payment.reference} for {user.email} on {platform_name}', platform=platform)
+        
+        return jsonify({
+            'success': True, 
+            'message': f'Payment verified and wallet credited on {platform_name}',
+            'platform': platform,
+            'platform_name': platform_name
+        })
+        
     except Exception as e:
-        print(f"Verify manual payment error: {e}")
+        print(f"[VERIFY MANUAL PAYMENT ERROR] {e}")
+        import traceback
+        traceback.print_exc()
         db.session.rollback()
-        return jsonify({'success': False, 'error': 'Failed to verify payment'}), 500
+        return jsonify({'success': False, 'error': f'Failed to verify payment on {platform_name}'}), 500
 
 
 @app.route('/api/admin/manual-payments/<int:payment_id>/reject', methods=['POST'])
 @token_required
 @admin_required
-def reject_manual_admin_payment(payment_id):
-    """Reject manual payment - Email ONLY"""
+def reject_admin_manual1_payment(payment_id):
+    """Reject manual payment - Must belong to admin's platform"""
     try:
-        payment = ManualPayment.query.get(payment_id)
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        support_phone = platform_config.get('support_phone', '0548247241')
         
+        payment = ManualPayment.query.get(payment_id)
         if not payment:
             return jsonify({'success': False, 'error': 'Payment not found'}), 404
+        
+        # CRITICAL: Check if payment belongs to this platform
+        if payment.platform != platform:
+            return jsonify({
+                'success': False, 
+                'error': f'Payment does not belong to {platform_name}'
+            }), 403
         
         payment.status = 'rejected'
         db.session.commit()
         
         user = User.query.get(payment.user_id)
+        if user:
+            # Send notification via Email
+            send_email(
+                user.email,
+                f"❌ Payment Rejected - {payment.reference} - {platform_name}",
+                f"""
+                <div style="font-family: Arial, sans-serif;">
+                    <h2 style="color: #dc3545;">Payment Verification Failed - {platform_name}</h2>
+                    <p>Dear {user.username},</p>
+                    <p>Your manual payment of <strong>GHS {payment.amount:.2f}</strong> has been rejected.</p>
+                    <p><strong>Reference:</strong> {payment.reference}</p>
+                    <p><strong>Possible reasons:</strong></p>
+                    <ul>
+                        <li>Proof of payment unclear or invalid</li>
+                        <li>Payment not received</li>
+                        <li>Incorrect amount or reference</li>
+                    </ul>
+                    <p>Please contact our support team for assistance.</p>
+                    <p><strong>Support Contact:</strong> {support_phone}</p>
+                </div>
+                """
+            )
         
-        # Send notification via Email ONLY
-        send_email(
-            user.email,
-            f"❌ Payment Rejected - {payment.reference} - {COMPANY_NAME}",
-            f"""
-            <div style="font-family: Arial, sans-serif;">
-                <h2 style="color: #dc3545;">Payment Verification Failed</h2>
-                <p>Dear {user.username},</p>
-                <p>Your manual payment of <strong>GHS {payment.amount:.2f}</strong> has been rejected.</p>
-                <p><strong>Reference:</strong> {payment.reference}</p>
-                <p><strong>Possible reasons:</strong></p>
-                <ul>
-                    <li>Proof of payment unclear or invalid</li>
-                    <li>Payment not received</li>
-                    <li>Incorrect amount or reference</li>
-                </ul>
-                <p>Please contact our support team for assistance with this payment.</p>
-                <p><strong>Support WhatsApp:</strong> {COMPANY_PHONE}</p>
-            </div>
-            """
-        )
-        
-        log_activity(g.current_user.id, 'reject_payment', f'Rejected payment {payment.reference}')
-        
-        return jsonify({'success': True, 'message': 'Payment rejected on Roamsmart'})
-    except Exception as e:
-        print(f"Reject manual payment error: {e}")
-        db.session.rollback()
-        return jsonify({'success': False, 'error': 'Failed to reject payment'}), 500
-
-
-@app.route('/api/admin/withdrawals', methods=['GET'])
-@token_required
-@admin_required
-def get_admin_withdrawals():
-    """Get withdrawal requests"""
-    try:
-        withdrawals = Transaction.query.filter_by(
-            type='withdrawal', status='pending'
-        ).order_by(Transaction.created_at.desc()).all()
+        log_activity(g.current_user.id, 'reject_payment', f'Rejected payment {payment.reference} on {platform_name}', platform=platform)
         
         return jsonify({
-            'success': True,
-            'data': [{
-                'id': w.id,
-                'agent_id': w.user_id,
-                'agent_name': User.query.get(w.user_id).username,
-                'agent_email': User.query.get(w.user_id).email,
-                'agent_phone': User.query.get(w.user_id).phone,
-                'amount': float(w.amount),
-                'mobile_money': w.description.split('to ')[-1] if 'to ' in w.description else 'N/A',
-                'reference': w.reference,
-                'created_at': w.created_at.isoformat(),
-                'status': w.status
-            } for w in withdrawals]
+            'success': True, 
+            'message': f'Payment rejected on {platform_name}',
+            'platform': platform,
+            'platform_name': platform_name
         })
+        
     except Exception as e:
-        print(f"Get withdrawals error: {e}")
-        return jsonify({'success': False, 'error': 'Failed to fetch withdrawals from Roamsmart'}), 500
-
-
-@app.route('/api/admin/withdrawals/<int:withdrawal_id>/approve', methods=['POST'])
-@token_required
-@admin_required
-def approve_admin_withdrawal(withdrawal_id):
-    """Approve withdrawal request - Email ONLY"""
-    try:
-        withdrawal = Transaction.query.get(withdrawal_id)
-        
-        if not withdrawal or withdrawal.type != 'withdrawal':
-            return jsonify({'success': False, 'error': 'Withdrawal not found'}), 404
-        
-        user = User.query.get(withdrawal.user_id)
-        
-        if withdrawal.status == 'pending':
-            user.wallet_balance -= withdrawal.amount
-            withdrawal.status = 'completed'
-            withdrawal.balance_after = user.wallet_balance
-            withdrawal.updated_at = datetime.utcnow()
-            db.session.commit()
-        
-        # Send notification via Email ONLY
-        send_email(
-            user.email,
-            f"💰 Withdrawal Processed - {withdrawal.reference} - {COMPANY_NAME}",
-            f"""
-            <div style="font-family: Arial, sans-serif;">
-                <h2 style="color: #28a745;">Withdrawal Completed</h2>
-                <p>Dear {user.username},</p>
-                <p>Your withdrawal request has been processed successfully.</p>
-                <p><strong>Amount:</strong> GHS {withdrawal.amount:.2f}</p>
-                <p><strong>Mobile Money:</strong> {withdrawal.description.split('to ')[-1] if 'to ' in withdrawal.description else 'N/A'}</p>
-                <p><strong>Reference:</strong> {withdrawal.reference}</p>
-                <p><strong>New Balance:</strong> GHS {user.wallet_balance:.2f}</p>
-                <p>Funds should reflect in your mobile money account within 24 hours.</p>
-            </div>
-            """
-        )
-        
-        log_activity(g.current_user.id, 'approve_withdrawal', f'Approved withdrawal {withdrawal.reference} for {user.email}')
-        
-        return jsonify({'success': True, 'message': f'Withdrawal approved on {COMPANY_NAME}'})
-    except Exception as e:
-        print(f"Approve withdrawal error: {e}")
+        print(f"[REJECT MANUAL PAYMENT ERROR] {e}")
+        import traceback
+        traceback.print_exc()
         db.session.rollback()
-        return jsonify({'success': False, 'error': 'Failed to approve withdrawal'}), 500
+        return jsonify({'success': False, 'error': f'Failed to reject payment on {platform_name}'}), 500
 
-
-@app.route('/api/admin/withdrawals/<int:withdrawal_id>/reject', methods=['POST'])
-@token_required
-@admin_required
-def reject_admin_withdrawal(withdrawal_id):
-    """Reject withdrawal request - Email ONLY"""
-    try:
-        withdrawal = Transaction.query.get(withdrawal_id)
-        
-        if not withdrawal or withdrawal.type != 'withdrawal':
-            return jsonify({'success': False, 'error': 'Withdrawal not found'}), 404
-        
-        user = User.query.get(withdrawal.user_id)
-        
-        withdrawal.status = 'rejected'
-        withdrawal.updated_at = datetime.utcnow()
-        db.session.commit()
-        
-        # Send notification via Email ONLY
-        send_email(
-            user.email,
-            f"❌ Withdrawal Rejected - {withdrawal.reference} - {COMPANY_NAME}",
-            f"""
-            <div style="font-family: Arial, sans-serif;">
-                <h2 style="color: #dc3545;">Withdrawal Request Rejected</h2>
-                <p>Dear {user.username},</p>
-                <p>Your withdrawal request has been rejected.</p>
-                <p><strong>Amount:</strong> GHS {withdrawal.amount:.2f}</p>
-                <p><strong>Reference:</strong> {withdrawal.reference}</p>
-                <p><strong>Possible reasons:</strong></p>
-                <ul>
-                    <li>Insufficient balance</li>
-                    <li>Invalid mobile money number</li>
-                    <li>Pending verification</li>
-                </ul>
-                <p>Please contact support for more information.</p>
-                <p>Support: {COMPANY_PHONE}</p>
-            </div>
-            """
-        )
-        
-        log_activity(g.current_user.id, 'reject_withdrawal', f'Rejected withdrawal {withdrawal.reference}')
-        
-        return jsonify({'success': True, 'message': 'Withdrawal rejected'})
-    except Exception as e:
-        print(f"Reject withdrawal error: {e}")
-        db.session.rollback()
-        return jsonify({'success': False, 'error': 'Failed to reject withdrawal'}), 500
-
-
-# ========== ADMIN ANNOUNCEMENT ROUTES ==========
 
 def get_or_create_price_password():
     """Get or create price management password hash and salt"""
@@ -13586,40 +21247,50 @@ def get_predictions():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
-# ========== ADMIN EXPORT ROUTES ==========
-
 @app.route('/api/admin/export/users', methods=['GET'])
 @token_required
 @super_admin_required
 def export_users():
-    """Export users data to CSV and send via email"""
+    """Export users data to CSV and send via email - AFDALNOVA"""
     try:
         import csv
         from io import StringIO, BytesIO
         from flask import send_file
         
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        primary_color = platform_config.get('primary_color', '#1A2A6C')
+        
         export_format = request.args.get('format', 'csv')
         
-        users = User.query.all()
+        # Filter users by platform
+        users = User.query.filter_by(platform=platform).all()
         
         output = StringIO()
         writer = csv.writer(output)
         
         writer.writerow(['ID', 'Username', 'Email', 'Phone', 'Role', 'Wallet Balance', 
                         'Is Agent', 'Agent Approved', 'Agent Tier', 'Created At', 'Last Login', 
-                        'Total Orders', 'Total Spent'])
+                        'Total Orders', 'Total Spent', 'Platform'])
         
         for user in users:
-            total_orders = Order.query.filter_by(user_id=user.id, status='completed').count()
+            total_orders = Order.query.filter_by(
+                user_id=user.id, 
+                status='completed',
+                platform=platform
+            ).count()
             total_spent = db.session.query(db.func.sum(Order.amount)).filter_by(
-                user_id=user.id, status='completed'
+                user_id=user.id, 
+                status='completed',
+                platform=platform
             ).scalar() or 0
             
             writer.writerow([
                 user.id, user.username, user.email, user.phone, user.role,
                 user.wallet_balance, user.is_agent, user.agent_approved,
                 user.agent_tier or 'N/A', user.created_at, user.last_login or 'Never',
-                total_orders, total_spent
+                total_orders, total_spent, platform_name
             ])
         
         if export_format == 'csv':
@@ -13628,34 +21299,45 @@ def export_users():
                 BytesIO(output.getvalue().encode('utf-8')),
                 mimetype='text/csv',
                 as_attachment=True,
-                download_name=f"roamsmart_users_export_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
+                download_name=f"afdalnova_users_export_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
             )
         else:
             send_email(
                 g.current_user.email,
-                f"User Export - {COMPANY_NAME}",
+                f"User Export - {platform_name}",
                 f"""
-                <h3>User Data Export Completed - {COMPANY_NAME}</h3>
-                <p>Your requested user export has been processed.</p>
-                <p><strong>Total Users:</strong> {len(users)}</p>
-                <p><strong>Format:</strong> CSV</p>
-                <p><strong>Export Date:</strong> {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC</p>
+                <div style="font-family: Arial, sans-serif;">
+                    <div style="background: {primary_color}; color: white; padding: 15px; text-align: center;">
+                        <h3>User Data Export Completed - {platform_name}</h3>
+                    </div>
+                    <div style="background: #f9f9f9; padding: 20px;">
+                        <p>Your requested user export has been processed.</p>
+                        <p><strong>Total Users:</strong> {len(users)}</p>
+                        <p><strong>Format:</strong> CSV</p>
+                        <p><strong>Platform:</strong> {platform_name}</p>
+                        <p><strong>Export Date:</strong> {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC</p>
+                    </div>
+                </div>
                 """
             )
             
-            log_activity(g.current_user.id, 'export_users', f'Exported {len(users)} users')
+            log_activity(g.current_user.id, 'export_users', f'Exported {len(users)} users from {platform_name}', platform=platform)
             
             return jsonify({
                 'success': True,
-                'message': f'User export sent to your email from {COMPANY_NAME}',
+                'message': f'User export sent to your email from {platform_name}',
                 'data': {
                     'total_users': len(users),
-                    'format': 'csv'
+                    'format': 'csv',
+                    'platform': platform,
+                    'platform_name': platform_name
                 }
             })
         
     except Exception as e:
-        print(f"Export users error: {e}")
+        print(f"[EXPORT USERS ERROR] {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
@@ -13663,17 +21345,22 @@ def export_users():
 @token_required
 @super_admin_required
 def export_orders():
-    """Export orders data to CSV and send via email"""
+    """Export orders data to CSV and send via email - AFDALNOVA"""
     try:
         import csv
         from io import StringIO, BytesIO
         from flask import send_file
         
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        primary_color = platform_config.get('primary_color', '#1A2A6C')
+        
         start_date = request.args.get('start_date')
         end_date = request.args.get('end_date')
         export_format = request.args.get('format', 'csv')
         
-        query = Order.query
+        query = Order.query.filter_by(platform=platform)
         
         if start_date:
             query = query.filter(Order.created_at >= datetime.fromisoformat(start_date))
@@ -13687,7 +21374,7 @@ def export_orders():
         
         writer.writerow(['Order ID', 'User ID', 'Username', 'Type', 'Network', 'Size (GB)', 
                         'Phone Number', 'Amount', 'Quantity', 'Status', 'Payment Method',
-                        'Created At', 'Completed At'])
+                        'Created At', 'Completed At', 'Platform'])
         
         for order in orders:
             user = User.query.get(order.user_id)
@@ -13695,7 +21382,7 @@ def export_orders():
                 order.order_id, order.user_id, user.username if user else 'N/A',
                 order.type, order.network, order.size_gb, order.phone_number,
                 order.amount, order.quantity, order.status, order.payment_method,
-                order.created_at, order.completed_at or 'Pending'
+                order.created_at, order.completed_at or 'Pending', platform_name
             ])
         
         if export_format == 'csv':
@@ -13704,36 +21391,47 @@ def export_orders():
                 BytesIO(output.getvalue().encode('utf-8')),
                 mimetype='text/csv',
                 as_attachment=True,
-                download_name=f"roamsmart_orders_export_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
+                download_name=f"afdalnova_orders_export_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
             )
         else:
             total_revenue = sum(o.amount for o in orders if o.status == 'completed')
             
             send_email(
                 g.current_user.email,
-                f"Orders Export - {COMPANY_NAME}",
+                f"Orders Export - {platform_name}",
                 f"""
-                <h3>Orders Data Export Completed - {COMPANY_NAME}</h3>
-                <p><strong>Total Orders:</strong> {len(orders)}</p>
-                <p><strong>Total Revenue:</strong> GHS {total_revenue:.2f}</p>
-                <p><strong>Date Range:</strong> {start_date or 'All'} to {end_date or 'Present'}</p>
+                <div style="font-family: Arial, sans-serif;">
+                    <div style="background: {primary_color}; color: white; padding: 15px; text-align: center;">
+                        <h3>Orders Data Export Completed - {platform_name}</h3>
+                    </div>
+                    <div style="background: #f9f9f9; padding: 20px;">
+                        <p><strong>Total Orders:</strong> {len(orders)}</p>
+                        <p><strong>Total Revenue:</strong> GHS {total_revenue:.2f}</p>
+                        <p><strong>Platform:</strong> {platform_name}</p>
+                        <p><strong>Date Range:</strong> {start_date or 'All'} to {end_date or 'Present'}</p>
+                    </div>
+                </div>
                 """
             )
             
-            log_activity(g.current_user.id, 'export_orders', f'Exported {len(orders)} orders')
+            log_activity(g.current_user.id, 'export_orders', f'Exported {len(orders)} orders from {platform_name}', platform=platform)
             
             return jsonify({
                 'success': True,
-                'message': f'Orders export sent to your email from {COMPANY_NAME}',
+                'message': f'Orders export sent to your email from {platform_name}',
                 'data': {
                     'total_orders': len(orders),
                     'total_revenue': total_revenue,
-                    'format': 'csv'
+                    'format': 'csv',
+                    'platform': platform,
+                    'platform_name': platform_name
                 }
             })
         
     except Exception as e:
-        print(f"Export orders error: {e}")
+        print(f"[EXPORT ORDERS ERROR] {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
@@ -13743,15 +21441,19 @@ def export_orders():
 @token_required
 @admin_required
 def get_all_orders():
-    """Get all orders for admin with pagination and filtering"""
+    """Get all orders for admin with pagination and filtering - AFDALNOVA"""
     try:
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        
         page = request.args.get('page', 1, type=int)
         per_page = request.args.get('limit', 50, type=int)
         status = request.args.get('status')
         start_date = request.args.get('start_date')
         end_date = request.args.get('end_date')
         
-        query = Order.query
+        query = Order.query.filter_by(platform=platform)
         
         if status:
             query = query.filter_by(status=status)
@@ -13766,16 +21468,14 @@ def get_all_orders():
         
         orders_data = []
         for order in pagination.items:
-            
             if order.user_id:
                 user = db.session.get(User, order.user_id)
                 username = user.username if user else 'Unknown'
                 user_email = user.email if user else 'Unknown'
                 user_phone = user.phone if user else 'Unknown'
             else:
-                
                 username = 'Guest (Store Customer)'
-                user_email = 'guest@store.roamsmart.shop'
+                user_email = 'guest@store.afdalnova.com'
                 user_phone = order.phone_number or 'Unknown'
             
             orders_data.append({
@@ -13783,7 +21483,7 @@ def get_all_orders():
                 'username': username,
                 'user_email': user_email,
                 'user_phone': user_phone,
-                'platform': COMPANY_NAME
+                'platform': platform_name
             })
         
         return jsonify({
@@ -13793,10 +21493,13 @@ def get_all_orders():
             'page': page,
             'total_pages': pagination.pages,
             'has_next': pagination.has_next,
-            'has_prev': pagination.has_prev
+            'has_prev': pagination.has_prev,
+            'platform': platform,
+            'platform_name': platform_name
         })
+        
     except Exception as e:
-        print(f"Get all orders error: {e}")
+        print(f"[GET ALL ORDERS ERROR] {e}")
         import traceback
         traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -13806,13 +21509,18 @@ def get_all_orders():
 @token_required
 @admin_required
 def get_recent_activities():
-    """Get recent activities for admin dashboard"""
+    """Get recent activities for admin dashboard - AFDALNOVA"""
     try:
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        
         limit = request.args.get('limit', 50, type=int)
         
-        activities = ActivityLog.query.order_by(
-            ActivityLog.created_at.desc()
-        ).limit(limit).all()
+        # Filter activities by platform
+        activities = ActivityLog.query.filter_by(
+            platform=platform
+        ).order_by(ActivityLog.created_at.desc()).limit(limit).all()
         
         result = []
         for a in activities:
@@ -13822,13 +21530,19 @@ def get_recent_activities():
                 'type': a.action.split('_')[0] if '_' in a.action else a.action,
                 'message': a.details or a.action,
                 'user': user.username if user else 'System',
-                'platform': COMPANY_NAME,
+                'platform': platform_name,
                 'created_at': a.created_at.isoformat()
             })
         
-        return jsonify({'success': True, 'data': result})
+        return jsonify({
+            'success': True, 
+            'data': result,
+            'platform': platform,
+            'platform_name': platform_name
+        })
+        
     except Exception as e:
-        print(f"Get recent activities error: {e}")
+        print(f"[RECENT ACTIVITIES ERROR] {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
@@ -13836,11 +21550,19 @@ def get_recent_activities():
 @token_required
 @admin_required
 def get_kyc_requests():
-    """Get KYC verification requests"""
+    """Get KYC verification requests - AFDALNOVA with platform filtering"""
     try:
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        
         status = request.args.get('status', 'pending')
         
-        kyc_requests = KYCDocument.query.filter_by(status=status).all()
+        # Filter KYC requests by platform
+        kyc_requests = KYCDocument.query.filter_by(
+            status=status,
+            platform=platform
+        ).all()
         
         result = []
         for kyc in kyc_requests:
@@ -13855,12 +21577,19 @@ def get_kyc_requests():
                 'document_number': kyc.document_number,
                 'document_url': kyc.document_url,
                 'status': kyc.status,
-                'created_at': kyc.created_at.isoformat()
+                'created_at': kyc.created_at.isoformat(),
+                'platform': platform_name
             })
         
-        return jsonify({'success': True, 'data': result})
+        return jsonify({
+            'success': True, 
+            'data': result,
+            'platform': platform,
+            'platform_name': platform_name
+        })
+        
     except Exception as e:
-        print(f"Get KYC requests error: {e}")
+        print(f"[KYC REQUESTS ERROR] {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
@@ -13868,8 +21597,14 @@ def get_kyc_requests():
 @token_required
 @admin_required
 def verify_kyc_request(request_id):
-    """Verify or reject KYC request - Email ONLY"""
+    """Verify or reject KYC request - Must belong to admin's platform"""
     try:
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        primary_color = platform_config.get('primary_color', '#1A2A6C')
+        support_phone = platform_config.get('support_phone', '0548247241')
+        
         data = request.get_json()
         status = data.get('status')
         reason = data.get('reason', '')
@@ -13877,6 +21612,13 @@ def verify_kyc_request(request_id):
         kyc = KYCDocument.query.get(request_id)
         if not kyc:
             return jsonify({'success': False, 'error': 'KYC request not found'}), 404
+        
+        # CRITICAL: Check if KYC belongs to this platform
+        if kyc.platform != platform:
+            return jsonify({
+                'success': False, 
+                'error': f'KYC request does not belong to {platform_name}'
+            }), 403
         
         if kyc.status != 'pending':
             return jsonify({'success': False, 'error': 'KYC already processed'}), 400
@@ -13890,6 +21632,7 @@ def verify_kyc_request(request_id):
             user = User.query.get(kyc.user_id)
             if user:
                 user.kyc_verified = True
+                user.platform = platform
         
         db.session.commit()
         
@@ -13897,23 +21640,36 @@ def verify_kyc_request(request_id):
         if user:
             send_email(
                 user.email,
-                f"KYC {status.upper()} - {COMPANY_NAME}",
+                f"KYC {status.upper()} - {platform_name}",
                 f"""
                 <div style="font-family: Arial, sans-serif;">
-                    <h3>KYC Verification {status.upper()} - {COMPANY_NAME}</h3>
-                    <p>Dear {user.username},</p>
-                    <p>Your KYC document has been {status}.</p>
-                    {f'<p><strong>Reason:</strong> {reason}</p>' if reason else ''}
-                    <p>Thank you for your cooperation.</p>
+                    <div style="background: {primary_color if status == 'approved' else '#dc3545'}; color: white; padding: 15px; text-align: center;">
+                        <h3>KYC Verification {status.upper()} - {platform_name}</h3>
+                    </div>
+                    <div style="background: #f9f9f9; padding: 20px;">
+                        <p>Dear {user.username},</p>
+                        <p>Your KYC document has been {status}.</p>
+                        {f'<p><strong>Reason:</strong> {reason}</p>' if reason else ''}
+                        <p>Thank you for your cooperation.</p>
+                        {f'<p>Need help? Contact support: {support_phone}</p>' if status == 'rejected' else ''}
+                    </div>
                 </div>
                 """
             )
         
-        log_activity(g.current_user.id, 'verify_kyc', f'KYC {status} for user {kyc.user_id}')
+        log_activity(g.current_user.id, 'verify_kyc', f'KYC {status} for user {kyc.user_id} on {platform_name}', platform=platform)
         
-        return jsonify({'success': True, 'message': f'KYC {status} successfully on {COMPANY_NAME}'})
+        return jsonify({
+            'success': True, 
+            'message': f'KYC {status} successfully on {platform_name}',
+            'platform': platform,
+            'platform_name': platform_name
+        })
+        
     except Exception as e:
-        print(f"Verify KYC error: {e}")
+        print(f"[VERIFY KYC ERROR] {e}")
+        import traceback
+        traceback.print_exc()
         db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
 
@@ -13921,23 +21677,25 @@ def verify_kyc_request(request_id):
 @app.route('/api/admin/waec/vouchers', methods=['GET'])
 @token_required
 @admin_required
-def get_waec_admin_Svouchers():
-    """Get WAEC vouchers for admin with filtering"""
+def get_waec_admin_vouchers():
+    """Get WAEC vouchers for admin with filtering - AFDALNOVA"""
     try:
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        
         exam_type = request.args.get('exam_type')
         is_used = request.args.get('is_used')
         limit = request.args.get('limit', 100, type=int)
         
-        query = WAECVoucher.query
+        query = WAECVoucher.query.filter_by(platform=platform)
         
         if exam_type:
             query = query.filter_by(exam_type=exam_type)
         if is_used is not None:
             query = query.filter_by(is_used=is_used.lower() == 'true')
         
-        vouchers = query.order_by(
-            WAECVoucher.created_at.desc()
-        ).limit(limit).all()
+        vouchers = query.order_by(WAECVoucher.created_at.desc()).limit(limit).all()
         
         result = []
         for v in vouchers:
@@ -13959,12 +21717,19 @@ def get_waec_admin_Svouchers():
                 'used_by_name': user.username if user else None,
                 'used_at': v.used_at.isoformat() if v.used_at else None,
                 'expires_at': v.expires_at.isoformat() if v.expires_at else None,
-                'created_at': v.created_at.isoformat()
+                'created_at': v.created_at.isoformat(),
+                'platform': platform_name
             })
         
-        return jsonify({'success': True, 'data': result})
+        return jsonify({
+            'success': True, 
+            'data': result,
+            'platform': platform,
+            'platform_name': platform_name
+        })
+        
     except Exception as e:
-        print(f"Get WAEC vouchers error: {e}")
+        print(f"[WAEC VOUCHERS ERROR] {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
@@ -13972,20 +21737,27 @@ def get_waec_admin_Svouchers():
 @token_required
 @admin_required
 def get_waec_stats():
-    """Get WAEC statistics"""
+    """Get WAEC statistics - AFDALNOVA with platform filtering"""
     try:
-        total = WAECVoucher.query.count()
-        used = WAECVoucher.query.filter_by(is_used=True).count()
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        
+        total = WAECVoucher.query.filter_by(platform=platform).count()
+        used = WAECVoucher.query.filter_by(is_used=True, platform=platform).count()
         available = total - used
         
         by_exam_type = db.session.query(
             WAECVoucher.exam_type,
             db.func.count(WAECVoucher.id).label('total'),
             db.func.sum(db.case((WAECVoucher.is_used == True, 1), else_=0)).label('used')
+        ).filter(
+            WAECVoucher.platform == platform
         ).group_by(WAECVoucher.exam_type).all()
         
         total_revenue = db.session.query(db.func.sum(WAECVoucher.retail_price)).filter(
-            WAECVoucher.is_used == True
+            WAECVoucher.is_used == True,
+            WAECVoucher.platform == platform
         ).scalar() or 0
         
         return jsonify({
@@ -14001,35 +21773,1150 @@ def get_waec_stats():
                     'used': item[2],
                     'available': item[1] - item[2]
                 } for item in by_exam_type]
-            }
+            },
+            'platform': platform,
+            'platform_name': platform_name
         })
+        
     except Exception as e:
-        print(f"Get WAEC stats error: {e}")
+        print(f"[WAEC STATS ERROR] {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
+
+
+    
+@app.route('/api/agent/bills/history', methods=['GET'])
+@token_required
+@agent_required  # Make sure this decorator exists or check is_agent flag
+def agent_bill_history():
+    """Get agent's bill payment history for their customers"""
+    try:
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('limit', 20, type=int)
+        
+        # Get bills from agent's sales (where agent_id matches)
+        bills = Order.query.filter_by(
+            agent_id=g.current_user.id,
+            type='bill_payment'
+        ).order_by(Order.created_at.desc()).paginate(
+            page=page, per_page=per_page, error_out=False
+        )
+        
+        return jsonify({
+            'success': True,
+            'data': [{
+                'id': b.id,
+                'order_id': b.order_id,
+                'biller_code': b.biller_code,
+                'biller_name': b.biller_name,
+                'account_number': b.account_number,
+                'customer_name': b.customer_name,
+                'customer_phone': b.phone_number,
+                'amount': float(b.amount),
+                'commission': float(b.commission) if hasattr(b, 'commission') else 0,
+                'status': b.status,
+                'reference': b.provider_reference,
+                'created_at': b.created_at.isoformat()
+            } for b in bills.items],
+            'total': bills.total,
+            'page': page,
+            'total_pages': bills.pages
+        })
+        
+    except Exception as e:
+        print(f"Error fetching agent bill history: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/agent/bills/recurring', methods=['GET'])
+@token_required
+@agent_required
+def agent_recurring_bills():
+    """Get recurring bills for agent's customers"""
+    try:
+        # Get all customers of this agent
+        customers = Customer.query.filter_by(agent_id=g.current_user.id).all()
+        
+        # If no customers found, return empty list
+        if not customers:
+            return jsonify({
+                'success': True,
+                'data': [],
+                'message': 'No customers found for this agent'
+            })
+        
+        # Get customer phone numbers
+        customer_phones = [c.phone for c in customers]
+        
+        # Get all users that are customers of this agent
+        users = User.query.filter(User.phone.in_(customer_phones)).all()
+        user_ids = [u.id for u in users]
+        
+        if not user_ids:
+            return jsonify({
+                'success': True,
+                'data': [],
+                'message': 'No users found for customers'
+            })
+        
+        # Get recurring bills for these users
+        # Using user_id (correct field name)
+        recurring_bills = RecurringBill.query.filter(
+            RecurringBill.user_id.in_(user_ids),
+            RecurringBill.enabled == True
+        ).order_by(RecurringBill.next_due_date.asc()).all()
+        
+        # Format response
+        result = []
+        for bill in recurring_bills:
+            result.append({
+                'id': bill.id,
+                'user_id': bill.user_id,
+                'customer_name': bill.customer_name or 'N/A',
+                'customer_phone': next((c.phone for c in customers if c.id == bill.user_id), 'N/A'),
+                'biller_code': bill.biller_code,
+                'biller_name': bill.biller_name,
+                'account_number': bill.account_number,
+                'amount': float(bill.max_amount or 0),
+                'frequency': bill.frequency,
+                'auto_pay': bill.auto_pay,
+                'enabled': bill.enabled,
+                'next_due_date': bill.next_due_date.isoformat() if bill.next_due_date else None,
+                'last_paid_date': bill.last_paid_date.isoformat() if bill.last_paid_date else None,
+                'created_at': bill.created_at.isoformat() if bill.created_at else None,
+                'updated_at': bill.updated_at.isoformat() if bill.updated_at else None
+            })
+        
+        return jsonify({
+            'success': True,
+            'data': result,
+            'total': len(result)
+        })
+        
+    except Exception as e:
+        print(f"Error fetching recurring bills: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/agent/bills/recurring', methods=['POST'])
+@token_required
+@agent_required
+def create_recurring_bill():
+    """Create a recurring bill for a customer"""
+    try:
+        data = request.get_json()
+        
+        customer_phone = data.get('customer_phone')
+        customer_name = data.get('customer_name')
+        biller_code = data.get('biller_code')
+        biller_name = data.get('biller_name')
+        account_number = data.get('account_number')
+        amount = float(data.get('amount', 0))
+        frequency = data.get('frequency', 'monthly')
+        auto_pay = data.get('auto_pay', True)
+        
+        if not customer_phone:
+            return jsonify({'success': False, 'error': 'Customer phone is required'}), 400
+        
+        if not biller_code or not account_number:
+            return jsonify({'success': False, 'error': 'Biller code and account number required'}), 400
+        
+        # Find the user by phone
+        user = User.query.filter_by(phone=customer_phone).first()
+        
+        if not user:
+            return jsonify({'success': False, 'error': f'User with phone {customer_phone} not found'}), 404
+        
+        # Check if this customer belongs to this agent
+        customer = Customer.query.filter_by(
+            phone=customer_phone,
+            agent_id=g.current_user.id
+        ).first()
+        
+        if not customer:
+            return jsonify({'success': False, 'error': 'This customer is not associated with you'}), 403
+        
+        # Calculate next due date based on frequency
+        from dateutil.relativedelta import relativedelta
+        
+        today = datetime.utcnow()
+        if frequency == 'weekly':
+            next_due = today + relativedelta(weeks=1)
+        elif frequency == 'monthly':
+            next_due = today + relativedelta(months=1)
+        elif frequency == 'quarterly':
+            next_due = today + relativedelta(months=3)
+        else:
+            next_due = today + relativedelta(months=1)
+        
+        # Create recurring bill
+        recurring = RecurringBill(
+            user_id=user.id,
+            biller_code=biller_code,
+            biller_name=biller_name,
+            account_number=account_number,
+            customer_name=customer_name or user.username,
+            frequency=frequency,
+            auto_pay=auto_pay,
+            max_amount=amount,
+            enabled=True,
+            next_due_date=next_due
+        )
+        
+        db.session.add(recurring)
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': 'Recurring bill created successfully',
+            'data': {
+                'id': recurring.id,
+                'user_id': recurring.user_id,
+                'customer_phone': customer_phone,
+                'customer_name': recurring.customer_name,
+                'biller_name': biller_name,
+                'amount': amount,
+                'frequency': frequency,
+                'next_due_date': next_due.isoformat()
+            }
+        })
+        
+    except Exception as e:
+        print(f"Error creating recurring bill: {e}")
+        db.session.rollback()
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/agent/bills/recurring/<int:bill_id>', methods=['PUT'])
+@token_required
+@agent_required
+def update_recurring_bill(bill_id):
+    """Update a recurring bill"""
+    try:
+        data = request.get_json()
+        
+        recurring = RecurringBill.query.get(bill_id)
+        if not recurring:
+            return jsonify({'success': False, 'error': 'Recurring bill not found'}), 404
+        
+        # Check if this bill belongs to a customer of this agent
+        user = User.query.get(recurring.user_id)
+        if not user:
+            return jsonify({'success': False, 'error': 'User not found'}), 404
+        
+        customer = Customer.query.filter_by(
+            phone=user.phone,
+            agent_id=g.current_user.id
+        ).first()
+        
+        if not customer:
+            return jsonify({'success': False, 'error': 'You do not have permission to modify this bill'}), 403
+        
+        # Update fields
+        if 'enabled' in data:
+            recurring.enabled = data['enabled']
+        if 'auto_pay' in data:
+            recurring.auto_pay = data['auto_pay']
+        if 'max_amount' in data:
+            recurring.max_amount = float(data['max_amount'])
+        if 'frequency' in data:
+            recurring.frequency = data['frequency']
+        if 'account_number' in data:
+            recurring.account_number = data['account_number']
+        if 'customer_name' in data:
+            recurring.customer_name = data['customer_name']
+        
+        recurring.updated_at = datetime.utcnow()
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': 'Recurring bill updated successfully',
+            'data': {
+                'id': recurring.id,
+                'enabled': recurring.enabled,
+                'auto_pay': recurring.auto_pay,
+                'max_amount': float(recurring.max_amount or 0),
+                'frequency': recurring.frequency,
+                'next_due_date': recurring.next_due_date.isoformat() if recurring.next_due_date else None
+            }
+        })
+        
+    except Exception as e:
+        print(f"Error updating recurring bill: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/agent/bills/recurring/<int:bill_id>', methods=['DELETE'])
+@token_required
+@agent_required
+def delete_recurring_bill(bill_id):
+    """Delete a recurring bill (soft delete by setting enabled=False)"""
+    try:
+        recurring = RecurringBill.query.get(bill_id)
+        if not recurring:
+            return jsonify({'success': False, 'error': 'Recurring bill not found'}), 404
+        
+        # Check if this bill belongs to a customer of this agent
+        user = User.query.get(recurring.user_id)
+        if not user:
+            return jsonify({'success': False, 'error': 'User not found'}), 404
+        
+        customer = Customer.query.filter_by(
+            phone=user.phone,
+            agent_id=g.current_user.id
+        ).first()
+        
+        if not customer:
+            return jsonify({'success': False, 'error': 'You do not have permission to delete this bill'}), 403
+        
+        # Soft delete - disable the recurring bill
+        recurring.enabled = False
+        recurring.updated_at = datetime.utcnow()
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': 'Recurring bill disabled successfully'
+        })
+        
+    except Exception as e:
+        print(f"Error deleting recurring bill: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/agent/bills/stats', methods=['GET'])
+@token_required
+@agent_required
+def agent_bill_stats():
+    """Get bill payment statistics for agent"""
+    try:
+        # Total bill payments made by agent
+        total_bills = Order.query.filter_by(
+            agent_id=g.current_user.id,
+            type='bill_payment'
+        ).count()
+        
+        # Total bill amount
+        total_amount = db.session.query(db.func.sum(Order.amount)).filter(
+            Order.agent_id == g.current_user.id,
+            Order.type == 'bill_payment'
+        ).scalar() or 0
+        
+        # Total commission earned
+        total_commission = db.session.query(db.func.sum(Order.commission)).filter(
+            Order.agent_id == g.current_user.id,
+            Order.type == 'bill_payment'
+        ).scalar() or 0
+        
+        # Bills by status
+        completed_bills = Order.query.filter_by(
+            agent_id=g.current_user.id,
+            type='bill_payment',
+            status='completed'
+        ).count()
+        
+        pending_bills = Order.query.filter_by(
+            agent_id=g.current_user.id,
+            type='bill_payment',
+            status='pending'
+        ).count()
+        
+        failed_bills = Order.query.filter_by(
+            agent_id=g.current_user.id,
+            type='bill_payment',
+            status='failed'
+        ).count()
+        
+        # Recent bill payments (last 7 days)
+        seven_days_ago = datetime.utcnow() - timedelta(days=7)
+        recent_bills = Order.query.filter(
+            Order.agent_id == g.current_user.id,
+            Order.type == 'bill_payment',
+            Order.created_at >= seven_days_ago
+        ).count()
+        
+        # Get recurring bills count
+        customers = Customer.query.filter_by(agent_id=g.current_user.id).all()
+        customer_phones = [c.phone for c in customers]
+        users = User.query.filter(User.phone.in_(customer_phones)).all()
+        user_ids = [u.id for u in users]
+        
+        recurring_count = 0
+        if user_ids:
+            recurring_count = RecurringBill.query.filter(
+                RecurringBill.user_id.in_(user_ids),
+                RecurringBill.enabled == True
+            ).count()
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'total_bills': total_bills,
+                'total_amount': float(total_amount),
+                'total_commission': float(total_commission),
+                'completed_bills': completed_bills,
+                'pending_bills': pending_bills,
+                'failed_bills': failed_bills,
+                'recent_bills': recent_bills,
+                'recurring_bills': recurring_count
+            }
+        })
+        
+    except Exception as e:
+        print(f"Error fetching bill stats: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/agent/bills/pay', methods=['POST'])
+@token_required
+def agent_pay_bill():
+    """Process bill payment for a customer (agent version)"""
+    try:
+        import uuid
+        data = request.get_json()
+        
+        # Log the incoming request for debugging
+        print(f"\n📥 Received payment request:")
+        print(f"   Data: {data}")
+        
+        biller_code = data.get('biller_code')
+        account_number = data.get('account_number')
+        amount = data.get('amount')
+        customer_name = data.get('customer_name', 'Customer')
+        customer_phone = data.get('customer_phone')
+        customer_email = data.get('customer_email')
+        meter_number = data.get('meter_number')
+        session_id = data.get('session_id')
+        
+        # Validate required fields
+        missing_fields = []
+        if not biller_code:
+            missing_fields.append('biller_code')
+        if not account_number:
+            missing_fields.append('account_number')
+        if not amount:
+            missing_fields.append('amount')
+        
+        if missing_fields:
+            print(f"❌ Missing required fields: {missing_fields}")
+            return jsonify({
+                'success': False, 
+                'error': f'Missing required fields: {", ".join(missing_fields)}'
+            }), 400
+        
+        amount = float(amount)
+        
+        # Check if user is agent
+        if not g.current_user.is_agent:
+            return jsonify({'success': False, 'error': 'Agent access required'}), 403
+        
+        # Make customer_phone optional - use agent's phone as fallback
+        if not customer_phone:
+            customer_phone = g.current_user.phone or '0557388622'
+            print(f"⚠️ customer_phone not provided, using agent phone: {customer_phone}")
+        
+        # For ECG, require meter_number
+        if biller_code == 'ECG' and not meter_number:
+            meter_number = account_number
+            if not meter_number:
+                return jsonify({'success': False, 'error': 'Meter number required for ECG. Please select a meter.'}), 400
+        
+        # For GWCL, require meter_number and session_id
+        if biller_code == 'GWCL':
+            if not meter_number:
+                meter_number = account_number
+            if not session_id:
+                return jsonify({'success': False, 'error': 'Session ID required for Water bill. Please validate first.'}), 400
+        
+        # ========== CHECK HUBTEL BALANCE FIRST ==========
+        hubtel = HubtelService()
+        
+        if not hubtel.is_configured():
+            return jsonify({
+                'success': False,
+                'error': 'Hubtel service is not configured. Please contact support.',
+                'code': 'HUBTEL_NOT_CONFIGURED'
+            }), 503
+        
+        # Check disbursement balance
+        balance_result = hubtel.get_disbursement_balance()
+        hubtel_balance = 0
+        balance_available = False
+        
+        if balance_result.get('success'):
+            hubtel_balance = balance_result.get('balance', 0)
+            balance_available = True
+            print(f"[Hubtel] Current disbursement balance: GHS {hubtel_balance}")
+            
+            # Check if enough balance for this transaction
+            if hubtel_balance < amount:
+                return jsonify({
+                    'success': False,
+                    'error': f'Hubtel account balance is insufficient. Available: GHS {hubtel_balance:.2f}, Required: GHS {amount:.2f}',
+                    'suggestion': 'Please contact the admin to top up the Hubtel account.',
+                    'code': 'INSUFFICIENT_HUBTEL_BALANCE',
+                    'data': {
+                        'hubtel_balance': hubtel_balance,
+                        'required': amount,
+                        'shortfall': amount - hubtel_balance
+                    }
+                }), 400
+        else:
+            print(f"[Hubtel] Could not fetch balance: {balance_result.get('error')}")
+        
+        # ========== CHECK AGENT WALLET BALANCE ==========
+        # Store balance BEFORE any deduction
+        balance_before = g.current_user.wallet_balance
+        if balance_before < amount:
+            return jsonify({
+                'success': False,
+                'error': f'Insufficient wallet balance. Need GHS {amount:.2f}. Your balance: GHS {balance_before:.2f}'
+            }), 400
+        
+        # Calculate commission
+        commission_service = CommissionService()
+        service_type = commission_service.get_service_type(biller_code)
+        commission = commission_service.calculate_commission(amount, service_type)
+        
+        print(f"\n{'='*50}")
+        print(f"💰 BILL PAYMENT - AGENT VERSION")
+        print(f"{'='*50}")
+        print(f"Agent: {g.current_user.username} (ID: {g.current_user.id})")
+        print(f"Customer: {customer_name} ({customer_phone})")
+        print(f"Service: {service_type}")
+        print(f"Amount: GHS {amount}")
+        print(f"Meter Number: {meter_number}")
+        print(f"Session ID: {session_id}")
+        print(f"Hubtel Commission Rate: {commission['hubtel_rate']}%")
+        print(f"Total Commission: GHS {commission['total_commission']:.4f}")
+        print(f"Admin gets: GHS {commission['admin_commission']:.4f} (30%)")
+        print(f"Agent gets: GHS {commission['initiator_commission']:.4f} (70%)")
+        if balance_available:
+            print(f"Hubtel Balance: GHS {hubtel_balance:.2f}")
+        
+        # Process payment via Hubtel
+        callback_url = f"{os.environ.get('BASE_URL')}/api/webhooks/hubtel"
+        client_reference = f"AGENT-{uuid.uuid4().hex[:12].upper()}"
+        
+        payment_result = None
+        response_code = None
+        
+        try:
+            if biller_code == 'DSTV':
+                payment_result = hubtel.pay_dstv(account_number, amount, client_reference, callback_url)
+            elif biller_code == 'GOTV':
+                payment_result = hubtel.pay_gotv(account_number, amount, client_reference, callback_url)
+            elif biller_code == 'STARTIMES':
+                payment_result = hubtel.pay_startimes(account_number, amount, client_reference, callback_url)
+            elif biller_code == 'ECG':
+                if not meter_number:
+                    return jsonify({'success': False, 'error': 'Meter number required for ECG'}), 400
+                payment_result = hubtel.pay_ecg(customer_phone, meter_number, amount, client_reference, callback_url)
+            elif biller_code == 'GWCL':
+                if not meter_number or not session_id:
+                    return jsonify({'success': False, 'error': 'Meter number and session ID required for Water'}), 400
+                payment_result = hubtel.pay_water(meter_number, customer_phone, customer_email, session_id, amount, client_reference, callback_url)
+            else:
+                return jsonify({'success': False, 'error': f'Unsupported biller: {biller_code}'}), 400
+        except Exception as hubtel_error:
+            print(f"❌ Hubtel payment error: {hubtel_error}")
+            return jsonify({
+                'success': False, 
+                'error': f'Hubtel payment failed: {str(hubtel_error)}',
+                'code': 'HUBTEL_API_ERROR'
+            }), 400
+        
+        # ========== HANDLE HUBTEL PAYMENT RESULT ==========
+        if not payment_result:
+            return jsonify({
+                'success': False,
+                'error': 'No response from Hubtel. Please try again.',
+                'code': 'HUBTEL_NO_RESPONSE'
+            }), 400
+        
+        # Check for specific Hubtel error codes
+        response_code = payment_result.get('response_code') if isinstance(payment_result, dict) else None
+        
+        # ========== CHECK FOR FAILURE BEFORE DEDUCTING ==========
+        # Handle insufficient balance error (4075) - NO DEDUCTION
+        if response_code == '4075' or (isinstance(payment_result, dict) and 'Insufficient' in str(payment_result)):
+            # IMPORTANT: Do NOT deduct from wallet
+            return jsonify({
+                'success': False,
+                'error': 'Hubtel account balance is insufficient to process this payment.',
+                'suggestion': 'Please contact the admin to top up the Hubtel account.',
+                'code': 'INSUFFICIENT_HUBTEL_BALANCE',
+                'data': {
+                    'response_code': response_code,
+                    'response': payment_result,
+                    'wallet_balance': balance_before  # Balance unchanged
+                }
+            }), 400
+        
+        # Check if payment was successful
+        if not payment_result.get('success'):
+            error_msg = payment_result.get('error', 'Payment failed') if isinstance(payment_result, dict) else 'Unknown error'
+            
+            # IMPORTANT: Do NOT deduct from wallet on ANY failure
+            return jsonify({
+                'success': False,
+                'error': error_msg,
+                'code': response_code or 'PAYMENT_FAILED',
+                'data': {
+                    'wallet_balance': balance_before  # Balance unchanged
+                }
+            }), 400
+        
+        # ========== ONLY DEDUCT IF PAYMENT WAS SUCCESSFUL ==========
+        # Now we know the payment was successful, deduct from agent wallet
+        g.current_user.wallet_balance -= amount
+        balance_after = g.current_user.wallet_balance
+        
+        # Determine status based on response code
+        if response_code == '0000':
+            status = 'completed'
+        elif response_code == '0001':
+            status = 'pending'
+        else:
+            status = 'failed'
+            # If status is failed but payment_result said success, something is wrong
+            # Refund the amount
+            g.current_user.wallet_balance += amount
+            return jsonify({
+                'success': False,
+                'error': f'Payment failed with code: {response_code}',
+                'code': 'PAYMENT_STATUS_FAILED',
+                'data': {
+                    'refunded': True,
+                    'wallet_balance': g.current_user.wallet_balance
+                }
+            }), 400
+        
+        # Generate order ID
+        order_id = f"BILL-{uuid.uuid4().hex[:8].upper()}"
+        
+        biller_names = {
+            'DSTV': 'DSTV',
+            'GOTV': 'GoTV',
+            'STARTIMES': 'StarTimes',
+            'ECG': 'ECG Electricity',
+            'GWCL': 'Ghana Water'
+        }
+        
+        # Create order record
+        order = Order(
+            user_id=g.current_user.id,
+            agent_id=g.current_user.id,
+            order_id=order_id,
+            type='bill_payment',
+            biller_code=biller_code,
+            biller_name=biller_names.get(biller_code, biller_code),
+            account_number=account_number,
+            customer_name=customer_name,
+            phone_number=customer_phone,
+            amount=amount,
+            cost=0,
+            profit=commission['initiator_commission'] if status == 'completed' else 0,
+            status=status,
+            payment_method='wallet',
+            provider='hubtel',
+            provider_reference=payment_result.get('client_reference'),
+            provider_order_id=payment_result.get('transaction_id'),
+            hubtel_commission_rate=commission['hubtel_rate'],
+            total_commission=commission['total_commission'],
+            admin_commission=commission['admin_commission'],
+            initiator_commission=commission['initiator_commission'],
+            initiator_type='agent',
+            initiator_id=g.current_user.id,
+            completed_at=datetime.utcnow() if status == 'completed' else None,
+            created_at=datetime.utcnow()
+        )
+        db.session.add(order)
+        
+        # Create transaction record
+        transaction = Transaction(
+            user_id=g.current_user.id,
+            type='bill_payment_agent',
+            amount=amount,
+            balance_before=balance_before,
+            balance_after=balance_after,
+            description=f'Bill payment for {customer_name}: {biller_names.get(biller_code, biller_code)} - {account_number}',
+            reference=order_id,
+            status=status,
+            meta_data={
+                'biller_code': biller_code,
+                'biller_name': biller_names.get(biller_code, biller_code),
+                'account_number': account_number,
+                'meter_number': meter_number,
+                'customer_name': customer_name,
+                'customer_phone': customer_phone,
+                'response_code': response_code,
+                'hubtel_balance': hubtel_balance if balance_available else None,
+                'commission': {
+                    'hubtel_rate': commission['hubtel_rate'],
+                    'total': commission['total_commission'],
+                    'admin': commission['admin_commission'],
+                    'agent_earned': commission['initiator_commission']
+                }
+            }
+        )
+        db.session.add(transaction)
+        
+        db.session.commit()
+        
+        # Check referral completion
+        if status == 'completed':
+            customer_user = User.query.filter_by(phone=customer_phone).first()
+            
+            if customer_user:
+                previous_orders = Order.query.filter(
+                    Order.user_id == customer_user.id,
+                    Order.status == 'completed'
+                ).count()
+                
+                print(f"\n[REFERRAL CHECK - AGENT BILL PAYMENT]")
+                print(f"  Customer: {customer_user.username} (ID: {customer_user.id})")
+                print(f"  Previous completed orders: {previous_orders}")
+                print(f"  Referred by: {customer_user.referred_by}")
+                
+                if previous_orders == 0 and customer_user.referred_by:
+                    referrer = User.query.get(customer_user.referred_by)
+                    if referrer:
+                        referral = Referral.query.filter_by(
+                            referrer_id=referrer.id,
+                            referred_user_id=customer_user.id,
+                            status='pending'
+                        ).first()
+                        
+                        if referral:
+                            referral.status = 'completed'
+                            referral.completed_at = datetime.utcnow()
+                            
+                            points_awarded = POINTS_CONFIG['REFERRAL_POINTS']
+                            referrer.points_balance = (referrer.points_balance or 0) + points_awarded
+                            referrer.total_points_earned = (referrer.total_points_earned or 0) + points_awarded
+                            
+                            points_trans = PointsTransaction(
+                                user_id=referrer.id,
+                                points=points_awarded,
+                                type='referral_bonus',
+                                description=f'Referral bonus for {customer_user.username}\'s first bill payment (via agent)',
+                                reference=referral.referral_code,
+                                balance_after=referrer.points_balance
+                            )
+                            db.session.add(points_trans)
+                            
+                            db.session.commit()
+                            print(f"✅ Referral completed! {referrer.username} earned {points_awarded} point(s)")
+        
+        # Distribute commission
+        if status == 'completed':
+            distribution = commission_service.distribute_commission(
+                order_id=order_id,
+                commission_data=commission,
+                initiator_id=g.current_user.id,
+                initiator_type='agent'
+            )
+            db.session.refresh(g.current_user)
+            balance_after_with_commission = g.current_user.wallet_balance
+        else:
+            print(f"ℹ️ Commission will be distributed when payment is completed")
+            balance_after_with_commission = balance_after
+        
+        return jsonify({
+            'success': True,
+            'message': f'✅ Bill payment processed for {customer_name}! You earned GHS {commission["initiator_commission"]:.4f} commission!' if status == 'completed' else f'⏳ Bill payment pending for {customer_name}. You will earn commission when completed.',
+            'data': {
+                'order_id': order_id,
+                'reference': payment_result.get('client_reference'),
+                'transaction_id': payment_result.get('transaction_id'),
+                'amount': amount,
+                'biller_name': biller_names.get(biller_code, biller_code),
+                'account_number': account_number,
+                'meter_number': meter_number,
+                'customer_name': customer_name,
+                'customer_phone': customer_phone,
+                'status': status,
+                'response_code': response_code,
+                'balance_before': float(balance_before),
+                'amount_paid': float(amount),
+                'new_balance': float(balance_after_with_commission),
+                'commission_earned': float(commission['initiator_commission']) if status == 'completed' else 0,
+                'commission': {
+                    'hubtel_rate': commission['hubtel_rate'],
+                    'total': commission['total_commission'],
+                    'admin': commission['admin_commission'],
+                    'you_earned': commission['initiator_commission']
+                }
+            }
+        }), 200
+        
+    except Exception as e:
+        print(f"❌ Agent bill payment error: {e}")
+        import traceback
+        traceback.print_exc()
+        db.session.rollback()
+        # Ensure we don't leave any partial deductions
+        return jsonify({
+            'success': False, 
+            'error': 'An unexpected error occurred. Please try again.',
+            'code': 'INTERNAL_ERROR',
+            'data': {
+                'wallet_balance': g.current_user.wallet_balance
+            }
+        }), 500
+    
+@app.route('/api/agent/bills/validate', methods=['POST'])
+@token_required
+def agent_validate_bill():
+    """Validate bill for agent's customer"""
+    try:
+        data = request.get_json()
+        
+        print(f"\n📋 BILL VALIDATION REQUEST:")
+        print(f"   Data: {data}")
+        print(f"   User: {g.current_user.username} (Agent: {g.current_user.is_agent})")
+        
+        if not g.current_user.is_agent:
+            return jsonify({'success': False, 'error': 'Agent access required'}), 403
+        
+        biller_code = data.get('biller_code')
+        account_number = data.get('account_number')
+        phone_number = data.get('phone_number')
+        meter_number = data.get('meter_number')
+        
+        # Validate required fields
+        if not biller_code:
+            return jsonify({
+                'success': False, 
+                'error': 'Biller code is required'
+            }), 400
+        
+        if not account_number:
+            return jsonify({
+                'success': False, 
+                'error': 'Account number is required'
+            }), 400
+        
+        print(f"🔍 Validating bill:")
+        print(f"   Biller: {biller_code}")
+        print(f"   Account: {account_number}")
+        print(f"   Phone: {phone_number}")
+        print(f"   Meter: {meter_number}")
+        
+        # For ECG and Water, require phone number
+        if biller_code in ['ECG', 'GWCL'] and not phone_number:
+            return jsonify({
+                'success': False, 
+                'error': 'Phone number is required for ECG/Water validation'
+            }), 400
+        
+        # Initialize Hubtel service
+        hubtel = HubtelService()
+        
+        # Check if Hubtel is configured
+        if not hubtel.is_configured():
+            return jsonify({
+                'success': False, 
+                'error': 'Hubtel service is not configured. Please contact support.'
+            }), 503
+        
+        result = None
+        
+        # ========== DSTV ==========
+        if biller_code == 'DSTV':
+            result = hubtel.query_dstv(account_number)
+            print(f"📡 DSTV Query Result: {result}")
+            
+            if result and result.get('success'):
+                data = result.get('data', {})
+                amount_due = abs(float(data.get('amountDue', 0)))
+                
+                return jsonify({
+                    'success': True,
+                    'data': {
+                        'customer_name': data.get('name') or data.get('customer_name') or 'DSTV Customer',
+                        'account_number': account_number,
+                        'biller_name': 'DSTV',
+                        'amount_due': amount_due if amount_due > 0 else 0,
+                        'biller_code': biller_code
+                    }
+                })
+            else:
+                error_msg = result.get('error', 'DSTV account not found') if result else 'Unknown error'
+                return jsonify({'success': False, 'error': error_msg}), 400
+        
+        # ========== GoTV ==========
+        elif biller_code == 'GOTV':
+            result = hubtel.query_gotv(account_number)
+            print(f"📡 GoTV Query Result: {result}")
+            
+            if result and result.get('success'):
+                data = result.get('data', {})
+                amount_due = abs(float(data.get('amountDue', 0)))
+                
+                return jsonify({
+                    'success': True,
+                    'data': {
+                        'customer_name': data.get('name') or data.get('customer_name') or 'GoTV Customer',
+                        'account_number': account_number,
+                        'biller_name': 'GoTV',
+                        'amount_due': amount_due if amount_due > 0 else 0,
+                        'biller_code': biller_code
+                    }
+                })
+            else:
+                error_msg = result.get('error', 'GoTV account not found') if result else 'Unknown error'
+                return jsonify({'success': False, 'error': error_msg}), 400
+        
+        # ========== StarTimes ==========
+        elif biller_code == 'STARTIMES':
+            result = hubtel.query_startimes(account_number)
+            print(f"📡 StarTimes Query Result: {result}")
+            
+            if result and result.get('success'):
+                data = result.get('data', {})
+                
+                return jsonify({
+                    'success': True,
+                    'data': {
+                        'customer_name': data.get('Name') or data.get('customer_name') or 'StarTimes Customer',
+                        'account_number': account_number,
+                        'bouquet': data.get('Bouquet', ''),
+                        'biller_name': 'StarTimes',
+                        'amount_due': 0,
+                        'biller_code': biller_code
+                    }
+                })
+            else:
+                error_msg = result.get('error', 'StarTimes account not found') if result else 'Unknown error'
+                return jsonify({'success': False, 'error': error_msg}), 400
+        
+        # ========== ECG ==========
+        elif biller_code == 'ECG':
+            if not phone_number:
+                return jsonify({
+                    'success': False, 
+                    'error': 'Phone number is required to fetch ECG meters'
+                }), 400
+            
+            result = hubtel.query_ecg_meters(phone_number)
+            print(f"📡 ECG Query Result: {result}")
+            
+            if result and result.get('success'):
+                meters = result.get('meters', [])
+                
+                if not meters:
+                    return jsonify({
+                        'success': False,
+                        'error': 'No ECG meters found for this phone number'
+                    }), 400
+                
+                # Format meters for frontend
+                formatted_meters = []
+                for meter in meters:
+                    formatted_meters.append({
+                        'meter_number': meter.get('meter_number'),
+                        'customer_name': meter.get('customer_name'),
+                        'amount_due': abs(float(meter.get('amount_due', 0))),
+                        'address': meter.get('address', '')
+                    })
+                
+                return jsonify({
+                    'success': True,
+                    'data': {
+                        'meters': formatted_meters,
+                        'biller_name': 'ECG Electricity',
+                        'message': f'Found {len(meters)} meter(s) linked to this phone number',
+                        'biller_code': biller_code
+                    }
+                })
+            else:
+                error_msg = result.get('error', 'Failed to fetch ECG meters') if result else 'Unknown error'
+                return jsonify({'success': False, 'error': error_msg}), 400
+        
+        # ========== Ghana Water (GWCL) ==========
+        elif biller_code == 'GWCL':
+            if not phone_number:
+                return jsonify({
+                    'success': False, 
+                    'error': 'Phone number is required for water bill validation'
+                }), 400
+            
+            # Use meter_number if provided, otherwise use account_number
+            meter_id = meter_number or account_number
+            
+            if not meter_id:
+                return jsonify({
+                    'success': False, 
+                    'error': 'Meter number or account number is required for water bill'
+                }), 400
+            
+            result = hubtel.query_water(meter_id, phone_number)
+            print(f"📡 GWCL Query Result: {result}")
+            
+            if result and result.get('success'):
+                amount_due = abs(float(result.get('amount_due', 0)))
+                
+                return jsonify({
+                    'success': True,
+                    'data': {
+                        'customer_name': result.get('customer_name') or 'GWCL Customer',
+                        'amount_due': amount_due if amount_due > 0 else 0,
+                        'session_id': result.get('session_id'),
+                        'account_number': meter_id,
+                        'meter_number': meter_id,
+                        'biller_name': 'Ghana Water',
+                        'biller_code': biller_code
+                    }
+                })
+            else:
+                error_msg = result.get('error', 'Water account not found') if result else 'Unknown error'
+                return jsonify({'success': False, 'error': error_msg}), 400
+        
+        # ========== Unsupported Biller ==========
+        else:
+            return jsonify({
+                'success': False, 
+                'error': f'Unsupported biller: {biller_code}. Supported billers: DSTV, GOTV, STARTIMES, ECG, GWCL'
+            }), 400
+        
+    except Exception as e:
+        print(f"❌ Agent bill validation error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'success': False, 
+            'error': f'Validation error: {str(e)}'
+        }), 500
+
+
+
+
+
+@app.route('/api/user/commission-stats', methods=['GET'])
+@token_required
+def get_user_commission_stats():
+    """Get user's commission earnings statistics"""
+    try:
+        from models import Order, CommissionTransaction
+        from sqlalchemy import func
+        
+        # Get total commission from orders where user is initiator
+        total_commission = db.session.query(func.sum(Order.initiator_commission)).filter(
+            Order.initiator_id == g.current_user.id,
+            Order.status == 'completed'
+        ).scalar() or 0
+        
+        # Count bill payment commissions
+        bill_commission_count = Order.query.filter(
+            Order.initiator_id == g.current_user.id,
+            Order.type == 'bill_payment',
+            Order.status == 'completed'
+        ).count()
+        
+        # Count data sale commissions (if applicable)
+        data_commission_count = Order.query.filter(
+            Order.initiator_id == g.current_user.id,
+            Order.type == 'data',
+            Order.status == 'completed'
+        ).count()
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'total_commission_earned': float(total_commission),
+                'bill_commission_count': bill_commission_count,
+                'data_commission_count': data_commission_count
+            }
+        })
+        
+    except Exception as e:
+        print(f"Error getting commission stats: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/user/commission-transactions', methods=['GET'])
+@token_required
+def get_user_commission_transactions():
+    """Get list of commission transactions for the user"""
+    try:
+        from models import Order
+        
+        # Get all orders where user is initiator and has commission
+        orders = Order.query.filter(
+            Order.initiator_id == g.current_user.id,
+            Order.initiator_commission > 0,
+            Order.status == 'completed'
+        ).order_by(Order.created_at.desc()).limit(50).all()
+        
+        transactions = []
+        for order in orders:
+            transactions.append({
+                'id': order.id,
+                'order_id': order.order_id,
+                'type': order.type,
+                'biller_code': order.biller_code,
+                'biller_name': order.biller_name,
+                'amount': order.amount,
+                'hubtel_commission_rate': order.hubtel_commission_rate,
+                'commission_earned': order.initiator_commission,
+                'created_at': order.created_at.isoformat()
+            })
+        
+        return jsonify({
+            'success': True,
+            'data': transactions
+        })
+        
+    except Exception as e:
+        print(f"Error getting commission transactions: {e}")
+        return jsonify({'success': True, 'data': []}), 200
 
 @app.route('/api/admin/bill-payments', methods=['GET'])
 @token_required
 @admin_required
 def get_bill_payments():
-    """Get all bill payments for admin with filtering"""
+    """Get all bill payments for admin with filtering - Platform filtered"""
     try:
+        # Get platform info
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        
+        # Get query parameters
         page = request.args.get('page', 1, type=int)
         per_page = request.args.get('limit', 50, type=int)
         status = request.args.get('status')
         bill_type = request.args.get('bill_type')
+        user_id = request.args.get('user_id', type=int)
         
-        query = BillPayment.query
+        # Base query - filter by platform
+        query = BillPayment.query.filter_by(platform=platform)
         
+        # Apply filters
         if status:
             query = query.filter_by(status=status)
         if bill_type:
             query = query.filter_by(bill_type=bill_type)
+        if user_id:
+            query = query.filter_by(user_id=user_id)
         
+        # Paginate
         pagination = query.order_by(
             BillPayment.created_at.desc()
         ).paginate(page=page, per_page=per_page, error_out=False)
         
+        # Format response
         result = []
         for p in pagination.items:
             user = User.query.get(p.user_id)
@@ -14047,7 +22934,7 @@ def get_bill_payments():
                 'customer_name': p.customer_name,
                 'customer_phone': p.customer_phone,
                 'customer_email': p.customer_email,
-                'created_at': p.created_at.isoformat(),
+                'created_at': p.created_at.isoformat() if p.created_at else None,
                 'completed_at': p.completed_at.isoformat() if p.completed_at else None
             })
         
@@ -14056,12 +22943,1451 @@ def get_bill_payments():
             'data': result,
             'total': pagination.total,
             'page': page,
-            'total_pages': pagination.pages
+            'total_pages': pagination.pages,
+            'platform': platform,
+            'platform_name': platform_name
         })
+        
     except Exception as e:
-        print(f"Get bill payments error: {e}")
+        print(f"[BILL PAYMENTS ERROR] {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
+
+# ========== USER BILL PAYMENT ENDPOINTS ==========
+
+@app.route('/api/user/bills/validate', methods=['POST'])
+@token_required
+def user_validate_bill():
+    """Validate bill for a regular user (not agent)"""
+    try:
+        data = request.get_json()
+        
+        print(f"\n📋 USER BILL VALIDATION REQUEST:")
+        print(f"   Data: {data}")
+        print(f"   User: {g.current_user.username} (ID: {g.current_user.id})")
+        
+        biller_code = data.get('biller_code')
+        account_number = data.get('account_number')
+        phone_number = data.get('phone_number')
+        meter_number = data.get('meter_number')
+        
+        # Validate required fields
+        if not biller_code:
+            return jsonify({
+                'success': False, 
+                'error': 'Biller code is required'
+            }), 400
+        
+        if not account_number:
+            return jsonify({
+                'success': False, 
+                'error': 'Account number is required'
+            }), 400
+        
+        # For ECG and Water, require phone number
+        if biller_code in ['ECG', 'GWCL'] and not phone_number:
+            return jsonify({
+                'success': False, 
+                'error': 'Phone number is required for ECG/Water validation'
+            }), 400
+        
+        print(f"🔍 Validating bill:")
+        print(f"   Biller: {biller_code}")
+        print(f"   Account: {account_number}")
+        print(f"   Phone: {phone_number}")
+        print(f"   Meter: {meter_number}")
+        
+        # Initialize Hubtel service
+        hubtel = HubtelService()
+        
+        # Check if Hubtel is configured
+        if not hubtel.is_configured():
+            return jsonify({
+                'success': False, 
+                'error': 'Hubtel service is not configured. Please contact support.'
+            }), 503
+        
+        result = None
+        
+        # ========== DSTV ==========
+        if biller_code == 'DSTV':
+            result = hubtel.query_dstv(account_number)
+            print(f"📡 DSTV Query Result: {result}")
+            
+            if result and result.get('success'):
+                data = result.get('data', {})
+                amount_due = abs(float(data.get('amountDue', 0)))
+                
+                return jsonify({
+                    'success': True,
+                    'data': {
+                        'customer_name': data.get('name') or data.get('customer_name') or 'DSTV Customer',
+                        'account_number': account_number,
+                        'biller_name': 'DSTV',
+                        'amount_due': amount_due if amount_due > 0 else 0,
+                        'biller_code': biller_code
+                    }
+                })
+            else:
+                error_msg = result.get('error', 'DSTV account not found') if result else 'Unknown error'
+                return jsonify({'success': False, 'error': error_msg}), 400
+        
+        # ========== GoTV ==========
+        elif biller_code == 'GOTV':
+            result = hubtel.query_gotv(account_number)
+            print(f"📡 GoTV Query Result: {result}")
+            
+            if result and result.get('success'):
+                data = result.get('data', {})
+                amount_due = abs(float(data.get('amountDue', 0)))
+                
+                return jsonify({
+                    'success': True,
+                    'data': {
+                        'customer_name': data.get('name') or data.get('customer_name') or 'GoTV Customer',
+                        'account_number': account_number,
+                        'biller_name': 'GoTV',
+                        'amount_due': amount_due if amount_due > 0 else 0,
+                        'biller_code': biller_code
+                    }
+                })
+            else:
+                error_msg = result.get('error', 'GoTV account not found') if result else 'Unknown error'
+                return jsonify({'success': False, 'error': error_msg}), 400
+        
+        # ========== StarTimes ==========
+        elif biller_code == 'STARTIMES':
+            result = hubtel.query_startimes(account_number)
+            print(f"📡 StarTimes Query Result: {result}")
+            
+            if result and result.get('success'):
+                data = result.get('data', {})
+                
+                return jsonify({
+                    'success': True,
+                    'data': {
+                        'customer_name': data.get('Name') or data.get('customer_name') or 'StarTimes Customer',
+                        'account_number': account_number,
+                        'bouquet': data.get('Bouquet', ''),
+                        'biller_name': 'StarTimes',
+                        'amount_due': 0,
+                        'biller_code': biller_code
+                    }
+                })
+            else:
+                error_msg = result.get('error', 'StarTimes account not found') if result else 'Unknown error'
+                return jsonify({'success': False, 'error': error_msg}), 400
+        
+        # ========== ECG ==========
+        elif biller_code == 'ECG':
+            if not phone_number:
+                return jsonify({
+                    'success': False, 
+                    'error': 'Phone number is required to fetch ECG meters'
+                }), 400
+            
+            # Format phone number for ECG query
+            # Remove leading 0 if present and ensure 233 prefix
+            formatted_phone = phone_number
+            if formatted_phone.startswith('0'):
+                formatted_phone = '233' + formatted_phone[1:]
+            elif not formatted_phone.startswith('233'):
+                formatted_phone = '233' + formatted_phone
+            
+            print(f"📞 Formatted phone for ECG: {formatted_phone}")
+            
+            result = hubtel.query_ecg_meters(formatted_phone)
+            print(f"📡 ECG Query Result: {result}")
+            
+            if result and result.get('success'):
+                meters = result.get('meters', [])
+                
+                if not meters:
+                    return jsonify({
+                        'success': False,
+                        'error': f'No ECG meters found for phone number {phone_number}. Please ensure this number is registered with ECG.',
+                        'suggestion': 'Try using the phone number linked to your ECG account. You can also try entering your meter number directly.'
+                    }), 400
+                
+                # Format meters for frontend
+                formatted_meters = []
+                for meter in meters:
+                    formatted_meters.append({
+                        'meter_number': meter.get('meter_number'),
+                        'customer_name': meter.get('customer_name'),
+                        'amount_due': abs(float(meter.get('amount_due', 0))),
+                        'address': meter.get('address', '')
+                    })
+                
+                return jsonify({
+                    'success': True,
+                    'data': {
+                        'meters': formatted_meters,
+                        'biller_name': 'ECG Electricity',
+                        'message': f'Found {len(meters)} meter(s) linked to this phone number',
+                        'biller_code': biller_code
+                    }
+                })
+            else:
+                error_msg = result.get('error', 'Failed to fetch ECG meters') if result else 'Unknown error'
+                return jsonify({
+                    'success': False, 
+                    'error': f'Could not validate ECG account: {error_msg}',
+                    'suggestion': 'Please ensure your phone number is registered with ECG. You can also try entering your meter number directly.'
+                }), 400
+        
+        # ========== Ghana Water (GWCL) ==========
+        elif biller_code == 'GWCL':
+            if not phone_number:
+                return jsonify({
+                    'success': False, 
+                    'error': 'Phone number is required for water bill validation'
+                }), 400
+            
+            # Use meter_number if provided, otherwise use account_number
+            meter_id = meter_number or account_number
+            
+            if not meter_id:
+                return jsonify({
+                    'success': False, 
+                    'error': 'Meter number or account number is required for water bill'
+                }), 400
+            
+            # Format phone number for GWCL
+            formatted_phone = phone_number
+            if formatted_phone.startswith('0'):
+                formatted_phone = '233' + formatted_phone[1:]
+            elif not formatted_phone.startswith('233'):
+                formatted_phone = '233' + formatted_phone
+            
+            print(f"📞 Formatted phone for GWCL: {formatted_phone}")
+            
+            result = hubtel.query_water(meter_id, formatted_phone)
+            print(f"📡 GWCL Query Result: {result}")
+            
+            if result and result.get('success'):
+                amount_due = abs(float(result.get('amount_due', 0)))
+                
+                return jsonify({
+                    'success': True,
+                    'data': {
+                        'customer_name': result.get('customer_name') or 'GWCL Customer',
+                        'amount_due': amount_due if amount_due > 0 else 0,
+                        'session_id': result.get('session_id'),
+                        'account_number': meter_id,
+                        'meter_number': meter_id,
+                        'biller_name': 'Ghana Water',
+                        'biller_code': biller_code
+                    }
+                })
+            else:
+                error_msg = result.get('error', 'Water account not found') if result else 'Unknown error'
+                return jsonify({
+                    'success': False, 
+                    'error': f'Could not validate water account: {error_msg}',
+                    'suggestion': 'Please ensure your phone number and meter number are correct.'
+                }), 400
+        
+        # ========== Unsupported Biller ==========
+        else:
+            return jsonify({
+                'success': False, 
+                'error': f'Unsupported biller: {biller_code}. Supported billers: DSTV, GOTV, STARTIMES, ECG, GWCL'
+            }), 400
+        
+    except Exception as e:
+        print(f"❌ User bill validation error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'success': False, 
+            'error': f'Validation error: {str(e)}'
+        }), 500
+
+@app.route('/api/user/bills/history', methods=['GET'])
+@token_required
+def user_bill_history():
+    """Get user's bill payment history"""
+    try:
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('limit', 20, type=int)
+        
+        # Get user's bill payments
+        bills = Order.query.filter_by(
+            user_id=g.current_user.id,
+            type='bill_payment'
+        ).order_by(Order.created_at.desc()).paginate(
+            page=page, per_page=per_page, error_out=False
+        )
+        
+        return jsonify({
+            'success': True,
+            'data': [{
+                'id': b.id,
+                'order_id': b.order_id,
+                'biller_code': b.biller_code,
+                'biller_name': b.biller_name,
+                'account_number': b.account_number,
+                'customer_name': b.customer_name,
+                'customer_phone': b.phone_number,
+                'amount': float(b.amount),
+                'status': b.status,
+                'reference': b.provider_reference,
+                'created_at': b.created_at.isoformat()
+            } for b in bills.items],
+            'total': bills.total,
+            'page': page,
+            'total_pages': bills.pages
+        })
+        
+    except Exception as e:
+        print(f"Error fetching user bill history: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/user/bills/stats', methods=['GET'])
+@token_required
+def user_bill_stats():
+    """Get user's bill payment statistics"""
+    try:
+        # Total bill payments made by user
+        total_bills = Order.query.filter_by(
+            user_id=g.current_user.id,
+            type='bill_payment'
+        ).count()
+        
+        # Total bill amount
+        total_amount = db.session.query(db.func.sum(Order.amount)).filter(
+            Order.user_id == g.current_user.id,
+            Order.type == 'bill_payment'
+        ).scalar() or 0
+        
+        # Bills by status
+        completed_bills = Order.query.filter_by(
+            user_id=g.current_user.id,
+            type='bill_payment',
+            status='completed'
+        ).count()
+        
+        pending_bills = Order.query.filter_by(
+            user_id=g.current_user.id,
+            type='bill_payment',
+            status='pending'
+        ).count()
+        
+        failed_bills = Order.query.filter_by(
+            user_id=g.current_user.id,
+            type='bill_payment',
+            status='failed'
+        ).count()
+        
+        # Recent bill payments (last 7 days)
+        seven_days_ago = datetime.utcnow() - timedelta(days=7)
+        recent_bills = Order.query.filter(
+            Order.user_id == g.current_user.id,
+            Order.type == 'bill_payment',
+            Order.created_at >= seven_days_ago
+        ).count()
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'total_bills': total_bills,
+                'total_amount': float(total_amount),
+                'completed_bills': completed_bills,
+                'pending_bills': pending_bills,
+                'failed_bills': failed_bills,
+                'recent_bills': recent_bills
+            }
+        })
+        
+    except Exception as e:
+        print(f"Error fetching user bill stats: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+# ========== USER COMMISSION ENDPOINTS ==========
+
+@app.route('/api/user/commission-stats', methods=['GET'])
+@token_required
+def get_commission_stats():
+    """Get user's commission earnings statistics"""
+    try:
+        from models import Order, CommissionTransaction
+        from sqlalchemy import func
+        
+        print(f"\n📊 COMMISSION STATS REQUEST:")
+        print(f"   User: {g.current_user.username} (ID: {g.current_user.id})")
+        
+        # Get total commission from orders where user is initiator
+        total_commission = db.session.query(func.sum(Order.initiator_commission)).filter(
+            Order.initiator_id == g.current_user.id,
+            Order.status == 'completed'
+        ).scalar() or 0
+        
+        # Count bill payment commissions
+        bill_commission_count = Order.query.filter(
+            Order.initiator_id == g.current_user.id,
+            Order.type == 'bill_payment',
+            Order.status == 'completed'
+        ).count()
+        
+        # Count data sale commissions (if applicable)
+        data_commission_count = Order.query.filter(
+            Order.initiator_id == g.current_user.id,
+            Order.type == 'data',
+            Order.status == 'completed'
+        ).count()
+        
+        # Get pending commission (from orders where user is initiator but not yet completed)
+        pending_commission = db.session.query(func.sum(Order.initiator_commission)).filter(
+            Order.initiator_id == g.current_user.id,
+            Order.status == 'pending'
+        ).scalar() or 0
+        
+        # Get commission by type breakdown
+        commission_by_type = {
+            'bill_payment': bill_commission_count,
+            'data': data_commission_count
+        }
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'total_commission_earned': float(total_commission),
+                'pending_commission': float(pending_commission),
+                'bill_commission_count': bill_commission_count,
+                'data_commission_count': data_commission_count,
+                'commission_by_type': commission_by_type
+            }
+        })
+        
+    except Exception as e:
+        print(f"Error getting commission stats: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/user/commission-transactions', methods=['GET'])
+@token_required
+def get_commission_transactions():
+    """Get list of commission transactions for the user"""
+    try:
+        from models import Order
+        
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('limit', 20, type=int)
+        
+        print(f"\n📊 COMMISSION TRANSACTIONS REQUEST:")
+        print(f"   User: {g.current_user.username} (ID: {g.current_user.id})")
+        print(f"   Page: {page}, Limit: {per_page}")
+        
+        # Get all orders where user is initiator and has commission
+        query = Order.query.filter(
+            Order.initiator_id == g.current_user.id,
+            Order.initiator_commission > 0,
+            Order.status == 'completed'
+        ).order_by(Order.created_at.desc())
+        
+        # Paginate
+        paginated = query.paginate(page=page, per_page=per_page, error_out=False)
+        
+        transactions = []
+        for order in paginated.items:
+            # Get the user who made the purchase (if available)
+            purchaser = User.query.get(order.user_id) if order.user_id else None
+            
+            transactions.append({
+                'id': order.id,
+                'order_id': order.order_id,
+                'type': order.type,
+                'biller_code': order.biller_code,
+                'biller_name': order.biller_name or 'Data Sale',
+                'amount': float(order.amount) if order.amount else 0,
+                'hubtel_commission_rate': float(order.hubtel_commission_rate) if order.hubtel_commission_rate else 0,
+                'commission_earned': float(order.initiator_commission) if order.initiator_commission else 0,
+                'customer_name': order.customer_name or (purchaser.username if purchaser else 'Unknown'),
+                'customer_phone': order.phone_number or (purchaser.phone if purchaser else 'N/A'),
+                'status': order.status,
+                'created_at': order.created_at.isoformat() if order.created_at else None
+            })
+        
+        return jsonify({
+            'success': True,
+            'data': transactions,
+            'pagination': {
+                'page': page,
+                'total': paginated.total,
+                'pages': paginated.pages,
+                'has_prev': paginated.has_prev,
+                'has_next': paginated.has_next
+            }
+        })
+        
+    except Exception as e:
+        print(f"Error getting commission transactions: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/user/commission-summary', methods=['GET'])
+@token_required
+def get_commission_summary():
+    """Get summary of commission earnings (for dashboard)"""
+    try:
+        from models import Order
+        from sqlalchemy import func
+        from datetime import datetime, timedelta
+        
+        user_id = g.current_user.id
+        
+        # Total commission all time
+        total_commission = db.session.query(func.sum(Order.initiator_commission)).filter(
+            Order.initiator_id == user_id,
+            Order.status == 'completed'
+        ).scalar() or 0
+        
+        # Commission this month
+        month_start = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        monthly_commission = db.session.query(func.sum(Order.initiator_commission)).filter(
+            Order.initiator_id == user_id,
+            Order.status == 'completed',
+            Order.created_at >= month_start
+        ).scalar() or 0
+        
+        # Commission this week
+        week_start = datetime.utcnow() - timedelta(days=7)
+        weekly_commission = db.session.query(func.sum(Order.initiator_commission)).filter(
+            Order.initiator_id == user_id,
+            Order.status == 'completed',
+            Order.created_at >= week_start
+        ).scalar() or 0
+        
+        # Commission today
+        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        today_commission = db.session.query(func.sum(Order.initiator_commission)).filter(
+            Order.initiator_id == user_id,
+            Order.status == 'completed',
+            Order.created_at >= today_start
+        ).scalar() or 0
+        
+        # Number of commission transactions
+        transaction_count = Order.query.filter(
+            Order.initiator_id == user_id,
+            Order.initiator_commission > 0,
+            Order.status == 'completed'
+        ).count()
+        
+        # Average commission per transaction
+        avg_commission = 0
+        if transaction_count > 0:
+            avg_commission = total_commission / transaction_count
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'total_commission': float(total_commission),
+                'monthly_commission': float(monthly_commission),
+                'weekly_commission': float(weekly_commission),
+                'today_commission': float(today_commission),
+                'transaction_count': transaction_count,
+                'avg_commission_per_transaction': float(avg_commission)
+            }
+        })
+        
+    except Exception as e:
+        print(f"Error getting commission summary: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ========== UPDATE: User bill payment now earns commission ==========
+
+@app.route('/api/user/bills/pay', methods=['POST'])
+@token_required
+def user_pay_bill():
+    """Process bill payment for a regular user"""
+    try:
+        import uuid
+        data = request.get_json()
+        
+        print(f"\n📥 USER BILL PAYMENT REQUEST:")
+        print(f"   Data: {data}")
+        print(f"   User: {g.current_user.username} (ID: {g.current_user.id})")
+        print(f"   Wallet Balance: ₵{g.current_user.wallet_balance}")
+        
+        biller_code = data.get('biller_code')
+        account_number = data.get('account_number')
+        amount = data.get('amount')
+        customer_name = data.get('customer_name', g.current_user.username)
+        customer_phone = data.get('customer_phone', g.current_user.phone)
+        customer_email = data.get('customer_email', g.current_user.email)
+        meter_number = data.get('meter_number')
+        session_id = data.get('session_id')
+        
+        # Validate required fields
+        missing_fields = []
+        if not biller_code:
+            missing_fields.append('biller_code')
+        if not account_number:
+            missing_fields.append('account_number')
+        if not amount:
+            missing_fields.append('amount')
+        
+        if missing_fields:
+            print(f"❌ Missing required fields: {missing_fields}")
+            return jsonify({
+                'success': False, 
+                'error': f'Missing required fields: {", ".join(missing_fields)}'
+            }), 400
+        
+        amount = float(amount)
+        
+        # For ECG, require meter_number
+        if biller_code == 'ECG' and not meter_number:
+            meter_number = account_number
+            if not meter_number:
+                return jsonify({
+                    'success': False, 
+                    'error': 'Meter number required for ECG. Please select a meter.'
+                }), 400
+        
+        # For GWCL, require meter_number and session_id
+        if biller_code == 'GWCL':
+            if not meter_number:
+                meter_number = account_number
+            if not session_id:
+                return jsonify({
+                    'success': False, 
+                    'error': 'Session ID required for Water bill. Please validate first.'
+                }), 400
+        
+        # Check user wallet balance
+        balance_before = g.current_user.wallet_balance
+        if balance_before < amount:
+            return jsonify({
+                'success': False,
+                'error': f'Insufficient balance. Need GHS {amount:.2f}. Your balance: GHS {balance_before:.2f}'
+            }), 400
+        
+        # Process payment via Hubtel
+        hubtel = HubtelService()
+        callback_url = f"{os.environ.get('BASE_URL')}/api/webhooks/hubtel"
+        client_reference = f"USER-{uuid.uuid4().hex[:12].upper()}"
+        
+        payment_result = None
+        
+        try:
+            if biller_code == 'DSTV':
+                payment_result = hubtel.pay_dstv(account_number, amount, client_reference, callback_url)
+            elif biller_code == 'GOTV':
+                payment_result = hubtel.pay_gotv(account_number, amount, client_reference, callback_url)
+            elif biller_code == 'STARTIMES':
+                payment_result = hubtel.pay_startimes(account_number, amount, client_reference, callback_url)
+            elif biller_code == 'ECG':
+                if not meter_number:
+                    return jsonify({'success': False, 'error': 'Meter number required for ECG'}), 400
+                payment_result = hubtel.pay_ecg(customer_phone, meter_number, amount, client_reference, callback_url)
+            elif biller_code == 'GWCL':
+                if not meter_number or not session_id:
+                    return jsonify({'success': False, 'error': 'Meter number and session ID required for Water'}), 400
+                payment_result = hubtel.pay_water(meter_number, customer_phone, customer_email, session_id, amount, client_reference, callback_url)
+            else:
+                return jsonify({'success': False, 'error': f'Unsupported biller: {biller_code}'}), 400
+        except Exception as hubtel_error:
+            print(f"❌ Hubtel payment error: {hubtel_error}")
+            return jsonify({'success': False, 'error': f'Hubtel payment failed: {str(hubtel_error)}'}), 400
+        
+        if not payment_result or not payment_result.get('success'):
+            error_msg = payment_result.get('error', 'Payment failed') if payment_result else 'Unknown error'
+            return jsonify({'success': False, 'error': error_msg}), 400
+        
+        # Determine status based on response code
+        response_code = payment_result.get('response_code')
+        if response_code == '0000':
+            status = 'completed'
+        elif response_code == '0001':
+            status = 'pending'
+        else:
+            status = 'failed'
+        
+        # Deduct from user wallet
+        g.current_user.wallet_balance -= amount
+        balance_after = g.current_user.wallet_balance
+        
+        # Generate order ID
+        order_id = f"BILL-{uuid.uuid4().hex[:8].upper()}"
+        
+        biller_names = {
+            'DSTV': 'DSTV',
+            'GOTV': 'GoTV',
+            'STARTIMES': 'StarTimes',
+            'ECG': 'ECG Electricity',
+            'GWCL': 'Ghana Water'
+        }
+        
+        # Calculate commission (if applicable)
+        commission_service = CommissionService()
+        service_type = commission_service.get_service_type(biller_code)
+        commission = commission_service.calculate_commission(amount, service_type)
+        
+        # Check if user is an agent or has a referrer
+        user_commission = 0
+        if g.current_user.is_agent:
+            user_commission = commission['initiator_commission']
+            print(f"💰 User is an agent! Commission earned: ₵{user_commission:.4f}")
+        elif g.current_user.referred_by:
+            referrer = User.query.get(g.current_user.referred_by)
+            if referrer:
+                user_commission = commission['initiator_commission']
+                print(f"💰 Referrer ({referrer.username}) gets commission: ₵{user_commission:.4f}")
+        
+        # Create order record - using existing fields
+        order = Order(
+            order_id=order_id,
+            user_id=g.current_user.id,
+            type='bill_payment',
+            biller_code=biller_code,
+            biller_name=biller_names.get(biller_code, biller_code),
+            account_number=account_number,
+            customer_name=customer_name,
+            phone_number=customer_phone,
+            amount=amount,
+            cost=0,  # No cost for bill payments
+            profit=0,  # No profit for bill payments
+            status=status,
+            payment_method='wallet',
+            provider='hubtel',
+            provider_reference=payment_result.get('client_reference'),
+            provider_order_id=payment_result.get('transaction_id'),
+            # Commission fields
+            hubtel_commission_rate=commission['hubtel_rate'] if user_commission > 0 else 0,
+            total_commission=commission['total_commission'] if user_commission > 0 else 0,
+            admin_commission=commission['admin_commission'] if user_commission > 0 else 0,
+            initiator_commission=user_commission if user_commission > 0 else 0,
+            initiator_type='user' if user_commission > 0 else None,
+            initiator_id=g.current_user.id if user_commission > 0 else None,
+            completed_at=datetime.utcnow() if status == 'completed' else None,
+            created_at=datetime.utcnow()
+        )
+        db.session.add(order)
+        
+        # Create transaction record with balance info (Transaction model has balance_before/after)
+        transaction = Transaction(
+            user_id=g.current_user.id,
+            type='bill_payment',
+            amount=amount,
+            balance_before=balance_before,
+            balance_after=balance_after,
+            description=f'Bill payment: {biller_names.get(biller_code, biller_code)} - {account_number}',
+            reference=order_id,
+            status=status,
+            meta_data={
+                'biller_code': biller_code,
+                'biller_name': biller_names.get(biller_code, biller_code),
+                'account_number': account_number,
+                'meter_number': meter_number,
+                'customer_name': customer_name,
+                'customer_phone': customer_phone,
+                'commission_earned': user_commission if user_commission > 0 else 0,
+                'response_code': response_code
+            }
+        )
+        db.session.add(transaction)
+        
+        db.session.commit()
+        
+        # If user earned commission, credit their wallet
+        if user_commission > 0 and status == 'completed':
+            g.current_user.wallet_balance += user_commission
+            # Create commission transaction
+            commission_trans = Transaction(
+                user_id=g.current_user.id,
+                type='commission',
+                amount=user_commission,
+                balance_before=g.current_user.wallet_balance - user_commission,
+                balance_after=g.current_user.wallet_balance,
+                description=f'Commission from bill payment: {biller_names.get(biller_code, biller_code)}',
+                reference=f'COMM-{order_id}',
+                status='completed'
+            )
+            db.session.add(commission_trans)
+            db.session.commit()
+            db.session.refresh(g.current_user)
+        
+        return jsonify({
+            'success': True,
+            'message': f'✅ Bill payment processed! ₵{amount:.2f} paid for {customer_name}',
+            'data': {
+                'order_id': order_id,
+                'reference': payment_result.get('client_reference'),
+                'transaction_id': payment_result.get('transaction_id'),
+                'amount': amount,
+                'biller_name': biller_names.get(biller_code, biller_code),
+                'account_number': account_number,
+                'meter_number': meter_number,
+                'customer_name': customer_name,
+                'customer_phone': customer_phone,
+                'status': status,
+                'balance_before': float(balance_before),
+                'amount_paid': float(amount),
+                'new_balance': float(g.current_user.wallet_balance),
+                'commission_earned': float(user_commission) if user_commission > 0 else 0,
+                'response_code': response_code
+            }
+        }), 200
+        
+    except Exception as e:
+        print(f"❌ User bill payment error: {e}")
+        import traceback
+        traceback.print_exc()
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+# ========== USER RECURRING BILL ENDPOINTS ==========
+
+@app.route('/api/user/bills/recurring', methods=['GET'])
+@token_required
+def user_get_recurring_bills():
+    """Get all recurring bills for the current user"""
+    try:
+        print(f"\n📋 GET RECURRING BILLS REQUEST:")
+        print(f"   User: {g.current_user.username} (ID: {g.current_user.id})")
+        
+        recurring_bills = RecurringBill.query.filter_by(
+            user_id=g.current_user.id,
+            enabled=True
+        ).order_by(RecurringBill.next_due_date.asc()).all()
+        
+        return jsonify({
+            'success': True,
+            'data': [{
+                'id': r.id,
+                'biller_code': r.biller_code,
+                'biller_name': r.biller_name,
+                'account_number': r.account_number,
+                'customer_name': r.customer_name,
+                'frequency': r.frequency,
+                'auto_pay': r.auto_pay,
+                'enabled': r.enabled,
+                'max_amount': float(r.max_amount) if r.max_amount else 0,
+                'next_due_date': r.next_due_date.isoformat() if r.next_due_date else None,
+                'last_paid_date': r.last_paid_date.isoformat() if r.last_paid_date else None,
+                'created_at': r.created_at.isoformat() if r.created_at else None,
+                'updated_at': r.updated_at.isoformat() if r.updated_at else None
+            } for r in recurring_bills]
+        })
+        
+    except Exception as e:
+        print(f"Error getting recurring bills: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/user/bills/recurring', methods=['POST'])
+@token_required
+def user_create_recurring_bill():
+    """Create a recurring bill for the current user"""
+    try:
+        data = request.get_json()
+        
+        print(f"\n📋 CREATE RECURRING BILL REQUEST:")
+        print(f"   Data: {data}")
+        print(f"   User: {g.current_user.username} (ID: {g.current_user.id})")
+        
+        biller_code = data.get('biller_code')
+        biller_name = data.get('biller_name')
+        account_number = data.get('account_number')
+        customer_name = data.get('customer_name', g.current_user.username)
+        frequency = data.get('frequency', 'monthly')
+        auto_pay = data.get('auto_pay', True)
+        max_amount = data.get('max_amount', 0)
+        
+        # Validate required fields
+        if not biller_code:
+            return jsonify({
+                'success': False, 
+                'error': 'Biller code is required'
+            }), 400
+        
+        if not account_number:
+            return jsonify({
+                'success': False, 
+                'error': 'Account number is required'
+            }), 400
+        
+        # Validate frequency
+        valid_frequencies = ['weekly', 'monthly', 'quarterly']
+        if frequency not in valid_frequencies:
+            return jsonify({
+                'success': False, 
+                'error': f'Invalid frequency. Must be one of: {", ".join(valid_frequencies)}'
+            }), 400
+        
+        # Validate max_amount
+        try:
+            max_amount = float(max_amount)
+            if max_amount < 0:
+                return jsonify({
+                    'success': False, 
+                    'error': 'Max amount must be greater than or equal to 0'
+                }), 400
+        except (TypeError, ValueError):
+            return jsonify({
+                'success': False, 
+                'error': 'Invalid max amount format'
+            }), 400
+        
+        # Check if recurring bill already exists for this biller and account
+        existing = RecurringBill.query.filter(
+            RecurringBill.user_id == g.current_user.id,
+            RecurringBill.biller_code == biller_code,
+            RecurringBill.account_number == account_number,
+            RecurringBill.enabled == True
+        ).first()
+        
+        if existing:
+            return jsonify({
+                'success': False, 
+                'error': f'A recurring bill for {biller_name or biller_code} already exists',
+                'data': {
+                    'id': existing.id,
+                    'frequency': existing.frequency,
+                    'next_due_date': existing.next_due_date.isoformat() if existing.next_due_date else None
+                }
+            }), 409
+        
+        # Calculate next due date based on frequency
+        from dateutil.relativedelta import relativedelta
+        
+        today = datetime.utcnow()
+        if frequency == 'weekly':
+            next_due = today + relativedelta(weeks=1)
+        elif frequency == 'monthly':
+            next_due = today + relativedelta(months=1)
+        elif frequency == 'quarterly':
+            next_due = today + relativedelta(months=3)
+        else:
+            next_due = today + relativedelta(months=1)
+        
+        # Create recurring bill
+        recurring = RecurringBill(
+            user_id=g.current_user.id,
+            biller_code=biller_code,
+            biller_name=biller_name or biller_code,
+            account_number=account_number,
+            customer_name=customer_name,
+            frequency=frequency,
+            auto_pay=auto_pay,
+            max_amount=max_amount,
+            enabled=True,
+            next_due_date=next_due,
+            created_at=datetime.utcnow()
+        )
+        
+        db.session.add(recurring)
+        db.session.commit()
+        db.session.refresh(recurring)
+        
+        return jsonify({
+            'success': True,
+            'message': 'Recurring bill created successfully',
+            'data': {
+                'id': recurring.id,
+                'biller_code': recurring.biller_code,
+                'biller_name': recurring.biller_name,
+                'account_number': recurring.account_number,
+                'customer_name': recurring.customer_name,
+                'frequency': recurring.frequency,
+                'auto_pay': recurring.auto_pay,
+                'enabled': recurring.enabled,
+                'max_amount': float(recurring.max_amount) if recurring.max_amount else 0,
+                'next_due_date': recurring.next_due_date.isoformat() if recurring.next_due_date else None,
+                'created_at': recurring.created_at.isoformat() if recurring.created_at else None
+            }
+        }), 201
+        
+    except Exception as e:
+        print(f"Error creating recurring bill: {e}")
+        import traceback
+        traceback.print_exc()
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/user/bills/recurring/<int:bill_id>', methods=['PUT'])
+@token_required
+def user_update_recurring_bill(bill_id):
+    """Update a recurring bill"""
+    try:
+        data = request.get_json()
+        
+        print(f"\n📋 UPDATE RECURRING BILL REQUEST:")
+        print(f"   Bill ID: {bill_id}")
+        print(f"   Data: {data}")
+        print(f"   User: {g.current_user.username} (ID: {g.current_user.id})")
+        
+        recurring = RecurringBill.query.get(bill_id)
+        
+        if not recurring:
+            return jsonify({'success': False, 'error': 'Recurring bill not found'}), 404
+        
+        # Check if this bill belongs to the current user
+        if recurring.user_id != g.current_user.id:
+            return jsonify({'success': False, 'error': 'You do not have permission to modify this bill'}), 403
+        
+        # Update fields
+        if 'enabled' in data:
+            recurring.enabled = data['enabled']
+        if 'auto_pay' in data:
+            recurring.auto_pay = data['auto_pay']
+        if 'max_amount' in data:
+            try:
+                recurring.max_amount = float(data['max_amount'])
+            except (TypeError, ValueError):
+                return jsonify({'success': False, 'error': 'Invalid max amount format'}), 400
+        if 'frequency' in data:
+            valid_frequencies = ['weekly', 'monthly', 'quarterly']
+            if data['frequency'] not in valid_frequencies:
+                return jsonify({
+                    'success': False, 
+                    'error': f'Invalid frequency. Must be one of: {", ".join(valid_frequencies)}'
+                }), 400
+            recurring.frequency = data['frequency']
+        if 'account_number' in data:
+            recurring.account_number = data['account_number']
+        if 'customer_name' in data:
+            recurring.customer_name = data['customer_name']
+        
+        # If frequency changed, recalculate next due date
+        if 'frequency' in data:
+            from dateutil.relativedelta import relativedelta
+            today = datetime.utcnow()
+            if recurring.frequency == 'weekly':
+                recurring.next_due_date = today + relativedelta(weeks=1)
+            elif recurring.frequency == 'monthly':
+                recurring.next_due_date = today + relativedelta(months=1)
+            elif recurring.frequency == 'quarterly':
+                recurring.next_due_date = today + relativedelta(months=3)
+        
+        recurring.updated_at = datetime.utcnow()
+        db.session.commit()
+        db.session.refresh(recurring)
+        
+        return jsonify({
+            'success': True,
+            'message': 'Recurring bill updated successfully',
+            'data': {
+                'id': recurring.id,
+                'biller_code': recurring.biller_code,
+                'biller_name': recurring.biller_name,
+                'account_number': recurring.account_number,
+                'customer_name': recurring.customer_name,
+                'frequency': recurring.frequency,
+                'auto_pay': recurring.auto_pay,
+                'enabled': recurring.enabled,
+                'max_amount': float(recurring.max_amount) if recurring.max_amount else 0,
+                'next_due_date': recurring.next_due_date.isoformat() if recurring.next_due_date else None,
+                'updated_at': recurring.updated_at.isoformat() if recurring.updated_at else None
+            }
+        })
+        
+    except Exception as e:
+        print(f"Error updating recurring bill: {e}")
+        import traceback
+        traceback.print_exc()
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/user/bills/recurring/<int:bill_id>', methods=['DELETE'])
+@token_required
+def user_delete_recurring_bill(bill_id):
+    """Delete a recurring bill (soft delete by setting enabled=False)"""
+    try:
+        print(f"\n📋 DELETE RECURRING BILL REQUEST:")
+        print(f"   Bill ID: {bill_id}")
+        print(f"   User: {g.current_user.username} (ID: {g.current_user.id})")
+        
+        recurring = RecurringBill.query.get(bill_id)
+        
+        if not recurring:
+            return jsonify({'success': False, 'error': 'Recurring bill not found'}), 404
+        
+        # Check if this bill belongs to the current user
+        if recurring.user_id != g.current_user.id:
+            return jsonify({'success': False, 'error': 'You do not have permission to delete this bill'}), 403
+        
+        # Soft delete - disable the recurring bill
+        recurring.enabled = False
+        recurring.updated_at = datetime.utcnow()
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': 'Recurring bill disabled successfully'
+        })
+        
+    except Exception as e:
+        print(f"Error deleting recurring bill: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/user/bills/recurring/<int:bill_id>/pay', methods=['POST'])
+@token_required
+def user_pay_recurring_bill(bill_id):
+    """Manually pay a recurring bill (trigger payment)"""
+    try:
+        data = request.get_json()
+        amount = data.get('amount')
+        
+        print(f"\n📋 PAY RECURRING BILL REQUEST:")
+        print(f"   Bill ID: {bill_id}")
+        print(f"   Amount: {amount}")
+        print(f"   User: {g.current_user.username} (ID: {g.current_user.id})")
+        
+        recurring = RecurringBill.query.get(bill_id)
+        
+        if not recurring:
+            return jsonify({'success': False, 'error': 'Recurring bill not found'}), 404
+        
+        # Check if this bill belongs to the current user
+        if recurring.user_id != g.current_user.id:
+            return jsonify({'success': False, 'error': 'You do not have permission to pay this bill'}), 403
+        
+        # Check if bill is enabled
+        if not recurring.enabled:
+            return jsonify({'success': False, 'error': 'This recurring bill is disabled'}), 400
+        
+        # Validate amount
+        try:
+            amount = float(amount) if amount else 0
+            if amount <= 0:
+                return jsonify({'success': False, 'error': 'Amount must be greater than 0'}), 400
+            
+            # If max_amount is set, ensure amount doesn't exceed it
+            if recurring.max_amount > 0 and amount > recurring.max_amount:
+                return jsonify({
+                    'success': False, 
+                    'error': f'Amount exceeds max limit of ₵{recurring.max_amount:.2f}'
+                }), 400
+        except (TypeError, ValueError):
+            return jsonify({'success': False, 'error': 'Invalid amount format'}), 400
+        
+        # Check user wallet balance
+        if g.current_user.wallet_balance < amount:
+            return jsonify({
+                'success': False,
+                'error': f'Insufficient balance. Need ₵{amount:.2f}. Your balance: ₵{g.current_user.wallet_balance:.2f}'
+            }), 400
+        
+        # Process payment via Hubtel
+        import uuid
+        hubtel = HubtelService()
+        callback_url = f"{os.environ.get('BASE_URL')}/api/webhooks/hubtel"
+        client_reference = f"RECUR-{uuid.uuid4().hex[:12].upper()}"
+        
+        payment_result = None
+        
+        try:
+            if recurring.biller_code == 'DSTV':
+                payment_result = hubtel.pay_dstv(recurring.account_number, amount, client_reference, callback_url)
+            elif recurring.biller_code == 'GOTV':
+                payment_result = hubtel.pay_gotv(recurring.account_number, amount, client_reference, callback_url)
+            elif recurring.biller_code == 'STARTIMES':
+                payment_result = hubtel.pay_startimes(recurring.account_number, amount, client_reference, callback_url)
+            elif recurring.biller_code == 'ECG':
+                # For ECG, we need meter number. Try to get from account_number
+                payment_result = hubtel.pay_ecg(
+                    g.current_user.phone or '0557388622', 
+                    recurring.account_number, 
+                    amount, 
+                    client_reference, 
+                    callback_url
+                )
+            elif recurring.biller_code == 'GWCL':
+                # For GWCL, we need session_id - use account_number as meter_number
+                payment_result = hubtel.pay_water(
+                    recurring.account_number, 
+                    g.current_user.phone or '0557388622', 
+                    g.current_user.email or '', 
+                    '',  # session_id - may need to validate first
+                    amount, 
+                    client_reference, 
+                    callback_url
+                )
+            else:
+                return jsonify({'success': False, 'error': f'Unsupported biller: {recurring.biller_code}'}), 400
+        except Exception as hubtel_error:
+            print(f"❌ Hubtel payment error: {hubtel_error}")
+            return jsonify({'success': False, 'error': f'Hubtel payment failed: {str(hubtel_error)}'}), 400
+        
+        if not payment_result or not payment_result.get('success'):
+            error_msg = payment_result.get('error', 'Payment failed') if payment_result else 'Unknown error'
+            return jsonify({'success': False, 'error': error_msg}), 400
+        
+        # Deduct from user wallet
+        balance_before = g.current_user.wallet_balance
+        g.current_user.wallet_balance -= amount
+        
+        # Generate order ID
+        order_id = f"RECUR-{uuid.uuid4().hex[:8].upper()}"
+        
+        # Create order record
+        order = Order(
+            user_id=g.current_user.id,
+            order_id=order_id,
+            type='bill_payment',
+            biller_code=recurring.biller_code,
+            biller_name=recurring.biller_name,
+            account_number=recurring.account_number,
+            customer_name=recurring.customer_name,
+            phone_number=g.current_user.phone,
+            amount=amount,
+            status='completed',
+            payment_method='wallet',
+            provider='hubtel',
+            provider_reference=payment_result.get('client_reference'),
+            provider_order_id=payment_result.get('transaction_id'),
+            completed_at=datetime.utcnow(),
+            created_at=datetime.utcnow(),
+            is_recurring=True,
+            recurring_bill_id=recurring.id
+        )
+        db.session.add(order)
+        
+        # Create transaction record
+        transaction = Transaction(
+            user_id=g.current_user.id,
+            type='bill_payment_recurring',
+            amount=amount,
+            balance_before=balance_before,
+            balance_after=g.current_user.wallet_balance,
+            description=f'Recurring bill payment: {recurring.biller_name} - {recurring.account_number}',
+            reference=order_id,
+            status='completed',
+            meta_data={
+                'recurring_bill_id': recurring.id,
+                'biller_code': recurring.biller_code,
+                'biller_name': recurring.biller_name,
+                'account_number': recurring.account_number
+            }
+        )
+        db.session.add(transaction)
+        
+        # Update recurring bill - set last_paid_date and next_due_date
+        recurring.last_paid_date = datetime.utcnow()
+        
+        # Calculate next due date based on frequency
+        from dateutil.relativedelta import relativedelta
+        today = datetime.utcnow()
+        if recurring.frequency == 'weekly':
+            recurring.next_due_date = today + relativedelta(weeks=1)
+        elif recurring.frequency == 'monthly':
+            recurring.next_due_date = today + relativedelta(months=1)
+        elif recurring.frequency == 'quarterly':
+            recurring.next_due_date = today + relativedelta(months=3)
+        
+        recurring.updated_at = datetime.utcnow()
+        
+        db.session.commit()
+        db.session.refresh(g.current_user)
+        
+        return jsonify({
+            'success': True,
+            'message': f'✅ Recurring bill paid successfully! ₵{amount:.2f} paid for {recurring.biller_name}',
+            'data': {
+                'order_id': order_id,
+                'reference': payment_result.get('client_reference'),
+                'transaction_id': payment_result.get('transaction_id'),
+                'amount': amount,
+                'biller_name': recurring.biller_name,
+                'account_number': recurring.account_number,
+                'status': 'completed',
+                'balance_before': float(balance_before),
+                'amount_paid': float(amount),
+                'new_balance': float(g.current_user.wallet_balance),
+                'next_due_date': recurring.next_due_date.isoformat() if recurring.next_due_date else None,
+                'last_paid_date': recurring.last_paid_date.isoformat() if recurring.last_paid_date else None
+            }
+        }), 200
+        
+    except Exception as e:
+        print(f"❌ Pay recurring bill error: {e}")
+        import traceback
+        traceback.print_exc()
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/user/bills/recurring/<int:bill_id>/auto-pay', methods=['POST'])
+@token_required
+def user_toggle_auto_pay(bill_id):
+    """Toggle auto-pay for a recurring bill"""
+    try:
+        data = request.get_json()
+        auto_pay = data.get('auto_pay', True)
+        
+        print(f"\n📋 TOGGLE AUTO-PAY REQUEST:")
+        print(f"   Bill ID: {bill_id}")
+        print(f"   Auto Pay: {auto_pay}")
+        print(f"   User: {g.current_user.username} (ID: {g.current_user.id})")
+        
+        recurring = RecurringBill.query.get(bill_id)
+        
+        if not recurring:
+            return jsonify({'success': False, 'error': 'Recurring bill not found'}), 404
+        
+        # Check if this bill belongs to the current user
+        if recurring.user_id != g.current_user.id:
+            return jsonify({'success': False, 'error': 'You do not have permission to modify this bill'}), 403
+        
+        # Toggle auto-pay
+        recurring.auto_pay = auto_pay
+        recurring.updated_at = datetime.utcnow()
+        db.session.commit()
+        
+        status = 'enabled' if auto_pay else 'disabled'
+        
+        return jsonify({
+            'success': True,
+            'message': f'Auto-pay {status} for this recurring bill',
+            'data': {
+                'id': recurring.id,
+                'auto_pay': recurring.auto_pay,
+                'enabled': recurring.enabled
+            }
+        })
+        
+    except Exception as e:
+        print(f"Error toggling auto-pay: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/user/bills/recurring/<int:bill_id>/skip', methods=['POST'])
+@token_required
+def user_skip_recurring_bill(bill_id):
+    """Skip the next payment for a recurring bill"""
+    try:
+        print(f"\n📋 SKIP RECURRING BILL REQUEST:")
+        print(f"   Bill ID: {bill_id}")
+        print(f"   User: {g.current_user.username} (ID: {g.current_user.id})")
+        
+        recurring = RecurringBill.query.get(bill_id)
+        
+        if not recurring:
+            return jsonify({'success': False, 'error': 'Recurring bill not found'}), 404
+        
+        # Check if this bill belongs to the current user
+        if recurring.user_id != g.current_user.id:
+            return jsonify({'success': False, 'error': 'You do not have permission to skip this bill'}), 403
+        
+        # Skip the next payment by moving next_due_date forward by one frequency cycle
+        from dateutil.relativedelta import relativedelta
+        current_due = recurring.next_due_date or datetime.utcnow()
+        
+        if recurring.frequency == 'weekly':
+            recurring.next_due_date = current_due + relativedelta(weeks=1)
+        elif recurring.frequency == 'monthly':
+            recurring.next_due_date = current_due + relativedelta(months=1)
+        elif recurring.frequency == 'quarterly':
+            recurring.next_due_date = current_due + relativedelta(months=3)
+        
+        recurring.updated_at = datetime.utcnow()
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': 'Next payment skipped successfully',
+            'data': {
+                'id': recurring.id,
+                'next_due_date': recurring.next_due_date.isoformat() if recurring.next_due_date else None
+            }
+        })
+        
+    except Exception as e:
+        print(f"Error skipping recurring bill: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/user/bills/recurring/check-due', methods=['GET'])
+@token_required
+def user_check_due_recurring_bills():
+    """Check which recurring bills are due for payment"""
+    try:
+        print(f"\n📋 CHECK DUE RECURRING BILLS REQUEST:")
+        print(f"   User: {g.current_user.username} (ID: {g.current_user.id})")
+        
+        today = datetime.utcnow()
+        
+        # Get recurring bills that are due (next_due_date <= today)
+        due_bills = RecurringBill.query.filter(
+            RecurringBill.user_id == g.current_user.id,
+            RecurringBill.enabled == True,
+            RecurringBill.next_due_date <= today
+        ).all()
+        
+        # Get upcoming bills (next_due_date within the next 7 days)
+        upcoming_date = today + timedelta(days=7)
+        upcoming_bills = RecurringBill.query.filter(
+            RecurringBill.user_id == g.current_user.id,
+            RecurringBill.enabled == True,
+            RecurringBill.next_due_date > today,
+            RecurringBill.next_due_date <= upcoming_date
+        ).order_by(RecurringBill.next_due_date.asc()).all()
+        
+        # Format due bills
+        due_list = []
+        for bill in due_bills:
+            due_list.append({
+                'id': bill.id,
+                'biller_name': bill.biller_name,
+                'biller_code': bill.biller_code,
+                'account_number': bill.account_number,
+                'max_amount': float(bill.max_amount) if bill.max_amount else 0,
+                'frequency': bill.frequency,
+                'auto_pay': bill.auto_pay,
+                'next_due_date': bill.next_due_date.isoformat() if bill.next_due_date else None,
+                'days_overdue': (today - bill.next_due_date).days if bill.next_due_date else 0
+            })
+        
+        # Format upcoming bills
+        upcoming_list = []
+        for bill in upcoming_bills:
+            upcoming_list.append({
+                'id': bill.id,
+                'biller_name': bill.biller_name,
+                'biller_code': bill.biller_code,
+                'account_number': bill.account_number,
+                'max_amount': float(bill.max_amount) if bill.max_amount else 0,
+                'frequency': bill.frequency,
+                'auto_pay': bill.auto_pay,
+                'next_due_date': bill.next_due_date.isoformat() if bill.next_due_date else None,
+                'days_until_due': (bill.next_due_date - today).days if bill.next_due_date else 0
+            })
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'due_bills': due_list,
+                'due_count': len(due_list),
+                'upcoming_bills': upcoming_list,
+                'upcoming_count': len(upcoming_list),
+                'total_active': RecurringBill.query.filter(
+                    RecurringBill.user_id == g.current_user.id,
+                    RecurringBill.enabled == True
+                ).count()
+            }
+        })
+        
+    except Exception as e:
+        print(f"Error checking due recurring bills: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/user/permissions', methods=['GET'])
 @token_required
@@ -14566,65 +24892,115 @@ def preview_template(template_name):
 @token_required
 @admin_required
 def get_activity_summary():
-    """Get summary of system activity"""
+    """Get summary of system activity - AFDALNOVA with platform filtering"""
     try:
+        from datetime import datetime, timedelta
+        
+        platform = getattr(g, 'platform', 'platform_a')
+        platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
+        platform_name = platform_config.get('brand_name', 'AFDALNOVA')
+        primary_color = platform_config.get('primary_color', '#1A2A6C')
+        
         seven_days_ago = datetime.utcnow() - timedelta(days=7)
         twenty_four_hours = datetime.utcnow() - timedelta(hours=24)
         
-        new_users = User.query.filter(User.created_at >= seven_days_ago).count()
-        new_users_today = User.query.filter(User.created_at >= twenty_four_hours).count()
+        # Helper to apply platform filter
+        def apply_platform_filter(query, model, platform_field='platform'):
+            if platform and platform != 'all':
+                return query.filter(getattr(model, platform_field) == platform)
+            return query
         
-        new_orders = Order.query.filter(Order.created_at >= seven_days_ago).count()
-        new_orders_today = Order.query.filter(Order.created_at >= twenty_four_hours).count()
+        # New users in last 7 days
+        new_users_query = User.query.filter(User.created_at >= seven_days_ago)
+        new_users = apply_platform_filter(new_users_query, User).count()
         
-        completed_orders = Order.query.filter(
+        # New users today
+        new_users_today_query = User.query.filter(User.created_at >= twenty_four_hours)
+        new_users_today = apply_platform_filter(new_users_today_query, User).count()
+        
+        # New orders in last 7 days
+        new_orders_query = Order.query.filter(Order.created_at >= seven_days_ago)
+        new_orders = apply_platform_filter(new_orders_query, Order).count()
+        
+        # New orders today
+        new_orders_today_query = Order.query.filter(Order.created_at >= twenty_four_hours)
+        new_orders_today = apply_platform_filter(new_orders_today_query, Order).count()
+        
+        # Completed orders in last 7 days
+        completed_orders_query = Order.query.filter(
             Order.status == 'completed',
             Order.completed_at >= seven_days_ago
-        ).count()
+        )
+        completed_orders = apply_platform_filter(completed_orders_query, Order).count()
         
-        revenue_7d = db.session.query(db.func.sum(Order.amount)).filter(
+        # Revenue last 7 days
+        revenue_7d_query = db.session.query(db.func.sum(Order.amount)).filter(
             Order.status == 'completed',
             Order.completed_at >= seven_days_ago
-        ).scalar() or 0
+        )
+        revenue_7d = apply_platform_filter(revenue_7d_query, Order).scalar() or 0
         
-        revenue_today = db.session.query(db.func.sum(Order.amount)).filter(
+        # Revenue today
+        revenue_today_query = db.session.query(db.func.sum(Order.amount)).filter(
             Order.status == 'completed',
             Order.completed_at >= twenty_four_hours
-        ).scalar() or 0
+        )
+        revenue_today = apply_platform_filter(revenue_today_query, Order).scalar() or 0
         
-        new_payments = ManualPayment.query.filter(
+        # New payments last 7 days
+        new_payments_query = ManualPayment.query.filter(
             ManualPayment.created_at >= seven_days_ago,
             ManualPayment.status == 'completed'
-        ).count()
+        )
+        new_payments = apply_platform_filter(new_payments_query, ManualPayment).count()
         
-        total_payment_amount = db.session.query(db.func.sum(ManualPayment.amount)).filter(
+        # Total payment amount last 7 days
+        total_payment_amount_query = db.session.query(db.func.sum(ManualPayment.amount)).filter(
             ManualPayment.created_at >= seven_days_ago,
             ManualPayment.status == 'completed'
-        ).scalar() or 0
+        )
+        total_payment_amount = apply_platform_filter(total_payment_amount_query, ManualPayment).scalar() or 0
         
-        pending_verifications = ManualPayment.query.filter_by(status='pending_verification').count()
+        # Pending verifications
+        pending_verifications_query = ManualPayment.query.filter_by(status='pending_verification')
+        pending_verifications = apply_platform_filter(pending_verifications_query, ManualPayment).count()
         
+        # Active users (with sessions in last 7 days)
+        active_users_query = UserSession.query.filter(
+            UserSession.created_at >= seven_days_ago
+        )
+        if platform:
+            active_users_query = active_users_query.filter(UserSession.platform == platform)
+        active_users = active_users_query.distinct(UserSession.user_id).count()
+        
+        # Daily breakdown
         daily_stats = []
         for i in range(7):
             day = datetime.utcnow() - timedelta(days=i)
             day_start = day.replace(hour=0, minute=0, second=0, microsecond=0)
             day_end = day.replace(hour=23, minute=59, second=59, microsecond=999999)
             
-            day_users = User.query.filter(
+            # Day users
+            day_users_query = User.query.filter(
                 User.created_at >= day_start,
                 User.created_at <= day_end
-            ).count()
+            )
+            day_users = apply_platform_filter(day_users_query, User).count()
             
-            day_orders = Order.query.filter(
+            # Day orders
+            day_orders_query = Order.query.filter(
                 Order.created_at >= day_start,
                 Order.created_at <= day_end
-            ).count()
+            )
+            day_orders = apply_platform_filter(day_orders_query, Order).count()
             
-            day_revenue = db.session.query(db.func.sum(Order.amount)).filter(
+            # Day revenue
+            day_revenue_query = db.session.query(db.func.sum(Order.amount)).filter(
                 Order.status == 'completed',
                 Order.completed_at >= day_start,
                 Order.completed_at <= day_end
-            ).scalar() or 0
+            )
+            day_revenue = apply_platform_filter(day_revenue_query, Order).scalar() or 0
             
             daily_stats.append({
                 'date': day.strftime('%Y-%m-%d'),
@@ -14637,6 +25013,8 @@ def get_activity_summary():
             'success': True,
             'data': {
                 'period': 'Last 7 Days',
+                'platform': platform,
+                'platform_name': platform_name,
                 'new_users': new_users,
                 'new_users_today': new_users_today,
                 'new_orders': new_orders,
@@ -14647,20 +25025,21 @@ def get_activity_summary():
                 'new_payments': new_payments,
                 'total_payments': float(total_payment_amount),
                 'pending_verifications': pending_verifications,
-                'active_users': UserSession.query.filter(
-                    UserSession.created_at >= seven_days_ago
-                ).distinct(UserSession.user_id).count(),
+                'active_users': active_users,
                 'daily_breakdown': daily_stats,
-                'platform': COMPANY_NAME
+                'branding': {
+                    'name': platform_config.get('brand_name', platform_name),
+                    'primary_color': primary_color,
+                    'secondary_color': platform_config.get('secondary_color', '#C9A84C')
+                }
             }
         })
         
     except Exception as e:
-        print(f"Get activity summary error: {e}")
+        print(f"[ACTIVITY SUMMARY ERROR] {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
-
-
-# ========== PUBLIC ROUTES ==========
 
 # ========== PUBLIC STATISTICS ==========
 
@@ -15396,22 +25775,45 @@ def get_user_price(network, size_gb):
     # Return 0 if not set - admin must configure
     return 0
 
-def get_agent_price(network, size_gb):
-    """Get agent wholesale price from database (set by admin)"""
+def get_agent_price(network, size_gb, delivery_type=None):
+    """Get agent wholesale price from database - supports delivery-specific pricing"""
     from models import PriceSetting
     
+    print(f"🔍 get_agent_price called with: network={network}, size_gb={size_gb}, delivery_type={delivery_type}")
+    
+    # First, try to get delivery-specific price if delivery_type is provided
+    if delivery_type:
+        setting = PriceSetting.query.filter_by(
+            category='agent_price',
+            network=network,
+            size_gb=size_gb,
+            delivery_type=delivery_type,
+            is_available=True
+        ).first()
+        
+        if setting:
+            price = float(setting.price)
+            print(f"   ✅ Found {delivery_type} agent price: ₵{price}")
+            return price
+        else:
+            print(f"   ⚠️ No {delivery_type} price found, checking base price...")
+    
+    # Fallback to base price (no delivery_type)
     setting = PriceSetting.query.filter_by(
         category='agent_price',
         network=network,
-        size_gb=size_gb
+        size_gb=size_gb,
+        delivery_type=None,
+        is_available=True
     ).first()
     
     if setting:
-        return float(setting.price)
+        price = float(setting.price)
+        print(f"   ✅ Found base agent price: ₵{price}")
+        return price
     
-    # Return 0 if not set - admin must configure
+    print(f"   ❌ No price found for {network} {size_gb}GB")
     return 0
-
 # ========== ANNOUNCEMENT ROUTES ==========
 
 @app.route('/api/announcement/active', methods=['GET'])
@@ -16787,125 +27189,7 @@ def get_inventory_transactions():
 
 
     
-@app.route('/api/agent/stats', methods=['GET'])
-@token_required
-@agent_required
-def get_agent_stats_enhanced():
-    """Get enhanced agent statistics with accurate profit calculation"""
-    try:
-        agent = g.current_user
-        
-        # Get total sales (amount from completed orders where agent is seller)
-        total_sales = db.session.query(func.sum(Order.amount)).filter(
-            Order.agent_id == agent.id,
-            Order.status == 'completed'
-        ).scalar() or 0
-        
-        # ACCURATE: Get total profit (sum of profit from each sale)
-        total_profit = db.session.query(func.sum(Order.profit)).filter(
-            Order.agent_id == agent.id,
-            Order.status == 'completed'
-        ).scalar() or 0
-        
-        # Get total wholesale spent (what agent paid)
-        total_wholesale = db.session.query(func.sum(Order.wholesale_price)).filter(
-            Order.agent_id == agent.id,
-            Order.status == 'completed'
-        ).scalar() or 0
-        
-        # Get total orders count
-        total_orders = Order.query.filter_by(
-            agent_id=agent.id,
-            status='completed'
-        ).count()
-        
-        # Get today's sales and profit
-        today = datetime.utcnow().date()
-        today_start = datetime.combine(today, datetime.min.time())
-        today_end = datetime.combine(today, datetime.max.time())
-        
-        today_sales = db.session.query(func.sum(Order.amount)).filter(
-            Order.agent_id == agent.id,
-            Order.status == 'completed',
-            Order.created_at >= today_start,
-            Order.created_at <= today_end
-        ).scalar() or 0
-        
-        today_profit = db.session.query(func.sum(Order.profit)).filter(
-            Order.agent_id == agent.id,
-            Order.status == 'completed',
-            Order.created_at >= today_start,
-            Order.created_at <= today_end
-        ).scalar() or 0
-        
-        # Get this week's sales and profit
-        week_start = today - timedelta(days=today.weekday())
-        week_start_dt = datetime.combine(week_start, datetime.min.time())
-        
-        week_sales = db.session.query(func.sum(Order.amount)).filter(
-            Order.agent_id == agent.id,
-            Order.status == 'completed',
-            Order.created_at >= week_start_dt
-        ).scalar() or 0
-        
-        week_profit = db.session.query(func.sum(Order.profit)).filter(
-            Order.agent_id == agent.id,
-            Order.status == 'completed',
-            Order.created_at >= week_start_dt
-        ).scalar() or 0
-        
-        # Get this month's sales and profit
-        month_start = today.replace(day=1)
-        month_start_dt = datetime.combine(month_start, datetime.min.time())
-        
-        month_sales = db.session.query(func.sum(Order.amount)).filter(
-            Order.agent_id == agent.id,
-            Order.status == 'completed',
-            Order.created_at >= month_start_dt
-        ).scalar() or 0
-        
-        month_profit = db.session.query(func.sum(Order.profit)).filter(
-            Order.agent_id == agent.id,
-            Order.status == 'completed',
-            Order.created_at >= month_start_dt
-        ).scalar() or 0
-        
-        # Get customer count
-        customer_count = db.session.query(Order.phone_number).filter(
-            Order.agent_id == agent.id,
-            Order.status == 'completed'
-        ).distinct().count()
-        
-        # Calculate commission rate based on tier (or from store)
-        commission_rate = getattr(agent, 'commission_rate', 15)
-        
-        return jsonify({
-            'success': True,
-            'data': {
-                'wallet_balance': float(agent.wallet_balance),
-                'total_sales': float(total_sales),
-                'total_orders': total_orders,
-                'agent_savings': float(total_wholesale),  # Total spent on inventory
-                'total_commission': float(total_profit),  # Actual profit
-                'pending_commission': 0,
-                'today_sales': float(today_sales),
-                'today_profit': float(today_profit),
-                'this_week_sales': float(week_sales),
-                'this_week_profit': float(week_profit),
-                'this_month_sales': float(month_sales),
-                'this_month_profit': float(month_profit),
-                'total_customers': customer_count,
-                'agent_tier': getattr(agent, 'agent_tier', 'Bronze'),
-                'next_tier_sales': 5000,
-                'commission_rate': commission_rate,
-                'rank': 0,
-                'username': agent.username
-            }
-        })
-        
-    except Exception as e:
-        print(f"Get agent stats error: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
+
     
 @app.route('/api/agent/bulk-order', methods=['POST'])
 @token_required
@@ -17070,7 +27354,7 @@ def debug_agent_orders():
 @token_required
 @agent_required
 def get_agent_orders():
-    """Get all orders for the agent with detailed information"""
+    """Get all orders for the agent with detailed information matching frontend expectations"""
     try:
         agent = g.current_user
         
@@ -17079,19 +27363,17 @@ def get_agent_orders():
         print("="*60)
         print(f"Agent ID: {agent.id}")
         print(f"Agent Username: {agent.username}")
-        print(f"Agent Email: {agent.email}")
-        print(f"Is Agent: {agent.is_agent}")
         
         # Get pagination parameters
         page = request.args.get('page', 1, type=int)
-        per_page = request.args.get('limit', 20, type=int)
+        per_page = request.args.get('limit', 50, type=int)
         status_filter = request.args.get('status', 'all')
         search = request.args.get('search', '')
         
         # Build query
         query = Order.query.filter_by(agent_id=agent.id)
         
-        # Apply status filter
+        # Apply status filter based on delivery_status (frontend expects this)
         if status_filter != 'all':
             if status_filter == 'delivered':
                 query = query.filter(Order.delivery_status == 'delivered')
@@ -17112,13 +27394,10 @@ def get_agent_orders():
                 )
             )
         
-        # Get paginated results
-        paginated = query.order_by(Order.created_at.desc()).paginate(
-            page=page, per_page=per_page, error_out=False
-        )
+        # Get all orders (no pagination for frontend table)
+        orders = query.order_by(Order.created_at.desc()).all()
         
-        orders = paginated.items
-        print(f"\nFound {len(orders)} orders for agent {agent.id} (Page {page} of {paginated.pages})")
+        print(f"\nFound {len(orders)} orders for agent {agent.id}")
         
         orders_list = []
         for order in orders:
@@ -17128,54 +27407,114 @@ def get_agent_orders():
             # Calculate profit (if not already stored)
             profit = order.profit if order.profit else (order.amount - order.cost) if order.cost else 0
             
+            # SAFELY handle None values
+            size_gb = order.size_gb if order.size_gb is not None else 0
+            quantity = order.quantity if order.quantity is not None else 1
+            total_gb = size_gb * quantity
+            
+            # Get customer name from order or user
+            customer_name = order.customer_name
+            if not customer_name and order.user_id:
+                user = User.query.get(order.user_id)
+                if user:
+                    customer_name = user.username
+            
+            # Format delivery status for display
+            delivery_status = order.delivery_status or 'pending'
+            status_display_map = {
+                'pending': '⏳ Pending',
+                'queued': '📋 Queued',
+                'processing': '🔄 Processing',
+                'delivered': '✅ Delivered',
+                'failed': '❌ Failed',
+                'cancelled': '🚫 Cancelled'
+            }
+            
+            # Get the correct amount fields
+            customer_paid = order.amount if order.amount else 0
+            amount_deducted = order.cost if order.cost else (order.amount if order.amount else 0)
+            
             orders_list.append({
-                # Basic Info
+                # Basic Info - matches frontend expectations
                 'id': order.id,
                 'order_id': order.order_id,
-                'customer_name': order.customer_name or 'Customer',
+                'customer_name': customer_name or 'Customer',
                 'customer_phone': order.phone_number,
+                'phone': order.phone_number,  # Alias for compatibility
                 
                 # Product Info
                 'network': order.network,
-                'size_gb': order.size_gb,
-                'quantity': order.quantity,
-                'total_gb': order.size_gb * order.quantity,
+                'size_gb': size_gb,
+                'quantity': quantity,
+                'total_gb': total_gb,
                 
-                # Financial Info
-                'amount': float(order.amount),  # Customer paid
+                # Bill Payment Specific Fields (if applicable)
+                'type': getattr(order, 'type', 'data'),
+                'biller_code': getattr(order, 'biller_code', None),
+                'biller_name': getattr(order, 'biller_name', None),
+                'account_number': getattr(order, 'account_number', None),
+                
+                # Financial Info - MATCHES FRONTEND EXPECTATIONS
+                'customer_paid': float(customer_paid),  # What customer paid
+                'amount': float(customer_paid),  # Alias for compatibility
+                'amount_deducted': float(amount_deducted),  # What was deducted from wallet
                 'cost': float(order.cost) if order.cost else 0,  # Wholesale cost
                 'profit': float(profit),  # Agent profit
-                'balance_before': float(transaction.balance_before) if transaction else 0,
-                'balance_after': float(transaction.balance_after) if transaction else 0,
-                'amount_deducted': float(order.cost) if order.cost else float(order.amount),
+                'balance_before': float(transaction.balance_before) if transaction and transaction.balance_before else 0,
+                'balance_after': float(transaction.balance_after) if transaction and transaction.balance_after else 0,
                 
-                # Status Info
+                # Commission Info
+                'commission_earned': float(order.initiator_commission) if hasattr(order, 'initiator_commission') and order.initiator_commission else 0,
+                'hubtel_commission_rate': float(order.hubtel_commission_rate) if hasattr(order, 'hubtel_commission_rate') and order.hubtel_commission_rate else 0,
+                
+                # Status Info - MATCHES FRONTEND EXPECTATIONS
                 'status': order.status,
-                'delivery_status': order.delivery_status or 'pending',
-                'delivery_status_display': get_status_display(order.delivery_status or 'pending'),
+                'delivery_status': delivery_status,
+                'delivery_status_display': status_display_map.get(delivery_status, delivery_status),
                 'delivery_status_updated_at': order.delivery_status_updated_at.isoformat() if order.delivery_status_updated_at else None,
+                'updated_at': order.delivery_status_updated_at.strftime('%Y-%m-%d %H:%M:%S') if order.delivery_status_updated_at else None,
                 
                 # Provider Info
-                'provider': order.provider,
-                'provider_order_id': order.provider_order_id,
-                'provider_reference': order.provider_reference,
+                'provider': getattr(order, 'provider', 'digimall'),
+                'provider_order_id': getattr(order, 'provider_order_id', None),
+                'provider_reference': getattr(order, 'provider_reference', None),
                 
-                # Source Info
+                # Source Info - FRONTEND USES THIS
                 'source': 'Agent' if order.agent_id else 'User',
-                'payment_method': order.payment_method,
+                'agent_id': order.agent_id,
+                'user_id': order.user_id,
+                'payment_method': getattr(order, 'payment_method', 'wallet'),
                 
-                # Timestamps
+                # Timestamps - FORMATTED FOR DISPLAY
                 'created_at': order.created_at.isoformat() if order.created_at else None,
                 'created_at_display': order.created_at.strftime('%Y-%m-%d %H:%M:%S') if order.created_at else None,
                 'completed_at': order.completed_at.isoformat() if order.completed_at else None,
-                'updated_at': order.delivery_status_updated_at.strftime('%Y-%m-%d %H:%M:%S') if order.delivery_status_updated_at else None,
+                'completed_at_display': order.completed_at.strftime('%Y-%m-%d %H:%M:%S') if order.completed_at else None,
+                'date_created': order.created_at.strftime('%Y-%m-%d') if order.created_at else None,
+                'time_created': order.created_at.strftime('%H:%M:%S') if order.created_at else None,
                 
                 # Error info
-                'error_message': order.last_delivery_error if order.delivery_status == 'failed' else None
+                'error_message': getattr(order, 'last_delivery_error', None) if delivery_status == 'failed' else None,
+                
+                # Additional fields that frontend might need
+                'is_bill_payment': getattr(order, 'type', 'data') == 'bill_payment',
+                'can_retry': delivery_status == 'failed'
             })
         
         print(f"✅ Returning {len(orders_list)} orders to frontend")
+        print(f"Sample order keys: {list(orders_list[0].keys()) if orders_list else []}")
         print("="*60 + "\n")
+        
+        # Calculate stats for the response
+        total_sales = sum(o['customer_paid'] for o in orders_list)
+        total_profit = sum(o['profit'] for o in orders_list)
+        total_orders_count = len(orders_list)
+        
+        # Count orders by delivery status
+        delivered_count = sum(1 for o in orders_list if o['delivery_status'] == 'delivered')
+        pending_count = sum(1 for o in orders_list if o['delivery_status'] in ['pending', 'queued'])
+        processing_count = sum(1 for o in orders_list if o['delivery_status'] == 'processing')
+        failed_count = sum(1 for o in orders_list if o['delivery_status'] == 'failed')
         
         return jsonify({
             'success': True,
@@ -17183,15 +27522,19 @@ def get_agent_orders():
             'pagination': {
                 'page': page,
                 'per_page': per_page,
-                'total': paginated.total,
-                'pages': paginated.pages,
-                'has_next': paginated.has_next,
-                'has_prev': paginated.has_prev
+                'total': total_orders_count,
+                'pages': (total_orders_count + per_page - 1) // per_page if per_page > 0 else 1,
+                'has_next': page * per_page < total_orders_count,
+                'has_prev': page > 1
             },
             'stats': {
-                'total_orders': paginated.total,
-                'total_sales': float(sum(o.amount for o in orders)),
-                'total_profit': float(sum(o.profit if o.profit else 0 for o in orders))
+                'total_orders': total_orders_count,
+                'total_sales': float(total_sales),
+                'total_profit': float(total_profit),
+                'delivered': delivered_count,
+                'pending': pending_count,
+                'processing': processing_count,
+                'failed': failed_count
             }
         })
         
@@ -17201,189 +27544,60 @@ def get_agent_orders():
         traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
-def get_status_display(status):
-    """Get human-readable status display"""
-    status_map = {
-        'pending': '⏳ Pending',
-        'queued': '📋 Queued',
-        'processing': '🔄 Processing',
-        'delivered': '✅ Delivered',
-        'failed': '❌ Failed',
-        'cancelled': '🚫 Cancelled',
-        'refunded': '💰 Refunded',
-        'resolved': '✓ Resolved'
-    }
-    return status_map.get(status, status)
 
-@app.route('/api/agent/orders/stats', methods=['GET'])
+@app.route('/api/agent/orders/<order_id>/retry', methods=['POST'])
 @token_required
 @agent_required
-def get_agent_orders_stats():
-    """Get order statistics summary"""
+def retry_agent_order(order_id):
+    """Retry a failed order"""
     try:
         agent = g.current_user
         
-        # Get all orders
-        orders = Order.query.filter_by(agent_id=agent.id).all()
+        # Find the order
+        order = Order.query.filter_by(order_id=order_id, agent_id=agent.id).first()
+        if not order:
+            return jsonify({'success': False, 'error': 'Order not found'}), 404
         
-        # Calculate stats
-        total_orders = len(orders)
-        total_sales = sum(o.amount for o in orders)
-        total_cost = sum(o.cost for o in orders if o.cost)
-        total_profit = total_sales - total_cost
+        # Check if order can be retried
+        if order.delivery_status != 'failed':
+            return jsonify({'success': False, 'error': 'Only failed orders can be retried'}), 400
         
-        # Status breakdown
-        status_counts = {}
-        delivery_status_counts = {}
-        for order in orders:
-            status = order.status
-            delivery_status = order.delivery_status or 'pending'
-            status_counts[status] = status_counts.get(status, 0) + 1
-            delivery_status_counts[delivery_status] = delivery_status_counts.get(delivery_status, 0) + 1
+        # Reset order status
+        order.delivery_status = 'pending'
+        order.status = 'pending'
+        order.last_delivery_error = None
+        order.delivery_status_updated_at = datetime.utcnow()
         
-        # Network breakdown
-        network_sales = {}
-        for order in orders:
-            network = order.network
-            network_sales[network] = network_sales.get(network, 0) + order.amount
+        db.session.commit()
         
-        # Today's stats
-        today = datetime.utcnow().date()
-        today_start = datetime.combine(today, datetime.min.time())
-        today_orders = [o for o in orders if o.created_at >= today_start]
-        today_sales = sum(o.amount for o in today_orders)
-        today_profit = sum(o.amount - (o.cost or 0) for o in today_orders)
+        # Trigger retry (call network service)
+        from services.network_service import NetworkAPIService
+        network_service = NetworkAPIService()
+        
+        # Send asynchronously
+        import threading
+        thread = threading.Thread(
+            target=network_service.send_data_to_customer,
+            args=(order.network, order.phone_number, order.size_gb, order.quantity or 1, order.order_id)
+        )
+        thread.start()
         
         return jsonify({
             'success': True,
-            'data': {
-                'total_orders': total_orders,
-                'total_sales': float(total_sales),
-                'total_cost': float(total_cost),
-                'total_profit': float(total_profit),
-                'avg_order_value': float(total_sales / total_orders) if total_orders > 0 else 0,
-                'today_orders': len(today_orders),
-                'today_sales': float(today_sales),
-                'today_profit': float(today_profit),
-                'status_breakdown': status_counts,
-                'delivery_status_breakdown': delivery_status_counts,
-                'network_sales': network_sales
-            }
+            'message': 'Order retry initiated successfully'
         })
         
     except Exception as e:
-        print(f"Get agent orders stats error: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@app.route('/api/agent/sell', methods=['POST'])
-@token_required
-@agent_required
-def agent_sell_data():
-    """Agent sells data - supports both methods"""
-    try:
-        data = request.get_json()
-        network = data.get('network')
-        size_gb = data.get('size_gb')
-        phone = data.get('phone')
-        customer_name = data.get('customer_name', '')
-        selling_price = data.get('selling_price')
-        use_inventory = data.get('use_inventory', False)  # Agent chooses
-        
-        agent = g.current_user
-        wholesale_price = get_agent_price(network, size_gb)
-        
-        # Calculate selling price if not provided
-        if not selling_price:
-            retail_price = get_user_price(network, size_gb)
-            selling_price = retail_price if retail_price > 0 else wholesale_price * 1.18
-        
-        profit = selling_price - wholesale_price
-        
-        # METHOD 1: Use Inventory (if agent has stock)
-        if use_inventory:
-            from models import AgentInventory
-            inventory = AgentInventory.query.filter_by(
-                agent_id=agent.id,
-                network=network,
-                size_gb=size_gb
-            ).first()
-            
-            if inventory and inventory.remaining >= 1:
-                # Use inventory - NO wallet deduction
-                inventory.remaining -= 1
-                inventory.sold = (inventory.sold or 0) + 1
-                
-                order = Order(
-                    user_id=agent.id,
-                    agent_id=agent.id,
-                    network=network,
-                    size_gb=size_gb,
-                    phone_number=phone,
-                    amount=selling_price,
-                    status='completed',
-                    payment_method='inventory'  # Paid from inventory
-                )
-                db.session.add(order)
-                db.session.commit()
-                
-                # Call network to send data
-                network_service = NetworkAPIService()
-                network_service.send_data_to_customer(network, phone, size_gb, 1, order.order_id)
-                
-                return jsonify({
-                    'success': True,
-                    'method': 'inventory',
-                    'profit': profit,
-                    'message': f'Sold from inventory. Customer pays you ₵{selling_price:.2f}'
-                })
-        
-        # METHOD 2: Direct Wallet Deduction (Fallback)
-        if agent.wallet_balance >= wholesale_price:
-            # Deduct from wallet
-            agent.wallet_balance -= wholesale_price
-            
-            order = Order(
-                user_id=agent.id,
-                agent_id=agent.id,
-                network=network,
-                size_gb=size_gb,
-                phone_number=phone,
-                amount=selling_price,
-                status='completed',
-                payment_method='wallet'  # Paid from wallet
-            )
-            db.session.add(order)
-            db.session.commit()
-            
-            # Call network to send data
-            network_service = NetworkAPIService()
-            network_service.send_data_to_customer(network, phone, size_gb, 1, order.order_id)
-            
-            return jsonify({
-                'success': True,
-                'method': 'wallet',
-                'new_balance': float(agent.wallet_balance),
-                'profit': profit,
-                'message': f'Sold using wallet. Customer pays you ₵{selling_price:.2f}'
-            })
-        
-        # No inventory AND insufficient wallet
-        return jsonify({
-            'success': False,
-            'error': 'Insufficient wallet balance and no inventory. Please add funds or purchase inventory.'
-        }), 400
-        
-    except Exception as e:
-        print(f"Agent sell error: {e}")
+        print(f"Retry order error: {e}")
         db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
+
 
 @app.route('/api/agent/orders/<int:order_id>/status', methods=['PUT'])
 @token_required
 @agent_required
 def update_order_status(order_id):
-    """Update order status (pending -> processing -> sending -> completed) - Email ONLY for notifications"""
+    """Update order status with proper timestamp tracking"""
     try:
         data = request.get_json()
         new_status = data.get('status')
@@ -17392,69 +27606,179 @@ def update_order_status(order_id):
         if not order or order.agent_id != g.current_user.id:
             return jsonify({'success': False, 'error': 'Order not found'}), 404
         
-        valid_statuses = ['pending', 'processing', 'sending', 'completed', 'failed']
+        # Valid statuses including delivery_status
+        valid_statuses = ['pending', 'queued', 'processing', 'delivered', 'failed', 'cancelled']
         if new_status not in valid_statuses:
             return jsonify({'success': False, 'error': 'Invalid status'}), 400
         
-        old_status = order.status
-        order.status = new_status
+        old_status = order.delivery_status or order.status
+        order.delivery_status = new_status
+        order.delivery_status_updated_at = datetime.utcnow()
         
-        if new_status == 'completed':
+        if new_status == 'delivered':
+            order.status = 'completed'
             order.completed_at = datetime.utcnow()
             
-            customer = User.query.get(order.user_id) if order.user_id else None
-            if customer and customer.email:
-                send_email(
-                    customer.email,
-                    f"Order Completed - {order.order_id} - {COMPANY_NAME}",
-                    f"""
-                    <div style="font-family: Arial, sans-serif;">
-                        <h2 style="color: #28a745;">✅ Your Data Order Has Been Delivered!</h2>
-                        <p>Dear {customer.username},</p>
-                        <p>Your data order has been successfully delivered via {COMPANY_NAME}.</p>
-                        <p><strong>Order ID:</strong> {order.order_id}</p>
-                        <p><strong>Package:</strong> {order.quantity}x {order.size_gb}GB {order.network.upper()}</p>
-                        <p><strong>Phone Number:</strong> {order.phone_number}</p>
-                        <p><strong>Amount:</strong> GHS {order.amount:.2f}</p>
-                        <p><strong>Status:</strong> Delivered ✓</p>
-                        <a href="{COMPANY_WEBSITE}/orders" style="background: #8B0000; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">View Order</a>
-                    </div>
-                    """
-                )
-            else:
-                send_data_delivery_to_provider(order.phone_number, f"✅ Your {order.quantity}x {order.size_gb}GB {order.network.upper()} data has been delivered via {COMPANY_NAME}! Order ID: {order.order_id}")
+            # Send notification
+            if order.user_id:
+                customer = User.query.get(order.user_id)
+                if customer and customer.email:
+                    send_email(
+                        customer.email,
+                        f"Order Delivered - {order.order_id} - {COMPANY_NAME}",
+                        f"""
+                        <div style="font-family: Arial, sans-serif;">
+                            <h2 style="color: #28a745;">✅ Your Order Has Been Delivered!</h2>
+                            <p>Dear {customer.username},</p>
+                            <p>Your data has been successfully delivered.</p>
+                            <p><strong>Order ID:</strong> {order.order_id}</p>
+                            <p><strong>Package:</strong> {order.quantity or 1}x {order.size_gb}GB {order.network.upper()}</p>
+                            <p><strong>Phone:</strong> {order.phone_number}</p>
+                            <p><strong>Amount:</strong> GHS {order.amount:.2f}</p>
+                        </div>
+                        """
+                    )
         
         elif new_status == 'failed':
-            customer = User.query.get(order.user_id) if order.user_id else None
-            if customer and customer.email:
-                send_email(
-                    customer.email,
-                    f"Order Failed - {order.order_id} - {COMPANY_NAME}",
-                    f"""
-                    <div style="font-family: Arial, sans-serif;">
-                        <h2 style="color: #dc3545;">❌ Order Delivery Failed</h2>
-                        <p>Dear {customer.username},</p>
-                        <p>We're sorry, but your data order could not be delivered.</p>
-                        <p><strong>Order ID:</strong> {order.order_id}</p>
-                        <p><strong>Package:</strong> {order.quantity}x {order.size_gb}GB {order.network.upper()}</p>
-                        <p>Please contact our support team for assistance. Your payment will be refunded.</p>
-                        <p>Contact support: {COMPANY_PHONE}</p>
-                    </div>
-                    """
-                )
+            order.last_delivery_error = data.get('error_message', 'Delivery failed')
+            # Refund if needed
+            if order.cost and order.user_id:
+                user = User.query.get(order.user_id)
+                if user:
+                    user.wallet_balance += order.cost
+                    refund_transaction = Transaction(
+                        user_id=user.id,
+                        type='refund',
+                        amount=order.cost,
+                        reference=f"REFUND_{order.order_id}",
+                        balance_before=user.wallet_balance - order.cost,
+                        balance_after=user.wallet_balance,
+                        status='completed'
+                    )
+                    db.session.add(refund_transaction)
         
         db.session.commit()
         
-        log_activity(g.current_user.id, 'update_order_status', 
-                    f'Updated order {order.order_id} status from {old_status} to {new_status}')
-        
-        return jsonify({'success': True, 'message': f'Order status updated to {new_status} on {COMPANY_NAME}'})
+        return jsonify({
+            'success': True,
+            'message': f'Order status updated to {new_status}',
+            'data': {
+                'order_id': order.order_id,
+                'status': new_status,
+                'updated_at': order.delivery_status_updated_at.isoformat()
+            }
+        })
         
     except Exception as e:
         print(f"Update order status error: {e}")
         db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
 
+
+@app.route('/api/agent/orders/bulk-status', methods=['POST'])
+@token_required
+@agent_required
+def bulk_check_order_status():
+    """Check status of multiple orders at once with real-time Digimall updates"""
+    try:
+        data = request.get_json()
+        order_ids = data.get('order_ids', [])
+        
+        if not order_ids:
+            return jsonify({'success': False, 'error': 'No order IDs provided'}), 400
+        
+        agent = g.current_user
+        
+        # Get orders belonging to this agent
+        orders = Order.query.filter(
+            Order.order_id.in_(order_ids),
+            Order.agent_id == agent.id
+        ).all()
+        
+        if not orders:
+            return jsonify({
+                'success': False, 
+                'error': 'No orders found for this agent'
+            }), 404
+        
+        # Initialize Digimall service
+        digimall = DigimallService()
+        status_results = []
+        updated_count = 0
+        
+        for order in orders:
+            order_status = {
+                'order_id': order.order_id,
+                'status': order.delivery_status or order.status,
+                'status_display': get_status_display(order.delivery_status or order.status),
+                'updated_at': order.delivery_status_updated_at.isoformat() if order.delivery_status_updated_at else None,
+                'can_retry': order.delivery_status == 'failed',
+                'provider_order_id': getattr(order, 'provider_order_id', None),
+                'provider_reference': getattr(order, 'provider_reference', None)
+            }
+            
+            # If order has a provider_order_id, check with Digimall for real-time status
+            if order.provider_order_id:
+                try:
+                    # FIXED: Use check_order_status, not check_delivery_status
+                    digimall_result = digimall.check_order_status(order.provider_order_id)
+                    
+                    if digimall_result and digimall_result.get('success'):
+                        # Extract status from Digimall response
+                        digimall_status = digimall_result.get('status')
+                        
+                        if digimall_status and digimall_status != order.delivery_status:
+                            # Update local order status
+                            order.delivery_status = digimall_status
+                            order.delivery_status_updated_at = datetime.utcnow()
+                            
+                            if digimall_status == 'delivered':
+                                order.completed_at = datetime.utcnow()
+                            
+                            db.session.commit()
+                            updated_count += 1
+                            
+                            # Update the response with new status
+                            order_status['status'] = digimall_status
+                            order_status['status_display'] = get_status_display(digimall_status)
+                            order_status['updated_at'] = order.delivery_status_updated_at.isoformat()
+                            order_status['digimall_updated'] = True
+                            
+                            print(f"✅ Updated order {order.order_id}: {old_status} -> {digimall_status}")
+                except Exception as e:
+                    print(f"⚠️ Error checking Digimall status for {order.order_id}: {e}")
+                    # Don't fail the whole request, just log the error
+            
+            status_results.append(order_status)
+        
+        return jsonify({
+            'success': True,
+            'data': status_results,
+            'total': len(status_results),
+            'updated': updated_count,
+            'message': f'Checked {len(status_results)} orders, updated {updated_count} statuses'
+        })
+        
+    except Exception as e:
+        print(f"Bulk status check error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+def get_status_display(status):
+    """Get human-readable status display with emoji"""
+    status_map = {
+        'pending': '⏳ Pending',
+        'queued': '📋 Queued',
+        'processing': '🔄 Processing',
+        'delivered': '✅ Delivered',
+        'failed': '❌ Failed',
+        'cancelled': '🚫 Cancelled',
+        'refunded': '💰 Refunded',
+        'completed': '✅ Completed'
+    }
+    return status_map.get(status, status)
 
 @app.route('/api/agent/order/notify-customer', methods=['POST'])
 @token_required
@@ -18529,6 +28853,308 @@ def update_agent_prices():
     except Exception as e:
         print(f"Update agent price error: {e}")
         db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# app.py - Add these endpoints
+
+@app.route('/api/admin/delivery/pricing', methods=['GET'])
+@token_required
+@admin_required
+@price_session_required
+def get_delivery_pricing():
+    """Get all delivery pricing settings"""
+    try:
+        from models import DeliverySetting
+        
+        networks = ['mtn', 'telecel', 'airteltigo']
+        delivery_types = ['express', 'standard', 'mashup_voice', 'mashup_data']
+        
+        pricing_data = {}
+        
+        for network in networks:
+            pricing_data[network] = {}
+            for d_type in delivery_types:
+                setting = DeliverySetting.query.filter_by(
+                    network=network, 
+                    delivery_type=d_type
+                ).first()
+                
+                if setting:
+                    pricing_data[network][d_type] = setting.to_dict()
+                else:
+                    # Default values for missing settings
+                    default_config = {
+                        'multiplier': 1.0,
+                        'fixed_premium': 0.0,
+                        'min_time': 3,
+                        'max_time': 8,
+                        'avg_time': 5,
+                        'is_active': d_type == 'standard',
+                        'queue_length': 0,
+                        'status': 'normal'
+                    }
+                    
+                    # MTN specific defaults
+                    if network == 'mtn':
+                        if d_type == 'express':
+                            default_config = {
+                                'multiplier': 1.15,
+                                'fixed_premium': 0.5,
+                                'min_time': 5,
+                                'max_time': 10,
+                                'avg_time': 7,
+                                'is_active': True,
+                                'queue_length': 3,
+                                'status': 'very_fast'
+                            }
+                        elif d_type == 'mashup_voice':
+                            default_config = {
+                                'multiplier': 1.1,
+                                'fixed_premium': 0,
+                                'min_time': 30,
+                                'max_time': 60,
+                                'avg_time': 45,
+                                'is_active': True,
+                                'queue_length': 25,
+                                'status': 'delay_expected'
+                            }
+                        elif d_type == 'mashup_data':
+                            default_config = {
+                                'multiplier': 1.0,
+                                'fixed_premium': 0,
+                                'min_time': 25,
+                                'max_time': 50,
+                                'avg_time': 35,
+                                'is_active': True,
+                                'queue_length': 18,
+                                'status': 'delay_expected'
+                            }
+                    
+                    pricing_data[network][d_type] = default_config
+        
+        return jsonify({
+            'success': True,
+            'data': pricing_data
+        })
+        
+    except Exception as e:
+        print(f"Get delivery pricing error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/admin/delivery/pricing', methods=['PUT'])
+@token_required
+@admin_required
+@price_session_required
+def update_delivery_pricing():
+    """Update delivery pricing (similar to price update)"""
+    try:
+        from models import DeliverySetting
+        
+        data = request.get_json()
+        network = data.get('network')
+        delivery_type = data.get('delivery_type')
+        
+        if not network or not delivery_type:
+            return jsonify({'success': False, 'error': 'Missing required fields'}), 400
+        
+        # Find or create setting
+        setting = DeliverySetting.query.filter_by(
+            network=network,
+            delivery_type=delivery_type
+        ).first()
+        
+        if not setting:
+            setting = DeliverySetting(
+                network=network,
+                delivery_type=delivery_type
+            )
+            db.session.add(setting)
+        
+        # Update fields if provided
+        if 'multiplier' in data:
+            setting.multiplier = data['multiplier']
+        if 'fixed_premium' in data:
+            setting.fixed_premium = data['fixed_premium']
+        if 'min_time' in data:
+            setting.min_time = data['min_time']
+        if 'max_time' in data:
+            setting.max_time = data['max_time']
+        if 'avg_time' in data:
+            setting.avg_time = data['avg_time']
+        if 'is_active' in data:
+            setting.is_active = data['is_active']
+        if 'queue_length' in data:
+            setting.queue_length = data['queue_length']
+        if 'status' in data:
+            setting.status = data['status']
+        
+        setting.updated_at = datetime.utcnow()
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': f'Updated {delivery_type} for {network.upper()}',
+            'data': setting.to_dict()
+        })
+        
+    except Exception as e:
+        print(f"Update delivery pricing error: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/admin/delivery/pricing/bulk', methods=['POST'])
+@token_required
+@admin_required
+@price_session_required
+def bulk_update_delivery_pricing():
+    """Bulk update multiple delivery pricing settings"""
+    try:
+        from models import DeliverySetting
+        
+        data = request.get_json()
+        updates = data.get('updates', [])
+        
+        updated_count = 0
+        for update in updates:
+            network = update.get('network')
+            delivery_type = update.get('delivery_type')
+            
+            if not network or not delivery_type:
+                continue
+            
+            setting = DeliverySetting.query.filter_by(
+                network=network,
+                delivery_type=delivery_type
+            ).first()
+            
+            if not setting:
+                setting = DeliverySetting(
+                    network=network,
+                    delivery_type=delivery_type
+                )
+                db.session.add(setting)
+            
+            if 'multiplier' in update:
+                setting.multiplier = update['multiplier']
+            if 'fixed_premium' in update:
+                setting.fixed_premium = update['fixed_premium']
+            if 'min_time' in update:
+                setting.min_time = update['min_time']
+            if 'max_time' in update:
+                setting.max_time = update['max_time']
+            if 'avg_time' in update:
+                setting.avg_time = update['avg_time']
+            if 'is_active' in update:
+                setting.is_active = update['is_active']
+            if 'queue_length' in update:
+                setting.queue_length = update['queue_length']
+            if 'status' in update:
+                setting.status = update['status']
+            
+            setting.updated_at = datetime.utcnow()
+            updated_count += 1
+        
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': f'Updated {updated_count} delivery pricing settings'
+        })
+        
+    except Exception as e:
+        print(f"Bulk update delivery pricing error: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/delivery/options', methods=['GET'])
+@token_required
+def get_delivery_options():
+    """Get available delivery options for user/agent (uses DeliverySetting)"""
+    try:
+        from models import DeliverySetting, PriceSetting
+        
+        network = request.args.get('network', 'mtn')
+        size_gb = request.args.get('size_gb', type=float)
+        
+        if not size_gb:
+            return jsonify({'success': False, 'error': 'size_gb is required'}), 400
+        
+        # Get base price based on user type
+        if g.current_user.is_agent:
+            price_setting = PriceSetting.query.filter_by(
+                category='agent_price',
+                network=network,
+                size_gb=size_gb
+            ).first()
+        else:
+            price_setting = PriceSetting.query.filter_by(
+                category='user_price',
+                network=network,
+                size_gb=size_gb
+            ).first()
+        
+        if not price_setting or not price_setting.is_available:
+            return jsonify({'success': False, 'error': f'No price found for {network} {size_gb}GB'}), 404
+        
+        base_price = float(price_setting.price)
+        
+        # Get all delivery options for this network
+        delivery_types = ['express', 'standard', 'mashup_voice', 'mashup_data']
+        options = []
+        
+        for d_type in delivery_types:
+            setting = DeliverySetting.query.filter_by(
+                network=network,
+                delivery_type=d_type,
+                is_active=True
+            ).first()
+            
+            if setting:
+                calculated_price = base_price * float(setting.multiplier) + float(setting.fixed_premium)
+                
+                # Get option details
+                option_details = {
+                    'express': {'name': 'MTN EXPRESS BUNDLE', 'icon': '⚡', 'color': '#f39c12', 'description': 'Fastest delivery - Priority processing'},
+                    'standard': {'name': 'MTN MASTER BUNDLE', 'icon': '📱', 'color': '#3498db', 'description': 'Standard delivery - Best value'},
+                    'mashup_voice': {'name': 'MTN MASHUP (VOICE + DATA)', 'icon': '🎵', 'color': '#9b59b6', 'description': 'Voice minutes + Data bundle'},
+                    'mashup_data': {'name': 'MTN MASHUP (DATA ONLY)', 'icon': '📦', 'color': '#3498db', 'description': 'Data-only bundle'}
+                }.get(d_type, {})
+                
+                options.append({
+                    'type': d_type,
+                    'name': option_details.get('name', d_type),
+                    'icon': option_details.get('icon', '📱'),
+                    'color': option_details.get('color', '#3498db'),
+                    'description': option_details.get('description', ''),
+                    'delivery_time': {
+                        'min': setting.min_time,
+                        'max': setting.max_time,
+                        'avg': setting.avg_time
+                    },
+                    'price_multiplier': float(setting.multiplier),
+                    'fixed_premium': float(setting.fixed_premium),
+                    'final_price': round(calculated_price, 2),
+                    'base_price': base_price,
+                    'queue_length': setting.queue_length,
+                    'status': setting.status
+                })
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'network': network,
+                'size_gb': size_gb,
+                'base_price': base_price,
+                'options': options
+            }
+        })
+        
+    except Exception as e:
+        print(f"Get delivery options error: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/admin/prices/waec', methods=['PUT'])
@@ -19779,7 +30405,7 @@ def get_loyalty_info():
 
 @app.route('/api/user/loyalty/redeem', methods=['POST'])
 @token_required
-def redeem_points():
+def redeem_royalty_points():
     """Redeem loyalty points for discount (Email ONLY)"""
     try:
         data = request.get_json()
@@ -20227,34 +30853,189 @@ class BillPaymentService:
 @app.route('/api/user/orders', methods=['GET'])
 @token_required
 def get_user_orders():
-    """Get user's orders with delivery status"""
+    """Get user's orders with detailed information matching frontend expectations"""
     try:
-        limit = request.args.get('limit', 50, type=int)
+        user = g.current_user
         
-        orders = Order.query.filter_by(
-            user_id=g.current_user.id
-        ).order_by(Order.created_at.desc()).limit(limit).all()
+        print("\n" + "="*60)
+        print("DEBUG: /api/user/orders called")
+        print("="*60)
+        print(f"User ID: {user.id}")
+        print(f"Username: {user.username}")
+        
+        # Get pagination parameters
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('limit', 50, type=int)
+        status_filter = request.args.get('status', 'all')
+        search = request.args.get('search', '')
+        
+        # Build query - get orders where user is the buyer
+        query = Order.query.filter_by(user_id=user.id)
+        
+        # Apply status filter based on delivery_status
+        if status_filter != 'all':
+            if status_filter == 'delivered':
+                query = query.filter(Order.delivery_status == 'delivered')
+            elif status_filter == 'pending':
+                query = query.filter(Order.delivery_status.in_(['pending', 'queued']))
+            elif status_filter == 'processing':
+                query = query.filter(Order.delivery_status == 'processing')
+            elif status_filter == 'failed':
+                query = query.filter(Order.delivery_status == 'failed')
+        
+        # Apply search filter
+        if search:
+            query = query.filter(
+                db.or_(
+                    Order.order_id.ilike(f'%{search}%'),
+                    Order.phone_number.ilike(f'%{search}%'),
+                    Order.customer_name.ilike(f'%{search}%')
+                )
+            )
+        
+        # Get all orders
+        orders = query.order_by(Order.created_at.desc()).all()
+        
+        print(f"\nFound {len(orders)} orders for user {user.id}")
+        
+        orders_list = []
+        for order in orders:
+            # Get transaction details for balance info
+            transaction = Transaction.query.filter_by(reference=order.order_id).first()
+            
+            # Calculate profit (if agent sale)
+            profit = order.profit if order.profit else 0
+            
+            # SAFELY handle None values
+            size_gb = order.size_gb if order.size_gb is not None else 0
+            quantity = order.quantity if order.quantity is not None else 1
+            total_gb = size_gb * quantity
+            
+            # Get customer name from order
+            customer_name = order.customer_name or user.username
+            
+            # Format delivery status for display
+            delivery_status = order.delivery_status or 'pending'
+            status_display_map = {
+                'pending': '⏳ Pending',
+                'queued': '📋 Queued',
+                'processing': '🔄 Processing',
+                'delivered': '✅ Delivered',
+                'failed': '❌ Failed',
+                'cancelled': '🚫 Cancelled'
+            }
+            
+            # Get the correct amount fields
+            customer_paid = order.amount if order.amount else 0
+            amount_deducted = order.cost if order.cost else (order.amount if order.amount else 0)
+            
+            orders_list.append({
+                # Basic Info
+                'id': order.id,
+                'order_id': order.order_id,
+                'customer_name': customer_name,
+                'customer_phone': order.phone_number,
+                'phone': order.phone_number,  # Alias for compatibility
+                
+                # Product Info
+                'network': order.network,
+                'size_gb': size_gb,
+                'quantity': quantity,
+                'total_gb': total_gb,
+                
+                # Bill Payment Specific Fields
+                'type': getattr(order, 'type', 'data'),
+                'biller_code': getattr(order, 'biller_code', None),
+                'biller_name': getattr(order, 'biller_name', None),
+                'account_number': getattr(order, 'account_number', None),
+                'is_bill_payment': getattr(order, 'type', 'data') == 'bill_payment',
+                
+                # Financial Info
+                'customer_paid': float(customer_paid),
+                'amount': float(customer_paid),  # Alias for compatibility
+                'amount_deducted': float(amount_deducted),
+                'cost': float(order.cost) if order.cost else 0,
+                'profit': float(profit),
+                'balance_before': float(transaction.balance_before) if transaction and transaction.balance_before else 0,
+                'balance_after': float(transaction.balance_after) if transaction and transaction.balance_after else 0,
+                
+                # Commission Info (if user is agent)
+                'commission_earned': float(order.initiator_commission) if hasattr(order, 'initiator_commission') and order.initiator_commission else 0,
+                
+                # Status Info
+                'status': order.status,
+                'delivery_status': delivery_status,
+                'delivery_status_display': status_display_map.get(delivery_status, delivery_status),
+                'delivery_status_updated_at': order.delivery_status_updated_at.isoformat() if order.delivery_status_updated_at else None,
+                'updated_at': order.delivery_status_updated_at.strftime('%Y-%m-%d %H:%M:%S') if order.delivery_status_updated_at else None,
+                
+                # Provider Info
+                'provider': getattr(order, 'provider', 'digimall'),
+                'provider_order_id': getattr(order, 'provider_order_id', None),
+                'provider_reference': getattr(order, 'provider_reference', None),
+                
+                # Source Info
+                'source': 'Agent' if order.agent_id else 'User',
+                'agent_id': order.agent_id,
+                'user_id': order.user_id,
+                'payment_method': getattr(order, 'payment_method', 'wallet'),
+                
+                # Timestamps
+                'created_at': order.created_at.isoformat() if order.created_at else None,
+                'created_at_display': order.created_at.strftime('%Y-%m-%d %H:%M:%S') if order.created_at else None,
+                'completed_at': order.completed_at.isoformat() if order.completed_at else None,
+                'completed_at_display': order.completed_at.strftime('%Y-%m-%d %H:%M:%S') if order.completed_at else None,
+                'date_created': order.created_at.strftime('%Y-%m-%d') if order.created_at else None,
+                'time_created': order.created_at.strftime('%H:%M:%S') if order.created_at else None,
+                
+                # Error info
+                'error_message': getattr(order, 'last_delivery_error', None) if delivery_status == 'failed' else None,
+                
+                # Additional fields
+                'can_retry': delivery_status == 'failed'
+            })
+        
+        print(f"✅ Returning {len(orders_list)} orders to frontend")
+        print(f"Sample order keys: {list(orders_list[0].keys()) if orders_list else []}")
+        print("="*60 + "\n")
+        
+        # Calculate stats
+        total_spent = sum(o['customer_paid'] for o in orders_list)
+        total_orders_count = len(orders_list)
+        
+        # Count orders by delivery status
+        delivered_count = sum(1 for o in orders_list if o['delivery_status'] == 'delivered')
+        pending_count = sum(1 for o in orders_list if o['delivery_status'] in ['pending', 'queued'])
+        processing_count = sum(1 for o in orders_list if o['delivery_status'] == 'processing')
+        failed_count = sum(1 for o in orders_list if o['delivery_status'] == 'failed')
         
         return jsonify({
             'success': True,
-            'data': [{
-                'order_id': o.order_id,
-                'network': o.network,
-                'size_gb': o.size_gb,
-                'amount': o.amount,
-                'status': o.status,
-                'delivery_status': o.delivery_status,  # NEW
-                'delivery_status_updated_at': o.delivery_status_updated_at.isoformat() if o.delivery_status_updated_at else None,
-                'phone': o.phone_number,
-                'date': o.created_at.strftime('%Y-%m-%d %H:%M:%S')
-            } for o in orders]
+            'data': orders_list,
+            'pagination': {
+                'page': page,
+                'per_page': per_page,
+                'total': total_orders_count,
+                'pages': (total_orders_count + per_page - 1) // per_page if per_page > 0 else 1,
+                'has_next': page * per_page < total_orders_count,
+                'has_prev': page > 1
+            },
+            'stats': {
+                'total_orders': total_orders_count,
+                'total_spent': float(total_spent),
+                'delivered': delivered_count,
+                'pending': pending_count,
+                'processing': processing_count,
+                'failed': failed_count
+            }
         })
         
     except Exception as e:
-        print(f"Get user orders error: {e}")
+        print(f"❌ Get user orders error: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
-
-
+    
 @app.route('/api/order/<order_id>/status', methods=['GET'])
 @token_required
 def get_order_status(order_id):
@@ -20328,88 +31109,158 @@ def get_wallet_history():
         return jsonify({'success': False, 'error': 'Failed to fetch history'}), 500
 
 
+# app.py - Add these endpoints
+
+# ========== REFERRAL ENDPOINTS ==========
+
 @app.route('/api/referrals', methods=['GET'])
 @token_required
 def get_referrals():
-    """Get user's referral statistics"""
+    """Get user's referral data"""
     try:
         user = g.current_user
         
-        # Get referred users (users who signed up using this user's referral code)
-        referred_users = User.query.filter_by(referred_by=user.id).all()
-        
-        # Calculate earnings from completed referrals
-        total_earnings = 0
-        pending_earnings = 0
-        
-        for referred in referred_users:
-            # Check if referred user has made a purchase (completed order)
-            has_purchase = Order.query.filter(
-                Order.user_id == referred.id,
-                Order.status == 'completed'
-            ).first() is not None
-            
-            if has_purchase:
-                # Check if reward was already given
-                reward_given = ReferralReward.query.filter_by(
-                    referrer_id=user.id,
-                    referred_id=referred.id,
-                    status='paid'
-                ).first()
-                
-                if not reward_given:
-                    pending_earnings += 5.00  # GHS 5 per qualified referral
-                else:
-                    total_earnings += 5.00
-            else:
-                pending_earnings += 5.00  # Pending until they make a purchase
-        
-        # Get referral code
+        # Get user's referral code
         referral_code = user.referral_code
         
-        # If no referral code exists, generate one
-        if not referral_code:
-            import string
-            import random
-            referral_code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
-            user.referral_code = referral_code
-            db.session.commit()
+        # Get all referrals made by this user
+        referrals = Referral.query.filter_by(referrer_id=user.id).order_by(
+            Referral.created_at.desc()
+        ).all()
         
-        # Build referrals list for display
-        referrals_list = []
-        for referred in referred_users:
-            has_purchase = Order.query.filter(
-                Order.user_id == referred.id,
-                Order.status == 'completed'
-            ).first() is not None
-            
-            status = 'completed' if has_purchase else 'pending'
-            
-            referrals_list.append({
-                'id': referred.id,
-                'referred_user': referred.username,
-                'referred_phone': referred.phone,
-                'reward_amount': 5.00,
-                'status': status,
-                'created_at': referred.created_at.isoformat() if referred.created_at else None
+        # Calculate stats
+        total_referrals = len(referrals)
+        total_points = sum(r.points_earned for r in referrals if r.status == 'completed')
+        pending_points = sum(r.points_earned for r in referrals if r.status == 'pending')
+        
+        # Format referral list
+        referral_list = []
+        for ref in referrals:
+            referred_user = User.query.get(ref.referred_user_id)
+            referral_list.append({
+                'id': ref.id,
+                'name': referred_user.username if referred_user else 'Anonymous',
+                'email': referred_user.email if referred_user else '',
+                'phone': referred_user.phone if referred_user else '',
+                'created_at': ref.created_at.isoformat(),
+                'status': ref.status,
+                'points_earned': ref.points_earned
             })
         
         return jsonify({
             'success': True,
-            'data': {
-                'referral_code': referral_code,
-                'total_referrals': len(referred_users),
-                'total_earnings': float(total_earnings),
-                'pending_earnings': float(pending_earnings),
-                'bonus_per_referral': 5.00,
-                'referrals_list': referrals_list
+            'referral_code': referral_code,
+            'referrals': referral_list,
+            'stats': {
+                'total': total_referrals,
+                'points_earned': total_points,
+                'pending_points': pending_points
             }
         })
         
     except Exception as e:
-        print(f"Referrals error: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"Error fetching referrals: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/referrals/register', methods=['POST'])
+def register_referral():
+    """Register a referral when a new user signs up with a referral code"""
+    try:
+        data = request.get_json()
+        referral_code = data.get('referral_code')
+        new_user_id = data.get('user_id')
+        
+        if not referral_code or not new_user_id:
+            return jsonify({'success': False, 'error': 'Referral code and user ID required'}), 400
+        
+        # Find referrer by referral code
+        referrer = User.query.filter_by(referral_code=referral_code).first()
+        if not referrer:
+            return jsonify({'success': False, 'error': 'Invalid referral code'}), 404
+        
+        # Check if referral already exists
+        existing = Referral.query.filter_by(referred_user_id=new_user_id).first()
+        if existing:
+            return jsonify({'success': False, 'error': 'Referral already registered'}), 400
+        
+        # Create referral record
+        referral = Referral(
+            referrer_id=referrer.id,
+            referred_user_id=new_user_id,
+            referral_code=referral_code,
+            status='pending',
+            points_earned=POINTS_CONFIG['REFERRAL_POINTS']
+        )
+        db.session.add(referral)
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': 'Referral registered successfully',
+            'data': {'referral_id': referral.id}
+        })
+        
+    except Exception as e:
+        print(f"Error registering referral: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/referrals/complete', methods=['POST'])
+@token_required
+def complete_referral():
+    """Complete a referral when referred user makes first purchase"""
+    try:
+        data = request.get_json()
+        referral_id = data.get('referral_id')
+        
+        if not referral_id:
+            return jsonify({'success': False, 'error': 'Referral ID required'}), 400
+        
+        referral = Referral.query.get(referral_id)
+        if not referral:
+            return jsonify({'success': False, 'error': 'Referral not found'}), 404
+        
+        if referral.status != 'pending':
+            return jsonify({'success': False, 'error': 'Referral already completed'}), 400
+        
+        # Update referral status
+        referral.status = 'completed'
+        referral.completed_at = datetime.utcnow()
+        
+        # Award points to referrer
+        referrer = User.query.get(referral.referrer_id)
+        if referrer:
+            points_to_award = referral.points_earned
+            referrer.points_balance = (referrer.points_balance or 0) + points_to_award
+            referrer.total_points_earned = (referrer.total_points_earned or 0) + points_to_award
+            
+            # Create points transaction
+            transaction = PointsTransaction(
+                user_id=referrer.id,
+                points=points_to_award,
+                type='referral_bonus',
+                description=f'Referral bonus for {referral.referred_user.username}',
+                reference=f'REF-{referral.id}',
+                balance_after=referrer.points_balance
+            )
+            db.session.add(transaction)
+        
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': f'Referral completed! {referral.points_earned} point awarded!',
+            'data': {
+                'points_awarded': referral.points_earned,
+                'new_balance': referrer.points_balance if referrer else 0
+            }
+        })
+        
+    except Exception as e:
+        print(f"Error completing referral: {e}")
+        db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
     
 @app.route('/api/referral/<int:referral_id>/claim', methods=['POST'])
@@ -20480,8 +31331,292 @@ def claim_referral_bonus(referral_id):
         db.session.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
 
+# app.py - Points endpoints
+
+# ========== POINTS ENDPOINTS ==========
+
+@app.route('/api/points', methods=['GET'])
+@token_required
+def get_points():
+    """Get user's points balance and history"""
+    try:
+        user = g.current_user
+        
+        # Get recent transactions
+        transactions = PointsTransaction.query.filter_by(
+            user_id=user.id
+        ).order_by(PointsTransaction.created_at.desc()).limit(50).all()
+        
+        # Calculate value
+        points_value = user.points_balance / POINTS_CONFIG['POINTS_TO_GHS_RATE']
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'balance': user.points_balance or 0,
+                'total_earned': user.total_points_earned or 0,
+                'total_redeemed': user.total_points_redeemed or 0,
+                'value_in_ghs': round(points_value, 2),
+                'transactions': [{
+                    'id': t.id,
+                    'points': t.points,
+                    'type': t.type,
+                    'description': t.description,
+                    'balance_after': t.balance_after,
+                    'created_at': t.created_at.isoformat()
+                } for t in transactions]
+            }
+        })
+        
+    except Exception as e:
+        print(f"Error getting points: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
+def get_bundle_price(network, size_gb, delivery_type=None):
+    """
+    Get bundle price from database dynamically
+    
+    Args:
+        network: 'mtn', 'telecel', 'airteltigo'
+        size_gb: int (1, 2, 5, 10, 20, etc.)
+        delivery_type: 'master', 'express', etc. (optional)
+    
+    Returns:
+        float: Price in GHS, or 0 if not found
+    """
+    try:
+        from models import PriceSetting
+        
+        # Try with delivery_type first if provided
+        if delivery_type:
+            price_record = PriceSetting.query.filter_by(
+                category='user_price',
+                network=network.lower(),
+                size_gb=size_gb,
+                delivery_type=delivery_type,
+                is_available=True
+            ).first()
+            
+            if price_record:
+                return float(price_record.price)
+        
+        # Try without delivery_type (base price)
+        price_record = PriceSetting.query.filter_by(
+            category='user_price',
+            network=network.lower(),
+            size_gb=size_gb,
+            is_available=True
+        ).filter(
+            PriceSetting.delivery_type.is_(None)
+        ).first()
+        
+        if price_record:
+            return float(price_record.price)
+        
+        # If not found, try agent_price as fallback
+        price_record = PriceSetting.query.filter_by(
+            category='agent_price',
+            network=network.lower(),
+            size_gb=size_gb,
+            is_available=True
+        ).filter(
+            PriceSetting.delivery_type.is_(None)
+        ).first()
+        
+        if price_record:
+            return float(price_record.price)
+        
+        # Fallback to hardcoded prices if nothing found
+        print(f"⚠️ Price not found for {network} {size_gb}GB, using fallback")
+        fallback_prices = {
+            'mtn': {1: 6.00, 2: 10.00, 3: 15.00, 4: 19.00, 5: 23.00, 
+                    6: 27.00, 8: 36.00, 10: 45.00, 15: 64.00, 20: 85.00,
+                    25: 108.00, 30: 130.00, 40: 160.00, 50: 220.00},
+            'telecel': {1: 6.00, 2: 10.00, 3: 15.00, 4: 19.00, 5: 23.00, 
+                        6: 27.00, 8: 36.00, 10: 45.00, 15: 64.00, 20: 85.00,
+                        25: 108.00, 30: 130.00, 40: 160.00, 50: 220.00},
+            'airteltigo': {1: 6.00, 2: 10.00, 3: 15.00, 4: 19.00, 5: 23.00, 
+                           6: 27.00, 8: 36.00, 10: 45.00, 15: 64.00, 20: 85.00,
+                           25: 108.00, 30: 130.00, 40: 160.00, 50: 220.00}
+        }
+        return fallback_prices.get(network.lower(), {}).get(size_gb, 0)
+        
+    except Exception as e:
+        print(f"Error getting bundle price: {e}")
+        return 0
+
+
+@app.route('/api/points/redeem', methods=['POST'])
+@token_required
+def redeem_points():
+    """Redeem points for data bundle or bill payment"""
+    try:
+        data = request.get_json()
+        user = g.current_user
+        
+        points_to_redeem = data.get('points')
+        redemption_type = data.get('redemption_type')  # 'data_bundle' or 'bill_payment'
+        details = data.get('details', {})
+        
+        # Validate points
+        if not points_to_redeem:
+            return jsonify({'success': False, 'error': 'Points required'}), 400
+        
+        if points_to_redeem < POINTS_CONFIG['MIN_REDEMPTION_POINTS']:
+            return jsonify({
+                'success': False, 
+                'error': f'Minimum redemption is {POINTS_CONFIG["MIN_REDEMPTION_POINTS"]} points (₵{POINTS_CONFIG["MIN_REDEMPTION_POINTS"] / POINTS_CONFIG["POINTS_TO_GHS_RATE"]:.2f})'
+            }), 400
+        
+        if points_to_redeem > POINTS_CONFIG['MAX_REDEMPTION_POINTS']:
+            return jsonify({
+                'success': False, 
+                'error': f'Maximum redemption is {POINTS_CONFIG["MAX_REDEMPTION_POINTS"]} points per transaction'
+            }), 400
+        
+        if user.points_balance < points_to_redeem:
+            return jsonify({
+                'success': False, 
+                'error': f'Insufficient points. You have {user.points_balance} points'
+            }), 400
+        
+        # Calculate GHS value
+        ghs_value = points_to_redeem / POINTS_CONFIG['POINTS_TO_GHS_RATE']
+        
+        # Create redemption record
+        redemption = PointsRedemption(
+            user_id=user.id,
+            points_used=points_to_redeem,
+            redeemed_value=ghs_value,
+            redemption_type=redemption_type,
+            details=details,
+            status='pending'
+        )
+        db.session.add(redemption)
+        
+        # Deduct points
+        user.points_balance -= points_to_redeem
+        user.total_points_redeemed = (user.total_points_redeemed or 0) + points_to_redeem
+        
+        # Create points transaction
+        transaction = PointsTransaction(
+            user_id=user.id,
+            points=-points_to_redeem,
+            type='redemption',
+            description=f'Redeemed {points_to_redeem} points for {redemption_type.replace("_", " ")}',
+            balance_after=user.points_balance
+        )
+        db.session.add(transaction)
+        
+        db.session.commit()
+        
+        # Process redemption based on type
+        if redemption_type == 'bill_payment':
+            # Add to wallet as bonus (non-withdrawable)
+            user.wallet_balance = (user.wallet_balance or 0) + ghs_value
+            
+            wallet_transaction = Transaction(
+                user_id=user.id,
+                type='points_bonus',
+                amount=ghs_value,
+                is_withdrawable=False,
+                description=f'Points redemption: {points_to_redeem} points = ₵{ghs_value:.2f}',
+                reference=f'PTS-{redemption.id}',
+                status='completed'
+            )
+            db.session.add(wallet_transaction)
+            
+            redemption.status = 'completed'
+            redemption.completed_at = datetime.utcnow()
+            db.session.commit()
+            
+            return jsonify({
+                'success': True,
+                'message': f'Redeemed {points_to_redeem} points for ₵{ghs_value:.2f} bill payment credit!',
+                'data': {
+                    'new_balance': user.points_balance,
+                    'bonus_added': ghs_value,
+                    'wallet_balance': user.wallet_balance,
+                    'redemption_id': redemption.id
+                }
+            })
+            
+        elif redemption_type == 'data_bundle':
+            # Get data bundle details
+            network = details.get('network')
+            size_gb = details.get('size_gb')
+            delivery_type = details.get('delivery_type', 'master')
+            
+            if not network or not size_gb:
+                return jsonify({'success': False, 'error': 'Network and size required for data bundle'}), 400
+            
+            # Get price for the bundle from database
+            price = get_bundle_price(network, size_gb, delivery_type)
+            
+            if price <= 0:
+                return jsonify({
+                    'success': False, 
+                    'error': f'Price not found for {size_gb}GB {network}'
+                }), 400
+            
+            # Check if user has enough value
+            if price > ghs_value:
+                return jsonify({
+                    'success': False, 
+                    'error': f'Insufficient value. {size_gb}GB {network} costs ₵{price:.2f}, you have ₵{ghs_value:.2f}'
+                }), 400
+            
+            # Create data order
+            order = Order(
+                user_id=user.id,
+                order_id=f"PTS-{uuid.uuid4().hex[:8].upper()}",
+                type='data',
+                network=network.lower(),
+                size_gb=size_gb,
+                quantity=1,
+                phone_number=user.phone,
+                customer_name=user.username,
+                amount=0,  # Free for user (paid by points)
+                cost=price,  # Cost covered by points
+                profit=0,
+                status='completed',
+                delivery_status='delivered',
+                payment_method='points',
+                provider='roamsmart',
+                completed_at=datetime.utcnow(),
+                created_at=datetime.utcnow()
+            )
+            db.session.add(order)
+            
+            redemption.status = 'completed'
+            redemption.completed_at = datetime.utcnow()
+            db.session.commit()
+            
+            return jsonify({
+                'success': True,
+                'message': f'Redeemed {points_to_redeem} points for {size_gb}GB {network.upper()}!',
+                'data': {
+                    'new_balance': user.points_balance,
+                    'order_id': order.order_id,
+                    'redemption_id': redemption.id,
+                    'bundle': f'{size_gb}GB {network.upper()}'
+                }
+            })
+        
+        else:
+            return jsonify({
+                'success': False, 
+                'error': f'Invalid redemption type: {redemption_type}. Must be "data_bundle" or "bill_payment"'
+            }), 400
+        
+    except Exception as e:
+        print(f"Error redeeming points: {e}")
+        import traceback
+        traceback.print_exc()
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+    
 @app.route('/api/user/withdrawals', methods=['GET'])
 @token_required
 def get_user_withdrawals():
@@ -20777,11 +31912,6 @@ class WAECService:
         except Exception as e:
             print(f"Get user vouchers error: {e}")
             return []
-
-
-# ========== ADMIN WAEC MANAGEMENT ==========
-
-# ========== USER WAEC VOUCHER ENDPOINTS ==========
 
 @app.route('/api/waec/vouchers', methods=['GET'])
 @token_required

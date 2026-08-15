@@ -9,13 +9,75 @@ from flask import current_app
 db = SQLAlchemy()
 
 
-# ========== COMPANY CONFIGURATION ==========
-COMPANY_NAME = "Roamsmart Digital Service"
-COMPANY_SHORT = "Roamsmart"
-COMPANY_EMAIL = "support@roamsmart.shop"
-COMPANY_PHONE = "0557388622"
+COMPANY_NAME = "AFDALNOVA Digital Service"
+COMPANY_SHORT = "AFDALNOVA"
+COMPANY_TAGLINE = "Innovation Meets Excellence"
+COMPANY_EMAIL = "support@abigalisticstudious.com"
+COMPANY_PHONE = "0548247241"
+COMPANY_PHONE_2 = "0599874865"
+COMPANY_WHATSAPP = "233599874865"
+COMPANY_WEBSITE = "https://abigalisticstudious.com"
+COMPANY_DOMAIN = "abigalisticstudious.com"
+ 
 
-# ========== USER MODEL ==========
+class Platform(db.Model):
+    __tablename__ = 'platforms'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    platform_key = db.Column(db.String(20), unique=True, nullable=False)
+    name = db.Column(db.String(100), nullable=False)
+    domain = db.Column(db.String(255))
+    
+    # Payment Configuration
+    paystack_public_key = db.Column(db.String(255))
+    paystack_secret_key = db.Column(db.String(255))
+    paystack_webhook_secret = db.Column(db.String(255))
+    callback_url = db.Column(db.String(500))
+    webhook_url = db.Column(db.String(500))
+    
+    # Branding
+    brand_name = db.Column(db.String(100))
+    brand_tagline = db.Column(db.String(200))
+    brand_logo = db.Column(db.String(500))
+    brand_color = db.Column(db.String(20))
+    brand_primary_color = db.Column(db.String(20))
+    brand_secondary_color = db.Column(db.String(20))
+    
+    # Contact Info
+    support_email = db.Column(db.String(120))
+    support_phone = db.Column(db.String(20))
+    support_phone_2 = db.Column(db.String(20))
+    whatsapp = db.Column(db.String(20))
+    
+    # Status
+    is_active = db.Column(db.Boolean, default=True)
+    
+    # Timestamps
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    users = db.relationship('User', backref='platform_ref', lazy=True)
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'platform_key': self.platform_key,
+            'name': self.name,
+            'domain': self.domain,
+            'brand_name': self.brand_name,
+            'brand_tagline': self.brand_tagline,
+            'brand_logo': self.brand_logo,
+            'brand_color': self.brand_color,
+            'support_email': self.support_email,
+            'support_phone': self.support_phone,
+            'support_phone_2': self.support_phone_2,
+            'whatsapp': self.whatsapp,
+            'is_active': self.is_active,
+            'created_at': self.created_at.isoformat() if self.created_at else None
+        }
+
+
 class User(db.Model):
     __tablename__ = 'users'
     
@@ -25,6 +87,11 @@ class User(db.Model):
     phone = db.Column(db.String(20), unique=True, nullable=False)
     password_hash = db.Column(db.String(200), nullable=False)
     
+    # ========== PLATFORM SUPPORT ==========
+    platform = db.Column(db.String(20), default='platform_a')
+    platform_created = db.Column(db.String(20), default='platform_a')
+    platform_id = db.Column(db.Integer, db.ForeignKey('platforms.id'), nullable=True)
+    
     # Role & Status
     role = db.Column(db.String(20), default='user')
     is_agent = db.Column(db.Boolean, default=False)
@@ -33,15 +100,21 @@ class User(db.Model):
     commission_rate = db.Column(db.Integer, default=10)
     is_suspended = db.Column(db.Boolean, default=False)
     is_active = db.Column(db.Boolean, default=True)
+    is_super_admin = db.Column(db.Boolean, default=False)  # ✅ ADDED
     
-    # ========== SECURITY FIELDS (ADD THESE) ==========
-    failed_login_attempts = db.Column(db.Integer, default=0)  # Track failed logins
-    locked_until = db.Column(db.DateTime, nullable=True)      # Account lockout time
-    last_ip_address = db.Column(db.String(45), nullable=True) # Last login IP
-    account_created_ip = db.Column(db.String(45), nullable=True) # Registration IP
+    # Security Fields
+    failed_login_attempts = db.Column(db.Integer, default=0)
+    locked_until = db.Column(db.DateTime, nullable=True)
+    last_ip_address = db.Column(db.String(45), nullable=True)
+    account_created_ip = db.Column(db.String(45), nullable=True)
     
     # Wallet
     wallet_balance = db.Column(db.Float, default=0.0)
+    
+    # ========== POINTS SYSTEM ==========  # ✅ ADDED
+    points_balance = db.Column(db.Integer, default=0)
+    total_points_earned = db.Column(db.Integer, default=0)
+    total_points_redeemed = db.Column(db.Integer, default=0)
     
     # Verification
     email_verified = db.Column(db.Boolean, default=False)
@@ -91,10 +164,16 @@ class User(db.Model):
     referrals_given = db.relationship('Referral', foreign_keys='Referral.referrer_id', backref='referrer', lazy=True)
     referrals_received = db.relationship('Referral', foreign_keys='Referral.referred_id', backref='referred', lazy=True)
     sessions = db.relationship('UserSession', backref='user', lazy=True)
+    points_transactions = db.relationship('PointsTransaction', backref='user', lazy=True)
+    points_redemptions = db.relationship('PointsRedemption', backref='user', lazy=True)
+    
+    # ✅ Use back_populates for RefundRequest
+    refund_requests = db.relationship('RefundRequest', back_populates='user', lazy=True)
+    admin_logs = db.relationship('AdminLog', back_populates='admin', lazy=True)
+    # customers = db.relationship('Customer', back_populates='agent', lazy=True)
     
     # ========== SECURITY METHODS ==========
     def increment_failed_attempts(self, ip_address=None):
-        """Increment failed login attempts and lock account if needed"""
         from datetime import datetime, timedelta
         self.failed_login_attempts += 1
         if self.failed_login_attempts >= 5:
@@ -104,31 +183,65 @@ class User(db.Model):
         db.session.commit()
     
     def reset_failed_attempts(self):
-        """Reset failed login attempts after successful login"""
         self.failed_login_attempts = 0
         self.locked_until = None
         db.session.commit()
     
     def is_locked(self):
-        """Check if account is currently locked"""
         from datetime import datetime
         if self.locked_until and datetime.utcnow() < self.locked_until:
             return True
         return False
     
     def get_remaining_lockout_time(self):
-        """Get remaining lockout time in minutes"""
         from datetime import datetime
         if self.locked_until and datetime.utcnow() < self.locked_until:
             return int((self.locked_until - datetime.utcnow()).seconds / 60)
         return 0
     
+    # ========== POINTS METHODS ==========  # ✅ ADDED
+    def add_points(self, points, type, description, reference=None):
+        if points <= 0:
+            return False
+        self.points_balance = (self.points_balance or 0) + points
+        self.total_points_earned = (self.total_points_earned or 0) + points
+        transaction = PointsTransaction(
+            user_id=self.id,
+            points=points,
+            type=type,
+            description=description,
+            reference=reference,
+            balance_after=self.points_balance,
+            platform=self.platform
+        )
+        db.session.add(transaction)
+        db.session.commit()
+        return True
+    
+    def deduct_points(self, points, type, description, reference=None):
+        if points <= 0:
+            return False
+        if (self.points_balance or 0) < points:
+            return False
+        self.points_balance -= points
+        self.total_points_redeemed = (self.total_points_redeemed or 0) + points
+        transaction = PointsTransaction(
+            user_id=self.id,
+            points=-points,
+            type=type,
+            description=description,
+            reference=reference,
+            balance_after=self.points_balance,
+            platform=self.platform
+        )
+        db.session.add(transaction)
+        db.session.commit()
+        return True
+    
     def set_password(self, password):
-        """Set password hash"""
         self.password_hash = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
 
     def check_password(self, password):
-        """Check password hash"""
         if not self.password_hash:
             return False
         try:
@@ -138,15 +251,16 @@ class User(db.Model):
             return False
     
     def generate_token(self):
-        """Generate JWT token with 2-hour expiry (security improvement)"""
+        from datetime import datetime, timedelta
         try:
             payload = {
                 'user_id': self.id,
                 'email': self.email,
                 'role': self.role,
-                'exp': datetime.utcnow() + timedelta(hours=2),  # Changed from 7 days to 2 hours
+                'platform': self.platform,
+                'exp': datetime.utcnow() + timedelta(hours=2),
                 'iat': datetime.utcnow(),
-                'jti': str(uuid.uuid4())  # Unique token ID for tracking
+                'jti': str(uuid.uuid4())
             }
             return jwt.encode(payload, current_app.config['SECRET_KEY'], algorithm='HS256')
         except Exception as e:
@@ -160,21 +274,26 @@ class User(db.Model):
             'email': self.email,
             'phone': self.phone,
             'role': self.role,
+            'platform': self.platform,
+            'platform_created': self.platform_created,
             'is_agent': self.is_agent and self.agent_approved,
             'agent_tier': self.agent_tier,
             'commission_rate': self.commission_rate,
             'wallet_balance': self.wallet_balance,
+            'points_balance': self.points_balance or 0,
+            'total_points_earned': self.total_points_earned or 0,
+            'total_points_redeemed': self.total_points_redeemed or 0,
             'referral_code': self.referral_code,
             'full_name': self.full_name,
             'avatar': self.avatar_url,
             'kyc_verified': self.kyc_verified,
             'two_factor_enabled': self.two_factor_enabled,
+            'is_super_admin': self.is_super_admin,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'last_login': self.last_login.isoformat() if self.last_login else None
         }
     
     def generate_email_verification_token(self):
-        """Generate a unique token for email verification"""
         token = jwt.encode(
             {
                 'user_id': self.id,
@@ -202,7 +321,6 @@ class User(db.Model):
     
     @staticmethod
     def verify_email_token(token):
-        """Verify email verification token"""
         try:
             payload = jwt.decode(token, current_app.config['SECRET_KEY'], algorithms=['HS256'])
             if payload.get('type') != 'email_verification':
@@ -216,6 +334,7 @@ class User(db.Model):
         except jwt.InvalidTokenError:
             return None
 
+
 class SuspiciousActivityLog(db.Model):
     __tablename__ = 'suspicious_activity_logs'
     
@@ -224,9 +343,11 @@ class SuspiciousActivityLog(db.Model):
     activity_type = db.Column(db.String(50), nullable=False)
     details = db.Column(db.Text)
     ip_address = db.Column(db.String(45))
+    platform = db.Column(db.String(20), default='platform_a')
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     
     user = db.relationship('User', foreign_keys=[user_id])
+
 
 class PendingTransaction(db.Model):
     __tablename__ = 'pending_transactions'
@@ -236,9 +357,11 @@ class PendingTransaction(db.Model):
     reference = db.Column(db.String(100), unique=True, nullable=False)
     amount = db.Column(db.Numeric(10, 2), nullable=False)
     payment_method = db.Column(db.String(50), default='paystack')
+    platform = db.Column(db.String(20), default='platform_a')
     status = db.Column(db.String(50), default='pending')
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     completed_at = db.Column(db.DateTime, nullable=True)
+
 
 class DataBundle(db.Model):
     __tablename__ = 'data_bundles'
@@ -253,7 +376,9 @@ class DataBundle(db.Model):
     is_active = db.Column(db.Boolean, default=True)
     display_order = db.Column(db.Integer, default=0)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    
+    platform = db.Column(db.String(20), default='platform_a')
+    platform_created = db.Column(db.String(20), default='platform_a')  # Where bundle was created
+
     def to_dict(self):
         return {
             'id': self.id,
@@ -263,12 +388,14 @@ class DataBundle(db.Model):
             'agent_price': self.agent_price,
             'wholesale_price': self.wholesale_price,
             'popular': self.popular,
-            'is_active': self.is_active
+            'is_active': self.is_active,
+            'platform': self.platform
         }
 
-# ========== ORDER MODEL ==========
+
 class Order(db.Model):
     __tablename__ = 'orders'
+    
     id = db.Column(db.Integer, primary_key=True)
     order_id = db.Column(db.String(20), unique=True, default=lambda: f"RS-{uuid.uuid4().hex[:8].upper()}")
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
@@ -301,11 +428,34 @@ class Order(db.Model):
     status = db.Column(db.String(20), default='pending')  
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     completed_at = db.Column(db.DateTime, nullable=True)
-    last_status_check = db.Column(db.DateTime, nullable=True) 
+    last_status_check = db.Column(db.DateTime, nullable=True)
     
+    # ========== PLATFORM SUPPORT ==========
+    platform = db.Column(db.String(20), default='platform_a')
+    platform_created = db.Column(db.String(20), default='platform_a')
+    
+    # ========== COMMISSION FIELDS ==========  # ✅ ADDED
+    hubtel_commission_rate = db.Column(db.Float, default=0.0)
+    total_commission = db.Column(db.Float, default=0.0)
+    admin_commission = db.Column(db.Float, default=0.0)
+    initiator_commission = db.Column(db.Float, default=0.0)
+    initiator_type = db.Column(db.String(20), default='user')
+    initiator_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    delivery_type = db.Column(db.String(50), nullable=True)
+    offer_slug = db.Column(db.String(100), nullable=True)
+    commission_rate = db.Column(db.Float, default=0.0)
+    commission_amount = db.Column(db.Float, default=0.0)
+    agent_commission = db.Column(db.Float, default=0.0)
+    
+    # ========== RESOLUTION FIELDS ==========  # ✅ ADDED
+    resolved_at = db.Column(db.DateTime, nullable=True)
+    resolved_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    resolution_note = db.Column(db.String(500), nullable=True)
     
     customer = db.relationship('User', foreign_keys=[user_id], backref='purchases')
     agent = db.relationship('User', foreign_keys=[agent_id], backref='sales')
+    initiator = db.relationship('User', foreign_keys=[initiator_id], backref='initiated_orders')
+    resolver = db.relationship('User', foreign_keys=[resolved_by], backref='resolved_orders')
     
     def to_dict(self):
         return {
@@ -328,16 +478,27 @@ class Order(db.Model):
             'payment_method': self.payment_method,
             'provider': self.provider,
             'provider_order_id': self.provider_order_id,
-            'status': self.status,  # payment status
-            'delivery_status': self.delivery_status,  # NEW: delivery status
+            'status': self.status,
+            'delivery_status': self.delivery_status,
             'delivery_status_updated_at': self.delivery_status_updated_at.isoformat() if self.delivery_status_updated_at else None,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'date': self.created_at.strftime('%Y-%m-%d %H:%M:%S') if self.created_at else None,
-            'completed_at': self.completed_at.isoformat() if self.completed_at else None
+            'completed_at': self.completed_at.isoformat() if self.completed_at else None,
+            'platform': self.platform,
+            'platform_created': self.platform_created,
+            'resolved_at': self.resolved_at.isoformat() if self.resolved_at else None,
+            'resolution_note': self.resolution_note,
+            'commission': {
+                'hubtel_rate': self.hubtel_commission_rate,
+                'total': self.total_commission,
+                'admin': self.admin_commission,
+                'initiator': self.initiator_commission,
+                'initiator_type': self.initiator_type,
+                'agent_commission': self.agent_commission
+            } if self.total_commission > 0 else None
         }
     
     def get_delivery_status_display(self):
-        """Get human-readable delivery status"""
         status_map = {
             'pending': '⏳ Pending',
             'queued': '📋 Queued',
@@ -351,15 +512,22 @@ class Order(db.Model):
         return status_map.get(self.delivery_status, self.delivery_status or 'Unknown')
     
     def update_delivery_status(self, new_status, error=None):
-        """Update delivery status with timestamp"""
         self.delivery_status = new_status
         self.delivery_status_updated_at = datetime.utcnow()
         if error:
             self.last_delivery_error = error
         db.session.commit()
     
+    def mark_resolved(self, admin_id, note=None):  # ✅ ADDED
+        self.status = 'resolved'
+        self.delivery_status = 'resolved'
+        self.resolved_at = datetime.utcnow()
+        self.resolved_by = admin_id
+        if note:
+            self.resolution_note = note
+        db.session.commit()
+    
     def set_safe_values(self, **kwargs):
-        """Set values with safe truncation"""
         max_lengths = {
             'order_id': 100,
             'provider_order_id': 200,
@@ -368,13 +536,21 @@ class Order(db.Model):
             'phone_number': 20,
             'network': 20,
             'biller_code': 50,
-            'account_number': 100
+            'account_number': 100,
+            'resolution_note': 500
         }
-        
         for key, value in kwargs.items():
             if key in max_lengths and value and len(str(value)) > max_lengths[key]:
                 value = str(value)[:max_lengths[key]]
             setattr(self, key, value)
+    
+    def set_commission(self, commission_data, initiator_id, initiator_type='user'):  # ✅ ADDED
+        self.hubtel_commission_rate = commission_data.get('hubtel_rate', 0)
+        self.total_commission = commission_data.get('total_commission', 0)
+        self.admin_commission = commission_data.get('admin_commission', 0)
+        self.initiator_commission = commission_data.get('initiator_commission', 0)
+        self.initiator_type = initiator_type
+        self.initiator_id = initiator_id
 
 
 class RecurringBill(db.Model):
@@ -394,8 +570,10 @@ class RecurringBill(db.Model):
     last_paid_date = db.Column(db.DateTime, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    platform = db.Column(db.String(20), default='platform_a')
     
     user = db.relationship('User', backref='recurring_bills')
+
 
 class DeliveryLog(db.Model):
     __tablename__ = 'delivery_logs'
@@ -406,7 +584,8 @@ class DeliveryLog(db.Model):
     status = db.Column(db.String(50), default='pending')
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     delivered_at = db.Column(db.DateTime, nullable=True)
-# models.py - Add this class
+    platform = db.Column(db.String(20), default='platform_a')
+
 
 class AgentInventoryTransaction(db.Model):
     __tablename__ = 'agent_inventory_transactions'
@@ -422,6 +601,7 @@ class AgentInventoryTransaction(db.Model):
     status = db.Column(db.String(50), default='completed')
     reference = db.Column(db.String(100), unique=True, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    platform = db.Column(db.String(20), default='platform_a')
     
     # Relationships
     agent = db.relationship('User', backref='inventory_transactions', foreign_keys=[agent_id])
@@ -442,7 +622,6 @@ class AgentInventoryTransaction(db.Model):
             'created_at': self.created_at.isoformat() if self.created_at else None
         }
 
-# models.py - Add this class
 
 class StorePayment(db.Model):
     __tablename__ = 'store_payments'
@@ -473,6 +652,9 @@ class StorePayment(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     verified_at = db.Column(db.DateTime, nullable=True)
     
+    # Platform
+    platform = db.Column(db.String(20), default='platform_a')
+    
     # Relationships
     order = db.relationship('Order', backref='store_payment', uselist=False)
     store = db.relationship('Store', backref='payments')
@@ -495,6 +677,49 @@ class StorePayment(db.Model):
             'verified_at': self.verified_at.isoformat() if self.verified_at else None
         }
     
+class DeliverySetting(db.Model):
+    __tablename__ = 'delivery_settings'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    network = db.Column(db.String(20), nullable=False)
+    delivery_type = db.Column(db.String(50), nullable=False)
+    multiplier = db.Column(db.Numeric(5, 4), default=1.0)
+    fixed_premium = db.Column(db.Numeric(10, 2), default=0.0)
+    min_time = db.Column(db.Integer, default=2)
+    max_time = db.Column(db.Integer, default=5)
+    avg_time = db.Column(db.Integer, default=3)
+    is_active = db.Column(db.Boolean, default=True)
+    queue_length = db.Column(db.Integer, default=0)
+    status = db.Column(db.String(20), default='normal')
+    offer_slug = db.Column(db.String(100), nullable=True)
+    platform = db.Column(db.String(20), default='platform_b')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    __table_args__ = (
+        db.UniqueConstraint('network', 'delivery_type', name='unique_network_delivery'),
+    )
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'network': self.network,
+            'delivery_type': self.delivery_type,
+            'multiplier': float(self.multiplier),
+            'fixed_premium': float(self.fixed_premium),
+            'min_time': self.min_time,
+            'max_time': self.max_time,
+            'avg_time': self.avg_time,
+            'is_active': self.is_active,
+            'queue_length': self.queue_length,
+            'status': self.status,
+            'offer_slug': self.offer_slug,
+            'platform': self.platform,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None
+        }
+
+
 class PriceSetting(db.Model):
     __tablename__ = 'price_settings'
     
@@ -502,13 +727,15 @@ class PriceSetting(db.Model):
     category = db.Column(db.String(50), nullable=False)  
     network = db.Column(db.String(50), nullable=True)    
     size_gb = db.Column(db.Integer, nullable=True)       
+    delivery_type = db.Column(db.String(50), nullable=True)  # ✅ ADDED
     exam_type = db.Column(db.String(50), nullable=True)  
     tier = db.Column(db.String(50), nullable=True)       
     price = db.Column(db.Numeric(10, 2), nullable=True)
     rate = db.Column(db.Numeric(5, 2), nullable=True)
-    is_available = db.Column(db.Boolean, default=True)  # NEW COLUMN
+    is_available = db.Column(db.Boolean, default=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    platform = db.Column(db.String(20), default='platform_a')
     
     def to_dict(self):
         return {
@@ -516,15 +743,16 @@ class PriceSetting(db.Model):
             'category': self.category,
             'network': self.network,
             'size_gb': self.size_gb,
+            'delivery_type': self.delivery_type,
             'exam_type': self.exam_type,
             'tier': self.tier,
             'price': float(self.price) if self.price else None,
             'rate': float(self.rate) if self.rate else None,
-            'is_available': self.is_available,  # NEW
+            'is_available': self.is_available,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None
         }
-# ========== TRANSACTION MODEL ==========
+
 class Transaction(db.Model):
     __tablename__ = 'transactions'
     
@@ -537,12 +765,10 @@ class Transaction(db.Model):
     description = db.Column(db.String(500), nullable=True)
     reference = db.Column(db.String(100), unique=True, default=lambda: f"RS-TXN-{uuid.uuid4().hex[:8].upper()}")
     status = db.Column(db.String(20), default='completed')
-    
-    # Metadata
     meta_data = db.Column(db.JSON, nullable=True)
-    
-    # Timestamps
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)  # ✅ ADDED
+    platform = db.Column(db.String(20), default='platform_a')
     
     def to_dict(self):
         return {
@@ -554,10 +780,11 @@ class Transaction(db.Model):
             'description': self.description,
             'reference': self.reference,
             'status': self.status,
-            'created_at': self.created_at.isoformat() if self.created_at else None
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None
         }
 
-# ========== AGENT REQUEST MODEL ==========
+
 class AgentRequest(db.Model):
     __tablename__ = 'agent_requests'
     
@@ -579,8 +806,11 @@ class AgentRequest(db.Model):
     # Timestamps
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     approved_at = db.Column(db.DateTime, nullable=True)
+    
+    # Platform
+    platform = db.Column(db.String(20), default='platform_a')
 
-# ========== MANUAL PAYMENT MODEL ==========
+
 class ManualPayment(db.Model):
     __tablename__ = 'manual_payments'
     
@@ -609,8 +839,11 @@ class ManualPayment(db.Model):
     
     # Timestamps
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    # Platform
+    platform = db.Column(db.String(20), default='platform_a')
 
-# ========== NOTIFICATION MODEL ==========
+
 class Notification(db.Model):
     __tablename__ = 'notifications'
     
@@ -633,6 +866,9 @@ class Notification(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     read_at = db.Column(db.DateTime, nullable=True)
     
+    # Platform
+    platform = db.Column(db.String(20), default='platform_a')
+    
     def to_dict(self):
         return {
             'id': self.id,
@@ -644,6 +880,7 @@ class Notification(db.Model):
             'action_text': self.action_text,
             'created_at': self.created_at.isoformat() if self.created_at else None
         }
+
 
 class Store(db.Model):
     __tablename__ = 'stores'
@@ -658,13 +895,14 @@ class Store(db.Model):
     logo_url = db.Column(db.String(500), nullable=True)
     banner_color = db.Column(db.String(7), default='#8B0000')
     markup = db.Column(db.Integer, default=15)
-    custom_prices = db.Column(db.JSON, nullable=True)      # Original column
-    custom_products = db.Column(db.JSON, nullable=True)    # New column (add this)
+    custom_prices = db.Column(db.JSON, nullable=True)
+    custom_products = db.Column(db.JSON, nullable=True)
     is_active = db.Column(db.Boolean, default=True)
     total_sales = db.Column(db.Float, default=0.0)
     total_orders = db.Column(db.Integer, default=0)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    platform = db.Column(db.String(20), default='platform_a')
     
     def to_dict(self):
         return {
@@ -678,14 +916,14 @@ class Store(db.Model):
             'banner_color': self.banner_color,
             'markup': self.markup,
             'custom_prices': self.custom_prices,
-            'custom_products': self.custom_products,  # Add this
+            'custom_products': self.custom_products,
             'is_active': self.is_active,
             'total_sales': self.total_sales,
             'total_orders': self.total_orders,
             'store_url': f"/store/{self.store_slug}"
         }
 
-# models.py - Add this model
+
 class PackageAvailability(db.Model):
     __tablename__ = 'package_availability'
     
@@ -696,6 +934,7 @@ class PackageAvailability(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     updated_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    platform = db.Column(db.String(20), default='platform_a')
     
     # Add unique constraint
     __table_args__ = (db.UniqueConstraint('network', 'size_gb', name='unique_network_size'),)
@@ -708,6 +947,7 @@ class PackageAvailability(db.Model):
             'is_available': self.is_available,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None
         }
+
 
 class PaymentSession(db.Model):
     __tablename__ = 'payment_sessions'
@@ -724,6 +964,8 @@ class PaymentSession(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     expires_at = db.Column(db.DateTime, default=lambda: datetime.utcnow() + timedelta(hours=1))
     order_id = db.Column(db.String(50), nullable=True)
+    platform = db.Column(db.String(20), default='platform_a')
+    
     def to_dict(self):
         return {
             'reference': self.reference,
@@ -738,6 +980,7 @@ class PaymentSession(db.Model):
             'order_id': self.order_id
         }
 
+
 class AgentProductPrice(db.Model):
     __tablename__ = 'agent_product_prices'
     
@@ -749,8 +992,10 @@ class AgentProductPrice(db.Model):
     markup = db.Column(db.Numeric(5, 2), default=15.00)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    platform = db.Column(db.String(20), default='platform_a')
     
     agent = db.relationship('User', backref='product_prices')
+
 
 class AgentStore(db.Model):
     __tablename__ = 'agent_stores'
@@ -762,14 +1007,15 @@ class AgentStore(db.Model):
     contact_phone = db.Column(db.String(20))
     contact_email = db.Column(db.String(100))
     store_description = db.Column(db.Text)
-    default_markup = db.Column(db.Numeric(5, 2), default=15.00)  # Add this
+    default_markup = db.Column(db.Numeric(5, 2), default=15.00)
     is_active = db.Column(db.Boolean, default=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    platform = db.Column(db.String(20), default='platform_a')
     
     agent = db.relationship('User', backref='agent_store')
 
-# ========== STORE CLIENT MODEL ==========
+
 class StoreClient(db.Model):
     __tablename__ = 'store_clients'
     
@@ -789,8 +1035,9 @@ class StoreClient(db.Model):
     last_purchase = db.Column(db.DateTime, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    platform = db.Column(db.String(20), default='platform_a')
 
-# ========== REFERRAL MODEL ==========
+
 class Referral(db.Model):
     __tablename__ = 'referrals'
     
@@ -805,6 +1052,7 @@ class Referral(db.Model):
     # Timestamps
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     completed_at = db.Column(db.DateTime, nullable=True)
+    platform = db.Column(db.String(20), default='platform_a')
     
     def to_dict(self):
         return {
@@ -816,7 +1064,7 @@ class Referral(db.Model):
             'created_at': self.created_at.isoformat() if self.created_at else None
         }
 
-# ========== ANNOUNCEMENT MODEL ==========
+
 class Announcement(db.Model):
     __tablename__ = 'announcements'
     
@@ -833,6 +1081,9 @@ class Announcement(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     created_by = db.Column(db.Integer, nullable=True)
     
+    # Platform
+    platform = db.Column(db.String(20), default='platform_a')
+    
     def to_dict(self):
         return {
             'id': self.id,
@@ -844,7 +1095,7 @@ class Announcement(db.Model):
             'expires_at': self.expires_at.isoformat() if self.expires_at else None
         }
 
-# ========== KYC DOCUMENT MODEL ==========
+
 class KYCDocument(db.Model):
     __tablename__ = 'kyc_documents'
     
@@ -864,6 +1115,7 @@ class KYCDocument(db.Model):
     
     # Timestamps
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    platform = db.Column(db.String(20), default='platform_a')
     
     def to_dict(self):
         return {
@@ -875,7 +1127,7 @@ class KYCDocument(db.Model):
             'created_at': self.created_at.isoformat() if self.created_at else None
         }
 
-# ========== WEBHOOK MODEL ==========
+
 class Webhook(db.Model):
     __tablename__ = 'webhooks'
     
@@ -891,6 +1143,7 @@ class Webhook(db.Model):
     
     # Timestamps
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    platform = db.Column(db.String(20), default='platform_a')
     
     def to_dict(self):
         return {
@@ -902,7 +1155,7 @@ class Webhook(db.Model):
             'created_at': self.created_at.isoformat() if self.created_at else None
         }
 
-# ========== BACKUP MODEL ==========
+
 class Backup(db.Model):
     __tablename__ = 'backups'
     
@@ -918,6 +1171,7 @@ class Backup(db.Model):
     # Timestamps
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     created_by = db.Column(db.Integer, nullable=True)
+    platform = db.Column(db.String(20), default='platform_a')
     
     def to_dict(self):
         return {
@@ -929,7 +1183,7 @@ class Backup(db.Model):
             'created_at': self.created_at.isoformat() if self.created_at else None
         }
 
-# ========== USER SESSION MODEL ==========
+
 class UserSession(db.Model):
     __tablename__ = 'user_sessions'
     
@@ -950,6 +1204,7 @@ class UserSession(db.Model):
     # Timestamps
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     expires_at = db.Column(db.DateTime, nullable=True)
+    platform = db.Column(db.String(20), default='platform_a')
     
     def to_dict(self):
         return {
@@ -963,7 +1218,7 @@ class UserSession(db.Model):
             'created_at': self.created_at.isoformat() if self.created_at else None
         }
 
-# ========== SUPPORT TICKET MODEL ==========
+
 class SupportTicket(db.Model):
     __tablename__ = 'support_tickets'
     
@@ -985,6 +1240,7 @@ class SupportTicket(db.Model):
     # Timestamps
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    platform = db.Column(db.String(20), default='platform_a')
     
     def to_dict(self):
         return {
@@ -998,7 +1254,7 @@ class SupportTicket(db.Model):
             'created_at': self.created_at.isoformat() if self.created_at else None
         }
 
-# ========== NEWSLETTER SUBSCRIBER MODEL ==========
+
 class NewsletterSubscriber(db.Model):
     __tablename__ = 'newsletter_subscribers'
     
@@ -1009,6 +1265,7 @@ class NewsletterSubscriber(db.Model):
     # Timestamps
     subscribed_at = db.Column(db.DateTime, default=datetime.utcnow)
     unsubscribed_at = db.Column(db.DateTime, nullable=True)
+    platform = db.Column(db.String(20), default='platform_a')
     
     def to_dict(self):
         return {
@@ -1017,7 +1274,7 @@ class NewsletterSubscriber(db.Model):
             'subscribed_at': self.subscribed_at.isoformat() if self.subscribed_at else None
         }
 
-# ========== ACTIVITY LOG MODEL ==========
+
 class ActivityLog(db.Model):
     __tablename__ = 'activity_logs'
     
@@ -1034,6 +1291,7 @@ class ActivityLog(db.Model):
     
     # Timestamps
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    platform = db.Column(db.String(20), default='platform_a')
     
     def to_dict(self):
         return {
@@ -1047,7 +1305,7 @@ class ActivityLog(db.Model):
             'created_at': self.created_at.isoformat() if self.created_at else None
         }
 
-# ========== NETWORK PROVIDER MODEL ==========
+
 class NetworkProvider(db.Model):
     __tablename__ = 'network_providers'
     
@@ -1058,9 +1316,8 @@ class NetworkProvider(db.Model):
     api_endpoint = db.Column(db.String(500), nullable=True)
     is_active = db.Column(db.Boolean, default=True)
     last_sync = db.Column(db.DateTime, nullable=True)
+    platform = db.Column(db.String(20), default='platform_a')
 
-# ========== MASTER INVENTORY MODEL ==========
-# Update MasterInventory model in models.py - add sold_to_users column
 
 class MasterInventory(db.Model):
     __tablename__ = 'master_inventories'
@@ -1071,11 +1328,13 @@ class MasterInventory(db.Model):
     total_purchased = db.Column(db.Integer, default=0)
     remaining = db.Column(db.Integer, default=0)
     sold_to_agents = db.Column(db.Integer, default=0)
-    sold_to_users = db.Column(db.Integer, default=0)  # Add this
+    sold_to_users = db.Column(db.Integer, default=0)
     last_purchase_date = db.Column(db.DateTime, default=datetime.utcnow)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-# ========== AGENT INVENTORY MODEL ==========
+    platform = db.Column(db.String(20), default='platform_a')
+
+
 class AgentInventory(db.Model):
     __tablename__ = 'agent_inventory'
     
@@ -1088,8 +1347,9 @@ class AgentInventory(db.Model):
     remaining = db.Column(db.Float, default=0)
     last_purchase_date = db.Column(db.DateTime, nullable=True)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    platform = db.Column(db.String(20), default='platform_a')
 
-# ========== INVENTORY TRANSACTION MODEL ==========
+
 class InventoryTransaction(db.Model):
     __tablename__ = 'inventory_transactions'
     
@@ -1105,8 +1365,9 @@ class InventoryTransaction(db.Model):
     status = db.Column(db.String(20), default='completed')
     reference = db.Column(db.String(100), unique=True, default=lambda: f"RS-INV-{uuid.uuid4().hex[:8].upper()}")
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    platform = db.Column(db.String(20), default='platform_a')
 
-# ========== LOYALTY POINTS MODEL ==========
+
 class LoyaltyPoints(db.Model):
     __tablename__ = 'loyalty_points'
     
@@ -1116,8 +1377,9 @@ class LoyaltyPoints(db.Model):
     lifetime_points = db.Column(db.Integer, default=0)
     tier = db.Column(db.String(20), default='Bronze')
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    platform = db.Column(db.String(20), default='platform_a')
 
-# ========== POINTS TRANSACTION MODEL ==========
+
 class PointsTransaction(db.Model):
     __tablename__ = 'points_transactions'
     
@@ -1125,11 +1387,15 @@ class PointsTransaction(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     order_id = db.Column(db.Integer, db.ForeignKey('orders.id'), nullable=True)
     points = db.Column(db.Integer, nullable=False)
-    type = db.Column(db.String(20), nullable=False)  # earned, redeemed, bonus
+    type = db.Column(db.String(20), nullable=False)
     description = db.Column(db.String(500), nullable=True)
+    reference = db.Column(db.String(50), nullable=True)
+    balance_after = db.Column(db.Integer, default=0)  # ✅ ADDED
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    platform = db.Column(db.String(20), default='platform_a')
 
-# ========== AGENT APPLICATION MODEL ==========
+
+
 class AgentApplication(db.Model):
     __tablename__ = 'agent_applications'
     
@@ -1147,6 +1413,9 @@ class AgentApplication(db.Model):
     payment_amount = db.Column(db.Float, default=100.00)
     payment_method = db.Column(db.String(50), default='manual')
     
+    # Platform
+    platform = db.Column(db.String(20), default='platform_a')
+    
     # Relationships
     user = db.relationship('User', backref='agent_applications', foreign_keys=[user_id])
     
@@ -1161,7 +1430,7 @@ class AgentApplication(db.Model):
             'approved_at': self.approved_at.isoformat() if self.approved_at else None
         }
 
-# ========== WAEC VOUCHER MODEL ==========
+
 class WAECVoucher(db.Model):
     __tablename__ = 'waec_vouchers'
     
@@ -1181,8 +1450,9 @@ class WAECVoucher(db.Model):
     purchased_at = db.Column(db.DateTime, default=datetime.utcnow)
     expires_at = db.Column(db.DateTime, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    platform = db.Column(db.String(20), default='platform_a')
 
-# ========== BILL PAYMENT MODEL ==========
+
 class BillPayment(db.Model):
     __tablename__ = 'bill_payments'
     
@@ -1201,10 +1471,11 @@ class BillPayment(db.Model):
     customer_phone = db.Column(db.String(20), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     completed_at = db.Column(db.DateTime, nullable=True)
+    platform = db.Column(db.String(20), default='platform_a')
     
     user = db.relationship('User', backref='bill_payments')
 
-# ========== BILLER MODEL ==========
+
 class Biller(db.Model):
     __tablename__ = 'billers'
     
@@ -1221,8 +1492,9 @@ class Biller(db.Model):
     api_key = db.Column(db.String(200), nullable=True)
     display_order = db.Column(db.Integer, default=0)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    platform = db.Column(db.String(20), default='platform_a')
 
-# ========== SMS LOG MODEL ==========
+
 class SMSLog(db.Model):
     __tablename__ = 'sms_logs'
     
@@ -1234,8 +1506,9 @@ class SMSLog(db.Model):
     status = db.Column(db.String(20), default='sent')
     error = db.Column(db.Text)
     sent_at = db.Column(db.DateTime, default=datetime.utcnow)
+    platform = db.Column(db.String(20), default='platform_a')
 
-# ========== EMAIL LOG MODEL ==========
+
 class EmailLog(db.Model):
     __tablename__ = 'email_logs'
     
@@ -1245,9 +1518,8 @@ class EmailLog(db.Model):
     status = db.Column(db.String(20))
     error = db.Column(db.Text)
     sent_at = db.Column(db.DateTime, default=datetime.utcnow)
+    platform = db.Column(db.String(20), default='platform_a')
 
-# ========== SYSTEM SETTING MODEL ==========
-# models.py - Add to SystemSetting class
 
 class SystemSetting(db.Model):
     __tablename__ = 'system_settings'
@@ -1259,6 +1531,7 @@ class SystemSetting(db.Model):
     description = db.Column(db.String(500))
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     updated_by = db.Column(db.Integer, db.ForeignKey('users.id'))
+    platform = db.Column(db.String(20), default='platform_a')
     
     @staticmethod
     def get(key, default=None):
@@ -1313,7 +1586,8 @@ class SystemSetting(db.Model):
         
         db.session.commit()
         return setting
-    
+
+
 class PriceSession(db.Model):
     """Store active price management sessions in database"""
     __tablename__ = 'price_sessions'
@@ -1324,6 +1598,7 @@ class PriceSession(db.Model):
     expires_at = db.Column(db.DateTime, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     is_active = db.Column(db.Boolean, default=True)
+    platform = db.Column(db.String(20), default='platform_a')
     
     # Relationship
     user = db.relationship('User', backref='price_sessions')
@@ -1338,7 +1613,7 @@ class PriceSession(db.Model):
             'is_active': self.is_active
         }
 
-# ========== NOTIFICATION TEMPLATE MODEL ==========
+
 class NotificationTemplate(db.Model):
     __tablename__ = 'notification_templates'
     
@@ -1352,8 +1627,9 @@ class NotificationTemplate(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     updated_by = db.Column(db.Integer, db.ForeignKey('users.id'))
+    platform = db.Column(db.String(20), default='platform_a')
 
-# ========== CONTACT MESSAGE MODEL ==========
+
 class ContactMessage(db.Model):
     __tablename__ = 'contact_messages'
     
@@ -1368,8 +1644,9 @@ class ContactMessage(db.Model):
     replied_at = db.Column(db.DateTime)
     reply_message = db.Column(db.Text)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    platform = db.Column(db.String(20), default='platform_a')
 
-# ========== FAQ MODEL ==========
+
 class FAQ(db.Model):
     __tablename__ = 'faqs'
     
@@ -1380,10 +1657,7 @@ class FAQ(db.Model):
     order = db.Column(db.Integer, default=0)
     is_active = db.Column(db.Boolean, default=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
-
-# ========== TESTIMONIAL MODEL ==========
-
-
+    platform = db.Column(db.String(20), default='platform_a')
 
 
 class Testimonial(db.Model):
@@ -1399,3 +1673,391 @@ class Testimonial(db.Model):
     is_verified = db.Column(db.Boolean, default=False)
     is_active = db.Column(db.Boolean, default=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    platform = db.Column(db.String(20), default='platform_a')
+
+class VisitorLog(db.Model):
+    """Track individual visitor sessions"""
+    __tablename__ = 'visitor_logs'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    session_id = db.Column(db.String(100), unique=True, nullable=False)  # Unique session identifier
+    visitor_id = db.Column(db.String(100), nullable=True)  # Persistent visitor ID (cookie-based)
+    ip_address = db.Column(db.String(45), nullable=True)
+    user_agent = db.Column(db.String(500), nullable=True)
+    
+    # Device & Browser Info
+    device_type = db.Column(db.String(50), default='desktop')  # desktop, mobile, tablet
+    browser = db.Column(db.String(50), default='other')  # chrome, firefox, safari, edge, other
+    os = db.Column(db.String(50), nullable=True)
+    screen_size = db.Column(db.String(50), nullable=True)
+    
+    # Geolocation (optional)
+    country = db.Column(db.String(100), nullable=True)
+    region = db.Column(db.String(100), nullable=True)
+    city = db.Column(db.String(100), nullable=True)
+    
+    # Referrer
+    referrer_url = db.Column(db.String(500), nullable=True)
+    landing_page = db.Column(db.String(500), nullable=True)
+    
+    # Session Tracking
+    first_visit = db.Column(db.DateTime, default=datetime.utcnow)
+    last_activity = db.Column(db.DateTime, default=datetime.utcnow)
+    page_views = db.Column(db.Integer, default=0)
+    session_duration = db.Column(db.Integer, default=0)  # In seconds
+    is_active = db.Column(db.Boolean, default=True)
+    platform = db.Column(db.String(20), default='platform_a')
+    
+    # Relationships
+    page_visits = db.relationship('PageVisit', backref='visitor', lazy=True)
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'session_id': self.session_id,
+            'visitor_id': self.visitor_id,
+            'ip_address': self.ip_address,
+            'device_type': self.device_type,
+            'browser': self.browser,
+            'os': self.os,
+            'country': self.country,
+            'referrer_url': self.referrer_url,
+            'landing_page': self.landing_page,
+            'first_visit': self.first_visit.isoformat() if self.first_visit else None,
+            'last_activity': self.last_activity.isoformat() if self.last_activity else None,
+            'page_views': self.page_views,
+            'session_duration': self.session_duration,
+            'is_active': self.is_active,
+            'platform': self.platform
+        }
+    
+    @staticmethod
+    def get_active_sessions():
+        """Get count of active sessions in the last 5 minutes"""
+        five_minutes_ago = datetime.utcnow() - timedelta(minutes=5)
+        return VisitorLog.query.filter(
+            VisitorLog.last_activity >= five_minutes_ago,
+            VisitorLog.is_active == True
+        ).count()
+    
+    @staticmethod
+    def get_unique_visitors_today():
+        """Get unique visitors for today"""
+        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        return db.session.query(db.func.count(db.distinct(VisitorLog.visitor_id))).filter(
+            VisitorLog.first_visit >= today_start,
+            VisitorLog.visitor_id.isnot(None)
+        ).scalar() or 0
+    
+    @staticmethod
+    def get_visitor_stats(platform='platform_a'):
+        """Get comprehensive visitor statistics"""
+        now = datetime.utcnow()
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        week_start = today_start - timedelta(days=today_start.weekday())
+        month_start = today_start.replace(day=1)
+        
+        # Filter by platform
+        platform_filter = VisitorLog.platform == platform
+        
+        # Total visitors (unique)
+        total_visitors = db.session.query(db.func.count(db.distinct(VisitorLog.visitor_id))).filter(
+            platform_filter,
+            VisitorLog.visitor_id.isnot(None)
+        ).scalar() or 0
+        
+        # Today's visitors
+        today_visitors = db.session.query(db.func.count(db.distinct(VisitorLog.visitor_id))).filter(
+            platform_filter,
+            VisitorLog.first_visit >= today_start,
+            VisitorLog.visitor_id.isnot(None)
+        ).scalar() or 0
+        
+        # This week's visitors
+        week_visitors = db.session.query(db.func.count(db.distinct(VisitorLog.visitor_id))).filter(
+            platform_filter,
+            VisitorLog.first_visit >= week_start,
+            VisitorLog.visitor_id.isnot(None)
+        ).scalar() or 0
+        
+        # This month's visitors
+        month_visitors = db.session.query(db.func.count(db.distinct(VisitorLog.visitor_id))).filter(
+            platform_filter,
+            VisitorLog.first_visit >= month_start,
+            VisitorLog.visitor_id.isnot(None)
+        ).scalar() or 0
+        
+        # Active now
+        five_minutes_ago = now - timedelta(minutes=5)
+        active_now = VisitorLog.query.filter(
+            platform_filter,
+            VisitorLog.last_activity >= five_minutes_ago,
+            VisitorLog.is_active == True
+        ).count()
+        
+        # Total page views
+        page_views = VisitorLog.query.filter(platform_filter).with_entities(
+            db.func.sum(VisitorLog.page_views)
+        ).scalar() or 0
+        
+        # Average session duration
+        avg_duration = db.session.query(db.func.avg(VisitorLog.session_duration)).filter(
+            platform_filter
+        ).scalar() or 0
+        
+        # Bounce rate (sessions with only 1 page view)
+        total_sessions = VisitorLog.query.filter(platform_filter).count()
+        bounced_sessions = VisitorLog.query.filter(
+            platform_filter,
+            VisitorLog.page_views == 1
+        ).count()
+        bounce_rate = (bounced_sessions / total_sessions * 100) if total_sessions > 0 else 0
+        
+        # Device breakdown
+        devices = db.session.query(
+            VisitorLog.device_type,
+            db.func.count(VisitorLog.id)
+        ).filter(platform_filter).group_by(VisitorLog.device_type).all()
+        device_stats = {device: count for device, count in devices}
+        
+        # Browser breakdown
+        browsers = db.session.query(
+            VisitorLog.browser,
+            db.func.count(VisitorLog.id)
+        ).filter(platform_filter).group_by(VisitorLog.browser).all()
+        browser_stats = {browser: count for browser, count in browsers}
+        
+        # Top pages
+        top_pages = db.session.query(
+            PageVisit.page_url,
+            db.func.count(PageVisit.id)
+        ).join(VisitorLog).filter(
+            VisitorLog.platform == platform
+        ).group_by(PageVisit.page_url).order_by(
+            db.func.count(PageVisit.id).desc()
+        ).limit(10).all()
+        
+        top_pages_data = [{'page': page, 'views': views} for page, views in top_pages]
+        
+        return {
+            'total_visitors': total_visitors,
+            'unique_visitors': total_visitors,
+            'today_visitors': today_visitors,
+            'this_week_visitors': week_visitors,
+            'this_month_visitors': month_visitors,
+            'active_now': active_now,
+            'page_views': page_views,
+            'bounce_rate': round(bounce_rate, 2),
+            'avg_session_duration': round(avg_duration / 60, 1),  # Convert to minutes
+            'devices': {
+                'desktop': device_stats.get('desktop', 0),
+                'mobile': device_stats.get('mobile', 0),
+                'tablet': device_stats.get('tablet', 0)
+            },
+            'browsers': {
+                'chrome': browser_stats.get('chrome', 0),
+                'firefox': browser_stats.get('firefox', 0),
+                'safari': browser_stats.get('safari', 0),
+                'edge': browser_stats.get('edge', 0),
+                'other': browser_stats.get('other', 0)
+            },
+            'top_pages': top_pages_data
+        }
+
+
+class PageVisit(db.Model):
+    """Track individual page visits"""
+    __tablename__ = 'page_visits'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    visitor_id = db.Column(db.Integer, db.ForeignKey('visitor_logs.id'), nullable=False)
+    page_url = db.Column(db.String(500), nullable=False)
+    page_title = db.Column(db.String(255), nullable=True)
+    referrer_url = db.Column(db.String(500), nullable=True)
+    time_spent = db.Column(db.Integer, default=0)  # In seconds
+    scroll_depth = db.Column(db.Integer, default=0)  # Percentage
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'page_url': self.page_url,
+            'page_title': self.page_title,
+            'time_spent': self.time_spent,
+            'scroll_depth': self.scroll_depth,
+            'created_at': self.created_at.isoformat() if self.created_at else None
+        }
+
+class PointsRedemption(db.Model):
+    __tablename__ = 'points_redemptions'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    points_used = db.Column(db.Integer, nullable=False)
+    redeemed_value = db.Column(db.Float, nullable=False)
+    redemption_type = db.Column(db.String(30), nullable=False)
+    details = db.Column(db.JSON, nullable=True)
+    status = db.Column(db.String(20), default='pending')
+    platform = db.Column(db.String(20), default='platform_b')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    completed_at = db.Column(db.DateTime, nullable=True)
+
+
+# ============================================================
+# CUSTOMER (NEW)
+# ============================================================
+class Customer(db.Model):
+    __tablename__ = 'customers'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100))
+    phone = db.Column(db.String(20), nullable=False)
+    email = db.Column(db.String(100))
+    agent_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    total_spent = db.Column(db.Numeric(10, 2), default=0)
+    order_count = db.Column(db.Integer, default=0)
+    platform = db.Column(db.String(20), default='platform_a')
+    last_purchase = db.Column(db.DateTime)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # ========== RELATIONSHIP ==========
+    # ✅ Add this relationship - creates 'customers' backref on User
+    agent = db.relationship('User', backref='customers')
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'name': self.name,
+            'phone': self.phone,
+            'email': self.email,
+            'total_spent': float(self.total_spent) if self.total_spent else 0,
+            'order_count': self.order_count,
+            'platform': self.platform,
+            'last_purchase': self.last_purchase.isoformat() if self.last_purchase else None,
+            'created_at': self.created_at.isoformat() if self.created_at else None
+        }
+
+# ============================================================
+# COMMISSION TRANSACTION (NEW)
+# ============================================================
+class CommissionTransaction(db.Model):
+    __tablename__ = 'commission_transactions'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    order_id = db.Column(db.String(50), nullable=False)
+    transaction_type = db.Column(db.String(50), nullable=False)
+    amount = db.Column(db.Numeric(10, 2), nullable=False)
+    hubtel_commission_rate = db.Column(db.Numeric(5, 4))
+    total_commission = db.Column(db.Numeric(10, 2), nullable=False)
+    admin_commission = db.Column(db.Numeric(10, 2), nullable=False)
+    initiator_commission = db.Column(db.Numeric(10, 2), nullable=False)
+    initiator_type = db.Column(db.String(20), nullable=False)
+    initiator_id = db.Column(db.Integer, nullable=False)
+    admin_id = db.Column(db.Integer)
+    status = db.Column(db.String(20), default='completed')
+    platform = db.Column(db.String(20), default='platform_b')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'order_id': self.order_id,
+            'transaction_type': self.transaction_type,
+            'amount': float(self.amount),
+            'hubtel_commission_rate': float(self.hubtel_commission_rate) if self.hubtel_commission_rate else 0,
+            'total_commission': float(self.total_commission),
+            'admin_commission': float(self.admin_commission),
+            'initiator_commission': float(self.initiator_commission),
+            'initiator_type': self.initiator_type,
+            'status': self.status,
+            'platform': self.platform,
+            'created_at': self.created_at.isoformat() if self.created_at else None
+        }
+
+
+# ============================================================
+# COMMISSION RATE (NEW)
+# ============================================================
+class CommissionRate(db.Model):
+    __tablename__ = 'commission_rates'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    service_type = db.Column(db.String(50), unique=True, nullable=False)
+    service_name = db.Column(db.String(100), nullable=False)
+    hubtel_commission_rate = db.Column(db.Numeric(5, 4), nullable=False)
+    admin_share = db.Column(db.Numeric(5, 2), default=30.00)
+    initiator_share = db.Column(db.Numeric(5, 2), default=70.00)
+    is_active = db.Column(db.Boolean, default=True)
+    platform = db.Column(db.String(20), default='platform_b')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'service_type': self.service_type,
+            'service_name': self.service_name,
+            'hubtel_commission_rate': float(self.hubtel_commission_rate),
+            'admin_share': float(self.admin_share),
+            'initiator_share': float(self.initiator_share),
+            'is_active': self.is_active,
+            'platform': self.platform
+        }
+
+
+# ============================================================
+# REFUND REQUEST (NEW)
+# ============================================================
+class RefundRequest(db.Model):
+    __tablename__ = 'refund_requests'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    order_id = db.Column(db.String(100), nullable=False)
+    amount = db.Column(db.Float, default=0)
+    charges = db.Column(db.Float, default=0)
+    reason = db.Column(db.String(500), nullable=True)
+    status = db.Column(db.String(20), default='pending')
+    response_code = db.Column(db.String(10), nullable=True)
+    external_transaction_id = db.Column(db.String(100), nullable=True)
+    error_message = db.Column(db.String(500), nullable=True)
+    platform = db.Column(db.String(20), default='platform_a')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    completed_at = db.Column(db.DateTime, nullable=True)
+    
+    # ✅ Use back_populates to match User
+    user = db.relationship('User', back_populates='refund_requests')
+
+# ============================================================
+# ADMIN LOG (NEW)
+# ============================================================
+class AdminLog(db.Model):
+    __tablename__ = 'admin_logs'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    admin_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    action = db.Column(db.String(50), nullable=False)
+    target_id = db.Column(db.Integer, nullable=True)
+    target_type = db.Column(db.String(50), nullable=True)
+    details = db.Column(db.Text, nullable=True)
+    ip_address = db.Column(db.String(45), nullable=True)
+    platform = db.Column(db.String(20), default='platform_a')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    # ✅ Use back_populates instead of backref
+    admin = db.relationship('User', back_populates='admin_logs')
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'admin_id': self.admin_id,
+            'admin_name': self.admin.username if self.admin else None,
+            'action': self.action,
+            'target_id': self.target_id,
+            'target_type': self.target_type,
+            'details': self.details,
+            'ip_address': self.ip_address,
+            'platform': self.platform,
+            'created_at': self.created_at.isoformat() if self.created_at else None
+        }
