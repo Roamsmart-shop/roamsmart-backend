@@ -170,9 +170,9 @@ class User(db.Model):
     # ✅ Use back_populates for RefundRequest
     refund_requests = db.relationship('RefundRequest', back_populates='user', lazy=True)
     admin_logs = db.relationship('AdminLog', back_populates='admin', lazy=True)
-    # customers = db.relationship('Customer', back_populates='agent', lazy=True)
+   
     
-    # ========== SECURITY METHODS ==========
+   
     def increment_failed_attempts(self, ip_address=None):
         from datetime import datetime, timedelta
         self.failed_login_attempts += 1

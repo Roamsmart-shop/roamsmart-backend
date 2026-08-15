@@ -196,8 +196,8 @@ print("[DEBUG] ===== RATE LIMITER INITIALIZATION COMPLETE =====\n")
 # ========== CORS CONFIGURATION ==========
 def get_allowed_origins():
     origins = [
-        'http://localhost:3000',      # ✅ ADD THIS - your frontend port
-        'http://localhost:3001',      # Keep this too
+        'http://localhost:3000',      
+        'http://localhost:3001',      
         'http://localhost:5000',
         'http://127.0.0.1:3000',
         'http://127.0.0.1:5000',
@@ -270,7 +270,7 @@ if AFRICASTALKING_API_KEY and AFRICASTALKING_API_KEY != 'mock_key':
 else:
     print("[Africa's Talking] No API key found - SMS will not be sent")
 
-# ========== SECURITY HEADERS ==========
+
 @app.after_request
 def add_security_headers(response):
     """Add security headers to prevent XSS and other attacks"""
@@ -459,15 +459,13 @@ def detect_platform():
     g.platform = 'platform_a'
     g.platform_config = PLATFORMS['platform_a']
     
-    # Check if request is from a known platform
     for platform_key, platform_config in PLATFORMS.items():
         if platform_config['domain'] in origin or platform_config['domain'] in host:
             g.platform = platform_key
             g.platform_config = platform_config
             print(f"[PLATFORM] Detected: {platform_key} ({platform_config['name']})")
             break
-    
-    # For API requests, check Authorization token
+
     if 'Authorization' in request.headers:
         token = request.headers.get('Authorization')
         try:
@@ -780,7 +778,6 @@ class PhoneVerificationService:
         }
 
 
-# Initialize verification service
 verification_service = PhoneVerificationService()
 
 # ========== PAYSTACK CONFIGURATION ==========
