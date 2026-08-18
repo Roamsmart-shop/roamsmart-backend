@@ -434,7 +434,7 @@ class Order(db.Model):
     platform = db.Column(db.String(20), default='platform_a')
     platform_created = db.Column(db.String(20), default='platform_a')
     
-    # ========== COMMISSION FIELDS ==========  # ✅ ADDED
+    # ========== COMMISSION FIELDS ==========
     hubtel_commission_rate = db.Column(db.Float, default=0.0)
     total_commission = db.Column(db.Float, default=0.0)
     admin_commission = db.Column(db.Float, default=0.0)
@@ -447,10 +447,15 @@ class Order(db.Model):
     commission_amount = db.Column(db.Float, default=0.0)
     agent_commission = db.Column(db.Float, default=0.0)
     
-    # ========== RESOLUTION FIELDS ==========  # ✅ ADDED
+    # ========== RESOLUTION FIELDS ==========
     resolved_at = db.Column(db.DateTime, nullable=True)
     resolved_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     resolution_note = db.Column(db.String(500), nullable=True)
+    
+    # ========== ERROR FIELDS (ADD THESE) ==========
+    error_type = db.Column(db.String(100), nullable=True)
+    error_code = db.Column(db.String(100), nullable=True)
+    user_message = db.Column(db.Text, nullable=True)
     
     customer = db.relationship('User', foreign_keys=[user_id], backref='purchases')
     agent = db.relationship('User', foreign_keys=[agent_id], backref='sales')

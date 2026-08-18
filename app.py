@@ -14448,11 +14448,8 @@ def agent_sell():
         print(f"🔍 GETTING AGENT WHOLESALE PRICE FOR {delivery_type.upper()}")
         print(f"{'='*60}")
         
-        # Get delivery-specific price
         from models import PriceSetting
         
-        # Method 1: Try delivery-specific price
-        print(f"\n📊 Method 1: Checking delivery-specific price for {delivery_type}")
         setting = PriceSetting.query.filter_by(
             category='agent_price',
             network=network,
@@ -14464,11 +14461,7 @@ def agent_sell():
         if setting:
             agent_cost = float(setting.price)
             print(f"   ✅ Found {delivery_type} price: ₵{agent_cost}")
-            print(f"   📋 PriceSetting record: id={setting.id}, category={setting.category}, network={setting.network}, size_gb={setting.size_gb}, delivery_type={setting.delivery_type}, price={setting.price}")
         else:
-            print(f"   ⚠️ No {delivery_type} price found, checking base price...")
-            
-            # Method 2: Fallback to base price
             setting = PriceSetting.query.filter_by(
                 category='agent_price',
                 network=network,
@@ -14480,7 +14473,6 @@ def agent_sell():
             if setting:
                 agent_cost = float(setting.price)
                 print(f"   ✅ Found base price: ₵{agent_cost}")
-                print(f"   📋 PriceSetting record: id={setting.id}, category={setting.category}, network={setting.network}, size_gb={setting.size_gb}, price={setting.price}")
             else:
                 agent_cost = 0
                 print(f"   ❌ No price found for {network} {size_gb}GB")
@@ -14494,7 +14486,6 @@ def agent_sell():
         total_cost = agent_cost * quantity
         print(f"💰 Total Cost (Wholesale): GHS {total_cost}")
         
-        # If selling price not provided, calculate it with markup
         if not selling_price:
             markup = db.session.query(StoreSettings.markup).filter_by(agent_id=g.current_user.id).scalar() or 15
             selling_price = total_cost * (1 + markup / 100)
@@ -14504,7 +14495,6 @@ def agent_sell():
         print(f"💰 Total Revenue (Customer pays): GHS {total_revenue}")
         print(f"💰 Agent Profit: GHS {total_revenue - total_cost}")
         
-        # Check agent's wallet balance
         print(f"💳 Agent Wallet Balance: GHS {g.current_user.wallet_balance}")
         
         if g.current_user.wallet_balance < total_cost:
@@ -14513,7 +14503,6 @@ def agent_sell():
                 'error': f'Insufficient wallet balance. Need GHS {total_cost:.2f}'
             }), 400
         
-        # Generate order ID
         order_id = f"ORD-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{g.current_user.id}"
         print(f"🆔 Generated Order ID: {order_id}")
         
@@ -14530,7 +14519,6 @@ def agent_sell():
                 offer_slug = delivery_setting.offer_slug
                 print(f"📦 Found offer_slug in delivery_settings: {offer_slug}")
             else:
-                # Fallback defaults
                 if delivery_type == 'express':
                     offer_slug = 'mtn_express_bundle'
                 elif delivery_type == 'master':
@@ -14541,12 +14529,10 @@ def agent_sell():
         
         print(f"📦 FINAL OFFER_SLUG: {offer_slug}")
         
-        # Deduct from agent's wallet
+        # Store balance before any deduction
         balance_before = g.current_user.wallet_balance
-        g.current_user.wallet_balance -= total_cost
-        print(f"💰 Wallet: GHS {balance_before} -> GHS {g.current_user.wallet_balance} (deducted GHS {total_cost})")
         
-        # Create order
+        # ========== CREATE ORDER WITH PENDING STATUS (NO DEDUCTION YET) ==========
         order = Order(
             user_id=g.current_user.id,
             agent_id=g.current_user.id,
@@ -14560,62 +14546,63 @@ def agent_sell():
             cost=total_cost,
             profit=total_revenue - total_cost,
             quantity=quantity,
-            status='completed',
+            status='pending',
             delivery_status='pending',
             delivery_status_updated_at=datetime.utcnow(),
             payment_method='wallet',
-            completed_at=datetime.utcnow(),
+            completed_at=None,
             created_at=datetime.utcnow(),
             delivery_type=delivery_type,
-            offer_slug=offer_slug
+            offer_slug=offer_slug,
+            platform=g.current_user.platform if hasattr(g.current_user, 'platform') else 'platform_a',
+            platform_created=g.current_user.platform if hasattr(g.current_user, 'platform') else 'platform_a'
         )
         db.session.add(order)
-        print(f"📝 Order created in database (ID: {order.id})")
+        db.session.flush()
+        print(f"📝 Order created in database (ID: {order.id}) with PENDING status")
         
         # Create transaction record
         transaction = Transaction(
             user_id=g.current_user.id,
-            type='sale',
+            type='sale_pending',
             amount=total_cost,
             balance_before=balance_before,
-            balance_after=g.current_user.wallet_balance,
-            description=f'Sale: {quantity}x {size_gb}GB {network} to {phone} ({delivery_type})',
+            balance_after=balance_before,
+            description=f'Pending: {quantity}x {size_gb}GB {network} to {phone} ({delivery_type})',
             reference=order_id,
-            status='completed'
+            status='pending'
         )
         db.session.add(transaction)
-        print(f"📝 Transaction record created")
-        
-        # Update agent's stats
-        g.current_user.total_sales = (g.current_user.total_sales or 0) + total_revenue
-        print(f"📊 Agent total sales updated: GHS {g.current_user.total_sales}")
+        db.session.flush()
+        print(f"📝 Transaction record created with PENDING status")
         
         # Add to store clients
+        client_id = None
         if customer_name or phone:
             try:
                 from models import StoreClient
                 client = StoreClient.query.filter_by(phone=phone, agent_id=g.current_user.id).first()
                 if client:
-                    client.total_spent = (client.total_spent or 0) + total_revenue
-                    client.order_count = (client.order_count or 0) + 1
-                    client.last_purchase = datetime.utcnow()
-                    print(f"👥 Updated existing client: {customer_name or 'Customer'}")
+                    client_id = client.id
+                    print(f"👥 Found existing client: {customer_name or 'Customer'}")
                 else:
                     client = StoreClient(
                         agent_id=g.current_user.id,
                         name=customer_name or 'Customer',
                         phone=phone,
-                        total_spent=total_revenue,
-                        order_count=1,
+                        total_spent=0,
+                        order_count=0,
                         last_purchase=datetime.utcnow()
                     )
                     db.session.add(client)
+                    db.session.flush()
+                    client_id = client.id
                     print(f"👥 Created new client: {customer_name or 'Customer'}")
             except Exception as e:
                 print(f"❌ StoreClient error: {e}")
         
         db.session.commit()
-        print(f"💾 Database changes committed")
+        print(f"💾 Database changes committed (order pending, no deduction yet)")
         
         # ========== DIGIMALL DELIVERY ==========
         print(f"\n{'='*60}")
@@ -14623,6 +14610,12 @@ def agent_sell():
         print(f"{'='*60}")
         
         digimall_result = None
+        delivery_success = False
+        error_msg = None
+        error_type = None
+        error_code = None
+        user_message = None
+        
         try:
             digimall = DigimallService()
             
@@ -14643,13 +14636,7 @@ def agent_sell():
             print(f"   Result: {digimall_result}")
             
             if digimall_result and digimall_result.get('orderId'):
-                order.provider = 'digimall'
-                order.provider_order_id = digimall_result.get('orderId')
-                order.provider_reference = digimall_result.get('reference')
-                order.provider_cost = digimall_result.get('totalAmount', 0)
-                order.delivery_status = 'processing'
-                order.delivery_status_updated_at = datetime.utcnow()
-                db.session.commit()
+                delivery_success = True
                 print(f"\n✅ DIGIMALL DELIVERY SUCCESS!")
                 print(f"   Order ID: {digimall_result.get('orderId')}")
                 print(f"   Reference: {digimall_result.get('reference')}")
@@ -14657,12 +14644,12 @@ def agent_sell():
                 print(f"   Amount: GHS {digimall_result.get('totalAmount', 0)}")
             else:
                 error_msg = digimall_result.get('error') if digimall_result else 'No response from Digimall'
+                error_type = digimall_result.get('type') if digimall_result else None
+                error_code = digimall_result.get('code') if digimall_result else None
                 print(f"\n❌ DIGIMALL DELIVERY FAILED!")
                 print(f"   Error: {error_msg}")
-                order.delivery_status = 'failed'
-                order.delivery_status_updated_at = datetime.utcnow()
-                order.last_delivery_error = error_msg
-                db.session.commit()
+                print(f"   Type: {error_type}")
+                print(f"   Code: {error_code}")
                 
         except Exception as e:
             print(f"\n❌ DIGIMALL EXCEPTION!")
@@ -14670,31 +14657,127 @@ def agent_sell():
             print(f"   Error message: {str(e)}")
             import traceback
             traceback.print_exc()
-            order.delivery_status = 'failed'
+            error_msg = str(e)
+            error_type = 'EXCEPTION'
+        
+        # ========== UPDATE ORDER BASED ON DELIVERY RESULT ==========
+        if delivery_success:
+            print(f"\n{'='*60}")
+            print(f"✅ DELIVERY SUCCESSFUL - PROCESSING PAYMENT")
+            print(f"{'='*60}")
+            
+            new_balance = balance_before - total_cost
+            g.current_user.wallet_balance = new_balance
+            
+            order.status = 'completed'
+            order.delivery_status = 'processing'
+            order.completed_at = datetime.utcnow()
+            order.provider = 'digimall'
+            order.provider_order_id = digimall_result.get('orderId')
+            order.provider_reference = digimall_result.get('reference')
+            order.provider_cost = digimall_result.get('totalAmount', 0)
             order.delivery_status_updated_at = datetime.utcnow()
-            order.last_delivery_error = str(e)
+            
+            transaction.status = 'completed'
+            transaction.type = 'sale'
+            transaction.balance_before = balance_before
+            transaction.balance_after = new_balance
+            transaction.description = f'Sale: {quantity}x {size_gb}GB {network} to {phone} ({delivery_type})'
+            
+            g.current_user.total_sales = (g.current_user.total_sales or 0) + total_revenue
+            
+            if client_id:
+                try:
+                    client = StoreClient.query.get(client_id)
+                    if client:
+                        client.total_spent = (client.total_spent or 0) + total_revenue
+                        client.order_count = (client.order_count or 0) + 1
+                        client.last_purchase = datetime.utcnow()
+                except Exception as e:
+                    print(f"❌ Client update error: {e}")
+            
             db.session.commit()
-        
-        print(f"\n{'='*60}")
-        print(f"🏁 AGENT SELL COMPLETED")
-        print(f"{'='*60}")
-        
-        return jsonify({
-            'success': True,
-            'message': f'Sold {quantity}x {size_gb}GB {network.upper()} to {phone} ({delivery_type})',
-            'data': {
-                'order_id': order_id,
-                'amount_deducted': float(total_cost),
-                'customer_paid': float(total_revenue),
-                'profit': float(total_revenue - total_cost),
-                'balance': float(g.current_user.wallet_balance),
-                'delivery_status': order.delivery_status,
-                'delivery_type': delivery_type,
-                'offer_slug': offer_slug,
-                'digimall_delivery': digimall_result.get('orderId') is not None if digimall_result else False,
-                'digimall_response': digimall_result if digimall_result else None
-            }
-        })
+            print(f"💰 Wallet: GHS {balance_before} -> GHS {new_balance} (deducted GHS {total_cost})")
+            print(f"📊 Agent total sales updated: GHS {g.current_user.total_sales}")
+            print(f"💾 Database updated with SUCCESS status")
+            
+            return jsonify({
+                'success': True,
+                'message': f'Sold {quantity}x {size_gb}GB {network.upper()} to {phone} ({delivery_type})',
+                'data': {
+                    'order_id': order_id,
+                    'amount_deducted': float(total_cost),
+                    'customer_paid': float(total_revenue),
+                    'profit': float(total_revenue - total_cost),
+                    'balance': float(g.current_user.wallet_balance),
+                    'delivery_status': order.delivery_status,
+                    'delivery_type': delivery_type,
+                    'offer_slug': offer_slug,
+                    'digimall_delivery': True,
+                    'digimall_response': digimall_result,
+                    'money_deducted': True,
+                    'refunded': False
+                }
+            })
+            
+        else:
+            print(f"\n{'='*60}")
+            print(f"❌ DELIVERY FAILED - NO MONEY DEDUCTED (REFUNDED)")
+            print(f"{'='*60}")
+            
+            # Generate user-friendly message
+            if error_type == 'INVALID_PACKAGE':
+                user_message = "Please select 'Express' delivery. 'Master' is currently not available for this network."
+            elif error_type == 'RECIPIENT_NOT_ELIGIBLE_FOR_RESTRICTED_MTN_UP2U' or error_code == 'RECIPIENT_NOT_VERIFIED_FOR_RESTRICTED_MTN_PROVIDER':
+                user_message = "Please wait, this bundle may take up to 48 hours to deliver as the number needs to be added to the database."
+            elif error_type == 'INSUFFICIENT_BALANCE':
+                user_message = "Insufficient wallet balance. Please fund your wallet and try again."
+            elif 'not found' in str(error_msg).lower():
+                user_message = "Please select 'Express' delivery. The selected bundle is currently not available."
+            else:
+                user_message = "Delivery failed. Please try again or contact support."
+            
+            order.status = 'failed'
+            order.delivery_status = 'failed'
+            order.completed_at = datetime.utcnow()
+            order.last_delivery_error = error_msg
+            order.error_type = error_type  # This field needs to exist in Order model
+            order.error_code = error_code  # This field needs to exist in Order model
+            order.user_message = user_message  # This field needs to exist in Order model
+            order.delivery_status_updated_at = datetime.utcnow()
+            
+            transaction.status = 'failed'
+            transaction.type = 'sale_failed'
+            transaction.balance_before = balance_before
+            transaction.balance_after = balance_before
+            transaction.description = f'FAILED: {quantity}x {size_gb}GB {network} to {phone} ({delivery_type}) - {error_msg}'
+            
+            db.session.commit()
+            print(f"💰 NO MONEY DEDUCTED - Wallet balance unchanged: GHS {balance_before}")
+            print(f"💾 Database updated with FAILED status (no deduction)")
+            
+            return jsonify({
+                'success': True,
+                'message': f'Sold {quantity}x {size_gb}GB {network.upper()} to {phone} ({delivery_type})',
+                'data': {
+                    'order_id': order_id,
+                    'amount_deducted': 0,
+                    'customer_paid': float(total_revenue),
+                    'profit': 0,
+                    'balance': float(g.current_user.wallet_balance),
+                    'delivery_status': order.delivery_status,
+                    'delivery_type': delivery_type,
+                    'offer_slug': offer_slug,
+                    'digimall_delivery': False,
+                    'digimall_response': digimall_result if digimall_result else None,
+                    'error_message': error_msg,
+                    'error_type': error_type,
+                    'error_code': error_code,
+                    'user_message': user_message,
+                    'money_deducted': False,
+                    'refunded': True
+                }
+            })
         
     except Exception as e:
         print(f"\n{'='*60}")
