@@ -14367,7 +14367,7 @@ def get_agent_dashboard():
         # Calculate commission earned (15% of sales)
         commissions = total_sales * (g.current_user.commission_rate or 15) / 100
         
-        # Get total customers (store clients)
+        
         total_customers = StoreClient.query.filter_by(
             agent_id=g.current_user.id
         ).count()
@@ -14443,7 +14443,7 @@ def agent_sell():
         if not all([network, size_gb, phone]):
             return jsonify({'success': False, 'error': 'Missing required fields'}), 400
         
-        # ========== GET AGENT WHOLESALE PRICE WITH DELIVERY TYPE ==========
+        
         print(f"\n{'='*60}")
         print(f"🔍 GETTING AGENT WHOLESALE PRICE FOR {delivery_type.upper()}")
         print(f"{'='*60}")
