@@ -515,9 +515,8 @@ class PhoneVerificationService:
             return phone
         return phone
     
-    def get_platform_config(self, platform='platform_a'):
+    def get_platform_config(self, platform='platform_a'):  # <-- FIXED: Added 'self' parameter
         """Get platform configuration for branding"""
-        from platform_config import PLATFORMS
         return PLATFORMS.get(platform, PLATFORMS.get('platform_a'))
     
     def send_sms(self, phone_number, code, platform='platform_a'):
@@ -1206,9 +1205,8 @@ def broadcast_announcement_update(action, announcement_data=None):
 
 def get_platform_config(platform='platform_a'):
     """Get platform configuration for branding"""
-    from platform_config import PLATFORMS
+    # Directly use PLATFORMS from the global scope
     return PLATFORMS.get(platform, PLATFORMS.get('platform_a'))
-
 # ============================================================
 # GENERATE VERIFICATION CODE
 # ============================================================
@@ -1783,20 +1781,29 @@ def log_sms(phone, message, sms_type, provider):
         print(f"Failed to log SMS: {e}")
 
 
-def log_email(recipient, subject, status, error=None):
+def log_email(recipient, subject, status, error=None, platform='platform_a'):
     """Log email delivery for audit"""
     try:
+        # Get platform name for logging (optional)
+        try:
+            platform_config = get_platform_config(platform)
+            platform_name = platform_config.get('name', platform) if platform_config else platform
+        except:
+            platform_name = platform
+        
         email_log = EmailLog(
             recipient=recipient,
             subject=subject[:200],
             status=status,
             error=error,
+            platform=platform,
             sent_at=datetime.utcnow()
         )
         db.session.add(email_log)
         db.session.commit()
+        print(f"[EMAIL LOG] ✅ Logged: {recipient} - {status} on {platform_name}")
     except Exception as e:
-        print(f"Failed to log email: {e}")
+        print(f"[EMAIL LOG] ❌ Failed to log email: {e}")
 
 
 def send_sms(phone, message):
@@ -4292,29 +4299,47 @@ def register():
         password = data.get('password')
         referral_code = data.get('referral_code')
         
-        print(f"\n{'='*60}")
-        print(f"[REGISTER ATTEMPT]")
-        print(f"  Username: {username}")
-        print(f"  Email: {email}")
-        print(f"  Phone: {phone}")
-        print(f"  Platform: {getattr(g, 'platform', 'platform_a')}")
-        print(f"{'='*60}")
-        
-        if not all([username, email, phone, password]):
-            return jsonify({'success': False, 'error': 'All fields required'}), 400
-        
-        # Check if user exists
-        if User.query.filter_by(email=email).first():
-            return jsonify({'success': False, 'error': 'Email already registered'}), 400
-        
-        if User.query.filter_by(phone=phone).first():
-            return jsonify({'success': False, 'error': 'Phone already registered'}), 400
-        
         # Get platform info
         platform = getattr(g, 'platform', 'platform_a')
         platform_config = PLATFORMS.get(platform, PLATFORMS['platform_a'])
         platform_name = platform_config.get('brand_name', 'AFDALNOVA')
         
+        print(f"\n{'='*60}")
+        print(f"[REGISTER ATTEMPT]")
+        print(f"  Username: {username}")
+        print(f"  Email: {email}")
+        print(f"  Phone: {phone}")
+        print(f"  Platform: {platform} ({platform_name})")
+        print(f"{'='*60}")
+        
+        # Validate required fields
+        if not all([username, email, phone, password]):
+            print("[REGISTER ERROR] Missing required fields")
+            return jsonify({'success': False, 'error': 'All fields required'}), 400
+        
+        # Validate email format
+        import re
+        if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', email):
+            print(f"[REGISTER ERROR] Invalid email format: {email}")
+            return jsonify({'success': False, 'error': 'Invalid email format'}), 400
+        
+        # Validate password length
+        if len(password) < 8:
+            print("[REGISTER ERROR] Password too short")
+            return jsonify({'success': False, 'error': 'Password must be at least 8 characters'}), 400
+        
+        # Check if user exists
+        if User.query.filter_by(email=email).first():
+            print(f"[REGISTER ERROR] Email already registered: {email}")
+            return jsonify({'success': False, 'error': 'Email already registered'}), 400
+        
+        # Normalize phone
+        normalized_phone = verification_service.normalize_phone(phone)
+        if User.query.filter_by(phone=normalized_phone).first():
+            print(f"[REGISTER ERROR] Phone already registered: {normalized_phone}")
+            return jsonify({'success': False, 'error': 'Phone already registered'}), 400
+        
+        # Generate verification code
         verification_code = verification_service.generate_verification_code()
         
         # Store in Redis (10 minutes expiry)
@@ -4323,7 +4348,7 @@ def register():
             {
                 'username': username,
                 'email': email,
-                'phone': phone,
+                'phone': normalized_phone,
                 'password': password,
                 'referral_code': referral_code,
                 'verification_code': verification_code,
@@ -4337,7 +4362,8 @@ def register():
         print(f"[REGISTER] Verification code: {verification_code}")
         
         # Try SMS first, then email fallback
-        sms_sent = verification_service.send_sms(phone, verification_code)
+        # FIX: Pass the platform parameter
+        sms_sent = verification_service.send_sms(phone, verification_code, platform)
         
         if sms_sent.get('success'):
             return jsonify({
@@ -4350,7 +4376,7 @@ def register():
             })
         else:
             # SMS failed - send email
-            email_sent = send_verification_email(email, username, verification_code, platform_name)
+            email_sent = send_verification_email(email, username, verification_code, platform)
             if email_sent:
                 return jsonify({
                     'success': True,
@@ -4371,7 +4397,6 @@ def register():
         import traceback
         traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
-
 
 @app.route('/api/auth/verify-code', methods=['POST'])
 @limiter.limit("10 per minute")
